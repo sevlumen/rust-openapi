@@ -1535,3 +1535,30 @@ fn hex(value: u8) -> Option<u8> {
 }
 
 const SWAGGER_HTML: &str = r##"<!doctype html><html><head><title>Swagger UI</title></head><body><div id="swagger-ui">Swagger UI</div><script>fetch('/openapi.json').then(r=>r.json()).then(d=>document.getElementById('swagger-ui').textContent=JSON.stringify(d))</script></body></html>"##;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn openapi_document_is_prepared_once_for_server_dispatch() {
+        let mut app = App::new();
+        app.get("/plaintext", || async { "OK" });
+        app.openapi("/openapi.json");
+        assert!(app.openapi_bytes.is_none());
+
+        app.prepare_openapi();
+        let prepared = app.openapi_bytes.clone().expect("prepared document");
+        let response = app
+            .handle(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/openapi.json")
+                    .body(Bytes::new())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(app.openapi_bytes.as_ref(), Some(&prepared));
+    }
+}
