@@ -125,7 +125,8 @@ async fn app_registers_static_dynamic_and_query_routes() {
     let mut app = App::new().with_state(TestState);
     app.get("/plaintext", hello)
         .tag("Benchmark")
-        .summary("Static response");
+        .summary("Static response")
+        .operation_id("getPlaintext");
     app.get("/users/{id}", user).tag("Users");
     app.get("/search", search);
 
@@ -218,6 +219,10 @@ fn openapi_describes_registered_operations() {
         document["paths"]["/plaintext"]["get"]["summary"],
         "Static response"
     );
+    assert_eq!(
+        document["paths"]["/plaintext"]["get"]["operationId"],
+        "getPlaintext"
+    );
 }
 
 #[tokio::test]
@@ -270,6 +275,14 @@ fn duplicate_routes_are_rejected_at_registration() {
     let mut app = App::new();
     app.get("/duplicate", hello);
     app.get("/duplicate", hello);
+}
+
+#[test]
+#[should_panic(expected = "duplicate operation id")]
+fn duplicate_operation_ids_are_rejected_at_registration() {
+    let mut app = App::new();
+    app.get("/one", hello).operation_id("same");
+    app.get("/two", hello).operation_id("same");
 }
 
 #[test]
