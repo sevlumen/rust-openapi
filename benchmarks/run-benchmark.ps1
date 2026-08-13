@@ -173,6 +173,12 @@ $reportRows = foreach ($case in $Cases) { foreach ($vu in $Vus) {
     $rawMean = ($rawRpsValues | Measure-Object -Average).Average
     $rawCv = if ($rawMean -eq 0) { [double]::PositiveInfinity } else { (Get-StdDev $rawRpsValues) / $rawMean }
     $errors = @($rawMetrics + $oasMetrics | ForEach-Object { [double]$_.metrics.measured_errors.count } | Measure-Object -Sum).Sum
+    $invalidTiming = @($rawMetrics + $oasMetrics | ForEach-Object {
+        $duration = $_.metrics.measured_http_req_duration
+        @('min', 'med', 'max', 'p(95)', 'p(99)', 'p(99.9)') | ForEach-Object {
+            [double]$duration.$_ -lt 0
+        }
+    }) -contains $true
     $rawStatsRecords = @($rawRecords)
     $oasStatsRecords = @($oasRecords)
     $rawCpu = Get-AverageCpuPercent $rawStatsRecords
@@ -182,7 +188,7 @@ $reportRows = foreach ($case in $Cases) { foreach ($vu in $Vus) {
     $cpuDelta = if ($null -eq $rawCpu -or $rawCpu -eq 0 -or $null -eq $oasCpu) { $null } else { ($oasCpu / $rawCpu) - 1 }
     $latencyFail = (($oasP50 / $rawP50) - 1) -gt 0.01 -or (($oasP95 / $rawP95) - 1) -gt 0.01 -or (($oasP99 / $rawP99) - 1) -gt 0.01
     $requiredEvidenceMissing = $null -eq $cpuDelta -or $null -eq $rawMemory -or $null -eq $oasMemory
-    $result = if ($errors -gt 0 -or $Runs -lt 7 -or $Iterations -lt 1000000 -or $rawCv -gt 0.005 -or $requiredEvidenceMissing) { "INCONCLUSIVE" } elseif ($medianOverhead -gt 0.01 -or $ciUpper -gt 0.01 -or $latencyFail -or $cpuDelta -gt 0.01) { "FAIL" } else { "PASS" }
+    $result = if ($errors -gt 0 -or $invalidTiming -or $Runs -lt 7 -or $Iterations -lt 1000000 -or $rawCv -gt 0.005 -or $requiredEvidenceMissing) { "INCONCLUSIVE" } elseif ($medianOverhead -gt 0.01 -or $ciUpper -gt 0.01 -or $latencyFail -or $cpuDelta -gt 0.01) { "FAIL" } else { "PASS" }
     [pscustomobject]@{
         Case = $case
         Vus = $vu
@@ -202,6 +208,7 @@ $reportRows = foreach ($case in $Cases) { foreach ($vu in $Vus) {
         RawMemory = $rawMemory
         OasMemory = $oasMemory
         RawCv = $rawCv
+        InvalidTiming = $invalidTiming
         MedianOverhead = $medianOverhead
         Upper95Ci = $ciUpper
         Result = $result
@@ -211,7 +218,7 @@ $table = if ($reportRows) {
     ($reportRows | ForEach-Object {
         $cpu = if ($null -eq $_.CpuDelta) { "n/a" } else { "$([math]::Round($_.CpuDelta * 100, 3))%" }
         $rss = if ($null -eq $_.RawMemory -or $null -eq $_.OasMemory) { "n/a" } else { "$([math]::Round($_.RawMemory, 1))/$([math]::Round($_.OasMemory, 1))" }
-        "| $($_.Case) (VU $($_.Vus)) | $([math]::Round($_.RawRps, 2)) | $([math]::Round($_.OasRps, 2)) | $([math]::Round($_.Overhead * 100, 3))% | $([math]::Round($_.RawP50, 4))/$([math]::Round($_.OasP50, 4)) | $([math]::Round($_.RawP95, 4))/$([math]::Round($_.OasP95, 4)) | $([math]::Round($_.RawP99, 4))/$([math]::Round($_.OasP99, 4)) | $cpu | $rss | $($_.Result) |"
+        "| $($_.Case) (VU $($_.Vus)) | $([math]::Round($_.RawRps, 2)) | $([math]::Round($_.OasRps, 2)) | $([math]::Round($_.Overhead * 100, 3))% | $([math]::Round($_.RawP50, 4))/$([math]::Round($_.OasP50, 4)) | $([math]::Round($_.RawP95, 4))/$([math]::Round($_.OasP95, 4)) | $([math]::Round($_.RawP99, 4))/$([math]::Round($_.OasP99, 4)) | $([math]::Round($_.RawCv * 100, 3))% | $cpu | $rss | $($_.Result) |"
     }) -join "`n"
 } else {
     "| no completed cases | pending aggregation | pending aggregation | pending | pending | pending | pending | pending | pending | INCONCLUSIVE |"
@@ -228,11 +235,16 @@ This run collected $($records.Count) raw/framework measurements. Results are
 classified only after the minimum run/request counts, raw-baseline CV, paired
 95% confidence bound, CPU samples, and RSS samples are available.
 
-| Test | Raw RPS | OAS RPS | Overhead | p50 raw/oas (ms) | p95 raw/oas (ms) | p99 raw/oas (ms) | CPU Δ | RSS peak raw/oas (MiB) | Result |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Test | Raw RPS | OAS RPS | Overhead | p50 raw/oas (ms) | p95 raw/oas (ms) | p99 raw/oas (ms) | Raw CV | CPU Δ | RSS peak raw/oas (MiB) | Result |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 ${table}
 
-The statistical gate uses median paired throughput overhead, upper normal-approximation 95% CI, p50/p95/p99 latency deltas, raw baseline CV, zero measured errors, CPU samples, memory samples, and the requested run/request minimums. p999 is retained in the JSON artifacts for warning analysis. Allocation metrics are reported by the in-process router benchmark.
+$invalidRows = @($reportRows | Where-Object { $_.InvalidTiming } | ForEach-Object { "$($_.Case) VU $($_.Vus)" })
+if ($invalidRows.Count -gt 0) {
+    "Timing invalidation: negative latency samples detected for $($invalidRows -join ', ')."
+}
+
+The statistical gate uses median paired throughput overhead, upper normal-approximation 95% CI, p50/p95/p99 latency deltas, raw baseline CV, zero measured errors, CPU samples, memory samples, and the requested run/request minimums. Any negative timing sample invalidates the row. p999 is retained in the JSON artifacts for warning analysis. Allocation metrics are reported by the in-process router benchmark.
 
 Raw result files and the exact environment must be retained beside this file.
 "@ | Set-Content -Path (Join-Path $resultRoot "REPORT.md")
