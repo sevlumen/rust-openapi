@@ -212,7 +212,8 @@ fn openapi_describes_registered_operations() {
     let mut app = App::new();
     app.get("/plaintext", hello)
         .tag("Benchmark")
-        .summary("Static response");
+        .summary("Static response")
+        .operation_id("getPlaintext");
     let document = app.openapi_document();
     assert_eq!(document["openapi"], "3.1.0");
     assert_eq!(

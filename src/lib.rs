@@ -865,6 +865,7 @@ enum Segment {
 struct Operation {
     tag: Option<String>,
     summary: Option<String>,
+    operation_id: Option<String>,
     response_status: StatusCode,
     response_schema: Option<Value>,
     request: OpenApiRequest,
@@ -997,6 +998,20 @@ impl<S: Send + Sync + 'static> App<S> {
         self
     }
 
+    pub fn operation_id(&mut self, operation_id: impl Into<String>) -> &mut Self {
+        let operation_id = operation_id.into();
+        assert!(
+            self.routes.iter().all(|route| {
+                route.operation.operation_id.as_deref() != Some(operation_id.as_str())
+            }),
+            "duplicate operation id"
+        );
+        if let Some(index) = self.last_route {
+            self.routes[index].operation.operation_id = Some(operation_id);
+        }
+        self
+    }
+
     pub fn openapi(&mut self, path: &str) -> &mut Self {
         self.openapi_path = Some(normalize_path(path));
         self
@@ -1017,6 +1032,9 @@ impl<S: Send + Sync + 'static> App<S> {
             }
             if let Some(summary) = &route.operation.summary {
                 operation.insert("summary".to_owned(), json!(summary));
+            }
+            if let Some(operation_id) = &route.operation.operation_id {
+                operation.insert("operationId".to_owned(), json!(operation_id));
             }
             let mut parameters = route.operation.request.parameters.clone();
             let mut path_schema_index = 0;
@@ -1198,6 +1216,7 @@ impl<S: Send + Sync + 'static> App<S> {
             operation: Operation {
                 tag: None,
                 summary: None,
+                operation_id: None,
                 response_status: <H::Response as ResponseMetadata>::status_code(),
                 response_schema: <H::Response as ResponseMetadata>::response_schema(),
                 request: H::openapi_request(),
