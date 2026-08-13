@@ -31,6 +31,9 @@ jobs:
       - name: Run doctests
         run: cargo test --doc --workspace
 
+      - name: Build examples
+        run: cargo build --workspace --examples
+
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 

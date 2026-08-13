@@ -328,6 +328,12 @@ impl<T: OpenApiSchema> OpenApiSchema for Vec<T> {
     }
 }
 
+impl<T: OpenApiSchema + ?Sized> OpenApiSchema for &T {
+    fn schema() -> Value {
+        T::schema()
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct OpenApiRequest {
     path_schemas: Vec<Value>,
@@ -878,6 +884,7 @@ pub struct App<S = ()> {
     static_routes: HashMap<String, Vec<(Method, usize)>>,
     last_route: Option<usize>,
     openapi_path: Option<String>,
+    openapi_bytes: Option<Bytes>,
     swagger_path: Option<String>,
     title: String,
     version: String,
@@ -891,6 +898,7 @@ impl App<()> {
             static_routes: HashMap::new(),
             last_route: None,
             openapi_path: None,
+            openapi_bytes: None,
             swagger_path: None,
             title: "oas-rs API".to_owned(),
             version: "0.1.0".to_owned(),
@@ -912,6 +920,7 @@ impl<S: Send + Sync + 'static> App<S> {
             static_routes: HashMap::new(),
             last_route: None,
             openapi_path: self.openapi_path,
+            openapi_bytes: self.openapi_bytes,
             swagger_path: self.swagger_path,
             title: self.title,
             version: self.version,
@@ -920,11 +929,13 @@ impl<S: Send + Sync + 'static> App<S> {
 
     pub fn title(mut self, title: impl Into<String>) -> Self {
         self.title = title.into();
+        self.openapi_bytes = None;
         self
     }
 
     pub fn version(mut self, version: impl Into<String>) -> Self {
         self.version = version.into();
+        self.openapi_bytes = None;
         self
     }
 
@@ -987,6 +998,7 @@ impl<S: Send + Sync + 'static> App<S> {
     pub fn tag(&mut self, tag: impl Into<String>) -> &mut Self {
         if let Some(index) = self.last_route {
             self.routes[index].operation.tag = Some(tag.into());
+            self.openapi_bytes = None;
         }
         self
     }
@@ -994,6 +1006,7 @@ impl<S: Send + Sync + 'static> App<S> {
     pub fn summary(&mut self, summary: impl Into<String>) -> &mut Self {
         if let Some(index) = self.last_route {
             self.routes[index].operation.summary = Some(summary.into());
+            self.openapi_bytes = None;
         }
         self
     }
@@ -1008,12 +1021,14 @@ impl<S: Send + Sync + 'static> App<S> {
         );
         if let Some(index) = self.last_route {
             self.routes[index].operation.operation_id = Some(operation_id);
+            self.openapi_bytes = None;
         }
         self
     }
 
     pub fn openapi(&mut self, path: &str) -> &mut Self {
         self.openapi_path = Some(normalize_path(path));
+        self.openapi_bytes = None;
         self
     }
 
@@ -1145,7 +1160,9 @@ impl<S: Send + Sync + 'static> App<S> {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let app = Arc::new(self);
+        let mut app = self;
+        app.prepare_openapi();
+        let app = Arc::new(app);
         tokio::pin!(shutdown);
         loop {
             tokio::select! {
@@ -1222,17 +1239,25 @@ impl<S: Send + Sync + 'static> App<S> {
                 request: H::openapi_request(),
             },
         });
+        self.openapi_bytes = None;
         self.last_route = Some(index);
+    }
+
+    fn prepare_openapi(&mut self) {
+        if self.openapi_path.is_some() && self.openapi_bytes.is_none() {
+            self.openapi_bytes = Some(Bytes::from(self.openapi_document().to_string()));
+        }
     }
 
     async fn handle(&self, request: Request<Bytes>) -> HttpResponse {
         let method = request.method().clone();
         let path = normalize_request_path(request.uri().path());
         if self.openapi_path.as_deref() == Some(path) && method == Method::GET {
-            return response_json_bytes(
-                StatusCode::OK,
-                Bytes::from(self.openapi_document().to_string()),
-            );
+            let body = self
+                .openapi_bytes
+                .clone()
+                .unwrap_or_else(|| Bytes::from(self.openapi_document().to_string()));
+            return response_json_bytes(StatusCode::OK, body);
         }
         if self.swagger_path.as_deref() == Some(path) && method == Method::GET {
             return response_text(StatusCode::OK, Bytes::from_static(SWAGGER_HTML.as_bytes()));
