@@ -2,12 +2,19 @@ use bytes::Bytes;
 use http::StatusCode;
 use oas_rs::{
     ApiError, App, Header, HeaderSpec, Json, Method, NoContent, NotModified, Params, Path, Query,
-    State,
+    State, StreamResponse,
 };
+use futures_core::Stream;
 use serde::{Deserialize, Serialize};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::{pin::Pin, task::{Context, Poll}};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
+use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 #[derive(Clone, Default)]
@@ -61,6 +68,25 @@ async fn optional_trace(value: Option<Header<TraceId>>) -> &'static str {
     } else {
         "missing"
     }
+}
+
+async fn cancellation_handler(State(counter): State<Arc<AtomicUsize>>) -> &'static str {
+    counter.fetch_add(1, Ordering::Relaxed);
+    "called"
+}
+
+struct OneChunk(Option<Bytes>);
+
+impl Stream for OneChunk {
+    type Item = Bytes;
+
+    fn poll_next(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(self.0.take())
+    }
+}
+
+async fn stream_response() -> StreamResponse<OneChunk> {
+    StreamResponse(OneChunk(Some(Bytes::from_static(b"streamed"))))
 }
 
 async fn params(params: Params) -> String {
@@ -388,7 +414,10 @@ async fn response_headers_and_allow_metadata_follow_http_semantics() {
     app.get("/not-modified", not_modified);
 
     let response = app.oneshot(Method::GET, "/text", &[], None).await;
-    assert_eq!(response.header("content-type"), Some("text/plain; charset=utf-8"));
+    assert_eq!(
+        response.header("content-type"),
+        Some("text/plain; charset=utf-8")
+    );
     assert_eq!(response.header("content-length"), Some("2"));
 
     let response = app.oneshot(Method::GET, "/json", &[], None).await;
@@ -400,9 +429,7 @@ async fn response_headers_and_allow_metadata_follow_http_semantics() {
     assert_eq!(response.header("content-length"), Some("0"));
     assert_eq!(response.body_string().await, "");
 
-    let response = app
-        .oneshot(Method::PUT, "/text", &[], None)
-        .await;
+    let response = app.oneshot(Method::PUT, "/text", &[], None).await;
     assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     assert_eq!(response.header("allow"), Some("GET, POST"));
     assert_eq!(response.header("content-length"), Some("0"));
@@ -421,9 +448,7 @@ async fn tcp_server_supports_keep_alive_and_connection_close() {
 
     let mut stream = TcpStream::connect(address).await.unwrap();
     stream
-        .write_all(
-            b"GET /text HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n",
-        )
+        .write_all(b"GET /text HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
         .await
         .unwrap();
     let mut buffer = vec![0_u8; 4096];
@@ -445,4 +470,41 @@ async fn tcp_server_supports_keep_alive_and_connection_close() {
 
     let _ = shutdown_tx.send(());
     server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn interrupted_request_body_does_not_dispatch_handler() {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let mut app = App::new().with_state(counter.clone());
+    app.post("/cancel", cancellation_handler);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let server = tokio::spawn(app.serve_listener(listener, async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(
+            b"POST /cancel HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\npartial",
+        )
+        .await
+        .unwrap();
+    stream.shutdown().await.unwrap();
+    sleep(Duration::from_millis(50)).await;
+    assert_eq!(counter.load(Ordering::Relaxed), 0);
+
+    let _ = shutdown_tx.send(());
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn streaming_response_delivers_chunks_without_content_length() {
+    let mut app = App::new();
+    app.get("/stream", stream_response);
+    let response = app.oneshot(Method::GET, "/stream", &[], None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.header("content-length"), None);
+    assert_eq!(response.body_string().await, "streamed");
 }
