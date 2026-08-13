@@ -14,13 +14,14 @@ Source plan: `C:\Users\Q\Downloads\2026-08-13-oas-rust-framework-acceptance-benc
 | Stage | Command | Evidence |
 |---|---|---|
 | RED | `cargo test --test acceptance` | The new conformance tests failed for dynamic `HEAD` fallback and name-based UUID inference, proving both regressions before the implementation fix. |
-| GREEN | `cargo test --workspace --all-targets` | 10 acceptance tests passed; router microbench executable also completed. |
+| GREEN | `cargo test --workspace --all-targets` | 14 acceptance tests passed; router microbench executable also completed. |
 | GREEN | `cargo test --doc --workspace` | Doc-test target completed with no failures. |
 | GREEN | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Completed with zero warnings. |
 | Docker smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10 -Runs 1 -Vus 1 -Version matrix-smoke5` | All 12 P0 cases ran against raw/framework (24 measurements) with zero measured errors; the report remains `INCONCLUSIVE` because it is below the release minimum. |
 | Collector smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10 -Runs 1 -WarmupSeconds 1 -Vus 1 -Cases plaintext -Version smoke-stats` | Expanded p50/p95/p99 report and CPU/RSS artifact paths were generated; the run is correctly `INCONCLUSIVE` because it was too short to produce stable samples. |
 | Extended plaintext | `./benchmarks/run-benchmark.ps1 -Iterations 1000000 -Runs 7 -WarmupSeconds 30 -Vus 32 -Cases plaintext -Version plaintext-official2` | 14 measurements and zero measured errors were collected; raw CV was 8.39%, throughput overhead was 4.55%, CPU delta was 4.04%, and negative timing samples were observed, so the gate is `INCONCLUSIVE`/invalid rather than PASS. |
 | Body-equivalence smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10 -Runs 1 -WarmupSeconds 1 -Vus 1 -Version smoke-body-equivalence` | All 12 cases × raw/framework completed (24 measurements), including PostgreSQL, with status and expected-body checks passing and zero custom measured errors. |
+| HTTP transport | `cargo test --test acceptance` | Keep-alive, connection-close, interrupted request body, and streaming response tests pass. |
 
 ## Guarantees covered by tests
 
@@ -30,11 +31,12 @@ Source plan: `C:\Users\Q\Downloads\2026-08-13-oas-rust-framework-acceptance-benc
 | 2 | HEAD, 405/Allow, OPTIONS, 404 and OpenAPI/Swagger endpoints work | `tests/acceptance.rs::http_semantics_and_typed_body_header_are_preserved` | PASS |
 | 3 | JSON body and typed header extractors reject/parse at the boundary | `tests/acceptance.rs::http_semantics_and_typed_body_header_are_preserved` | PASS |
 | 4 | Docker/k6 checks compare expected response bodies as well as status codes for all benchmark cases | `benchmarks/k6.js`, `smoke-body-equivalence` | PASS |
-| 5 | Registered summary/tag metadata appears in an OpenAPI 3.1 document | `tests/acceptance.rs::openapi_describes_registered_operations` | PASS |
-| 6 | Router precedence, percent-decoding, duplicate detection, malformed templates, and 10k static routes are covered | `tests/acceptance.rs` | PASS |
-| 7 | OpenAPI path schemas follow extractor types, JSON request bodies and headers are represented, and optional headers are not required | `tests/acceptance.rs::openapi_uses_extractor_types_and_response_statuses` | PASS |
-| 8 | OpenAPI DTO/query schema derivation has pass and compile-fail coverage | `cargo test --test compile` | PASS |
-| 9 | Release profile and raw/framework Docker images build from the same locked dependencies | `cargo build --release --locked`, `benchmarks/Dockerfile` | PASS |
+| 5 | Keep-alive, connection-close, body cancellation, and lazy stream responses conform | `tests/acceptance.rs` | PASS |
+| 6 | Registered summary/tag metadata appears in an OpenAPI 3.1 document | `tests/acceptance.rs::openapi_describes_registered_operations` | PASS |
+| 7 | Router precedence, percent-decoding, duplicate detection, malformed templates, and 10k static routes are covered | `tests/acceptance.rs` | PASS |
+| 8 | OpenAPI path schemas follow extractor types, JSON request bodies and headers are represented, and optional headers are not required | `tests/acceptance.rs::openapi_uses_extractor_types_and_response_statuses` | PASS |
+| 9 | OpenAPI DTO/query schema derivation has pass and compile-fail coverage | `cargo test --test compile` | PASS |
+| 10 | Release profile and raw/framework Docker images build from the same locked dependencies | `cargo build --release --locked`, `benchmarks/Dockerfile` | PASS |
 
 ## Known gaps
 

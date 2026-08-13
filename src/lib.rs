@@ -5,7 +5,9 @@
 //! the explicitly registered OpenAPI endpoint is requested.
 
 use bytes::Bytes;
+use futures_core::Stream;
 use http::{HeaderValue, Request, Response, StatusCode, header};
+use http_body::{Body, Frame, SizeHint};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use serde::{Serialize, de::DeserializeOwned};
@@ -27,7 +29,60 @@ pub use oas_rs_macros::OpenApi;
 pub use serde_json;
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
-type HttpResponse = Response<Full<Bytes>>;
+pub type HttpResponse = Response<ResponseBody>;
+
+pub enum ResponseBody {
+    Full(Full<Bytes>),
+    Stream(Pin<Box<dyn Stream<Item = Bytes> + Send + 'static>>),
+}
+
+impl ResponseBody {
+    fn full(bytes: Bytes) -> Self {
+        Self::Full(Full::new(bytes))
+    }
+
+    fn stream<S>(stream: S) -> Self
+    where
+        S: Stream<Item = Bytes> + Send + 'static,
+    {
+        Self::Stream(Box::pin(stream))
+    }
+}
+
+impl Body for ResponseBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        unsafe {
+            match self.get_unchecked_mut() {
+                Self::Full(body) => Pin::new_unchecked(body).poll_frame(context),
+                Self::Stream(stream) => match stream.as_mut().poll_next(context) {
+                    Poll::Ready(Some(bytes)) => Poll::Ready(Some(Ok(Frame::data(bytes)))),
+                    Poll::Ready(None) => Poll::Ready(None),
+                    Poll::Pending => Poll::Pending,
+                },
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        match self {
+            Self::Full(body) => body.is_end_stream(),
+            Self::Stream(_) => false,
+        }
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        match self {
+            Self::Full(body) => body.size_hint(),
+            Self::Stream(_) => SizeHint::default(),
+        }
+    }
+}
 
 const INLINE_FUTURE_SIZE: usize = 128;
 
@@ -371,7 +426,7 @@ impl IntoResponse for () {
         Response::builder()
             .status(StatusCode::NO_CONTENT)
             .header(header::CONTENT_LENGTH, "0")
-            .body(Full::new(Bytes::new()))
+            .body(ResponseBody::full(Bytes::new()))
             .unwrap()
     }
 }
@@ -425,6 +480,24 @@ impl IntoResponse for JsonBytes {
     }
 }
 
+/// A response whose chunks are produced lazily by a `Stream`. Streaming is
+/// opt-in; ordinary `Full<Bytes>` responses retain their fixed-size body path.
+pub struct StreamResponse<S>(pub S);
+
+impl<S> IntoResponse for StreamResponse<S>
+where
+    S: Stream<Item = Bytes> + Send + 'static,
+{
+    fn into_response(self) -> HttpResponse {
+        Response::builder()
+            .status(StatusCode::OK)
+            .body(ResponseBody::stream(self.0))
+            .unwrap()
+    }
+}
+
+impl<S> ResponseMetadata for StreamResponse<S> where S: Stream<Item = Bytes> + Send + 'static {}
+
 /// A JSON response with the conventional `201 Created` status.
 #[derive(Clone, Debug)]
 pub struct Created<T>(pub T);
@@ -471,7 +544,7 @@ impl IntoResponse for NotModified {
         Response::builder()
             .status(StatusCode::NOT_MODIFIED)
             .header(header::CONTENT_LENGTH, "0")
-            .body(Full::new(Bytes::new()))
+            .body(ResponseBody::full(Bytes::new()))
             .unwrap()
     }
 }
@@ -1041,29 +1114,56 @@ impl<S: Send + Sync + 'static> App<S> {
         address: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listener = tokio::net::TcpListener::bind(address).await?;
+        self.serve_listener(listener, std::future::pending()).await
+    }
+
+    /// Serve an already-bound listener until `shutdown` resolves. This is
+    /// useful for graceful shutdown and deterministic integration tests.
+    pub async fn serve_listener<F>(
+        self,
+        listener: tokio::net::TcpListener,
+        shutdown: F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
         let app = Arc::new(self);
+        tokio::pin!(shutdown);
         loop {
-            let (stream, _) = listener.accept().await?;
-            let app = Arc::clone(&app);
-            tokio::spawn(async move {
-                let io = hyper_util::rt::TokioIo::new(stream);
-                let service = hyper::service::service_fn(move |request: Request<Incoming>| {
+            tokio::select! {
+                _ = &mut shutdown => break,
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted?;
                     let app = Arc::clone(&app);
-                    async move {
-                        let (parts, body) = request.into_parts();
-                        let body = body
-                            .collect()
-                            .await
-                            .map(|body| body.to_bytes())
-                            .unwrap_or_default();
-                        Ok::<_, Infallible>(app.handle(Request::from_parts(parts, body)).await)
-                    }
-                });
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(io, service)
-                    .await;
-            });
+                    tokio::spawn(async move {
+                        let io = hyper_util::rt::TokioIo::new(stream);
+                        let service = hyper::service::service_fn(move |request: Request<Incoming>| {
+                            let app = Arc::clone(&app);
+                            async move {
+                                let (parts, body) = request.into_parts();
+                                let response = match body.collect().await {
+                                    Ok(body) => app.handle(Request::from_parts(parts, body.to_bytes())).await,
+                                    Err(_) => response_json(
+                                        StatusCode::BAD_REQUEST,
+                                        json!({
+                                            "type": "about:blank",
+                                            "title": "Bad Request",
+                                            "status": 400,
+                                            "detail": "request body was interrupted"
+                                        }),
+                                    ),
+                                };
+                                Ok::<_, Infallible>(response)
+                            }
+                        });
+                        let _ = hyper::server::conn::http1::Builder::new()
+                            .serve_connection(io, service)
+                            .await;
+                    });
+                }
+            }
         }
+        Ok(())
     }
 
     fn add_route<H, A>(&mut self, method: Method, path: &str, handler: H)
@@ -1127,7 +1227,7 @@ impl<S: Send + Sync + 'static> App<S> {
                     .status(StatusCode::NO_CONTENT)
                     .header(header::ALLOW, allow)
                     .header(header::CONTENT_LENGTH, "0")
-                    .body(Full::new(Bytes::new()))
+                    .body(ResponseBody::full(Bytes::new()))
                     .unwrap()
             };
         }
@@ -1178,7 +1278,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 .status(StatusCode::METHOD_NOT_ALLOWED)
                 .header(header::ALLOW, self.allowed_methods(path))
                 .header(header::CONTENT_LENGTH, "0")
-                .body(Full::new(Bytes::new()))
+                .body(ResponseBody::full(Bytes::new()))
                 .unwrap();
         }
         not_found()
@@ -1315,7 +1415,7 @@ fn response_text(status: StatusCode, body: Bytes) -> HttpResponse {
     } else {
         builder = builder.header(header::CONTENT_LENGTH, body.len());
     }
-    builder.body(Full::new(body)).unwrap()
+    builder.body(ResponseBody::full(body)).unwrap()
 }
 
 fn response_json<T: Serialize>(status: StatusCode, value: T) -> HttpResponse {
@@ -1339,7 +1439,7 @@ fn response_json_bytes_with_length(
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::CONTENT_LENGTH, content_length)
-        .body(Full::new(body))
+        .body(ResponseBody::full(body))
         .unwrap()
 }
 
@@ -1361,7 +1461,7 @@ async fn maybe_head(method: &Method, response: HttpResponse) -> HttpResponse {
         header::CONTENT_LENGTH,
         HeaderValue::from_str(&body.len().to_string()).unwrap(),
     );
-    Response::from_parts(parts, Full::new(Bytes::new()))
+    Response::from_parts(parts, ResponseBody::full(Bytes::new()))
 }
 
 fn parse_query<T: DeserializeOwned>(query: &str) -> Result<T, ApiError> {

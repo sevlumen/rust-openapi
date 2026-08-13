@@ -1,16 +1,19 @@
 use bytes::Bytes;
+use futures_core::Stream;
 use http::StatusCode;
 use oas_rs::{
     ApiError, App, Header, HeaderSpec, Json, Method, NoContent, NotModified, Params, Path, Query,
     State, StreamResponse,
 };
-use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
-use std::{pin::Pin, task::{Context, Poll}};
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;

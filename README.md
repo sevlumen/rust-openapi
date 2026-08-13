@@ -40,3 +40,6 @@ Docker benchmark smoke:
 Use the default arguments for the release matrix. Reports remain `INCONCLUSIVE`
 until the acceptance plan's seven paired runs, baseline CV and confidence bounds
 are available.
+
+Streaming is opt-in with `StreamResponse<S>`; ordinary text and JSON responses
+continue to use fixed `Bytes` bodies.
