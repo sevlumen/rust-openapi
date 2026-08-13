@@ -225,6 +225,12 @@ $table = if ($reportRows) {
 }
 
  $overall = if ($reportRows.Result -contains "FAIL") { "FAIL" } elseif ($reportRows.Count -gt 0 -and @($reportRows.Result | Where-Object { $_ -ne "PASS" }).Count -eq 0) { "PASS" } else { "INCONCLUSIVE" }
+$invalidRows = @($reportRows | Where-Object { $_.InvalidTiming } | ForEach-Object { "$($_.Case) VU $($_.Vus)" })
+$timingNote = if ($invalidRows.Count -gt 0) {
+    "Timing invalidation: negative latency samples detected for $($invalidRows -join ', ')."
+} else {
+    "Timing invalidation: no negative latency samples detected in completed rows."
+}
 
 @"
 # Benchmark report $Version
@@ -239,10 +245,7 @@ classified only after the minimum run/request counts, raw-baseline CV, paired
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 ${table}
 
-$invalidRows = @($reportRows | Where-Object { $_.InvalidTiming } | ForEach-Object { "$($_.Case) VU $($_.Vus)" })
-if ($invalidRows.Count -gt 0) {
-    "Timing invalidation: negative latency samples detected for $($invalidRows -join ', ')."
-}
+$timingNote
 
 The statistical gate uses median paired throughput overhead, upper normal-approximation 95% CI, p50/p95/p99 latency deltas, raw baseline CV, zero measured errors, CPU samples, memory samples, and the requested run/request minimums. Any negative timing sample invalidates the row. p999 is retained in the JSON artifacts for warning analysis. Allocation metrics are reported by the in-process router benchmark.
 
