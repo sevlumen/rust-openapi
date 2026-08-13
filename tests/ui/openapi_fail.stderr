@@ -1,0 +1,5 @@
+error: OpenApi requires named struct fields
+ --> tests/ui/openapi_fail.rs:4:8
+  |
+4 | struct TupleShape(u64);
+  |        ^^^^^^^^^^

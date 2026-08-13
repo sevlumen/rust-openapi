@@ -285,6 +285,7 @@ fn openapi_uses_extractor_types_and_response_statuses() {
     let mut app = App::new().with_state(TestState);
     app.get("/users/{id}", user);
     app.get("/uuid/{id}", uuid_user);
+    app.get("/search", search);
     app.post("/created", created);
     app.post("/echo", echo);
     app.get("/trace", trace);
@@ -311,6 +312,11 @@ fn openapi_uses_extractor_types_and_response_statuses() {
         document["paths"]["/echo"]["post"]["requestBody"]["content"]["application/json"]["schema"]
             ["type"],
         "object"
+    );
+    assert_eq!(
+        document["paths"]["/echo"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+            ["properties"]["name"]["type"],
+        "string"
     );
     assert_eq!(
         document["paths"]["/trace"]["get"]["parameters"][0]["in"],

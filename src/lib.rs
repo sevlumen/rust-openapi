@@ -23,6 +23,8 @@ use std::{
 
 pub use http::Method;
 pub use http::Method as HttpMethod;
+pub use oas_rs_macros::OpenApi;
+pub use serde_json;
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 type HttpResponse = Response<Full<Bytes>>;
@@ -127,10 +129,6 @@ impl Params {
 }
 
 impl<S: Send + Sync + 'static> FromRequest<S> for Params {
-    fn openapi_request() -> OpenApiRequest {
-        OpenApiRequest::default()
-    }
-
     fn from_request(
         _request: &mut Request<Bytes>,
         params: &Params,
@@ -171,9 +169,23 @@ pub trait OpenApiType {
     fn schema() -> Value;
 }
 
+pub trait OpenApiSchema {
+    fn schema() -> Value;
+}
+
+pub trait OpenApiQuery {
+    fn parameters() -> Vec<Value>;
+}
+
 impl OpenApiType for String {
     fn schema() -> Value {
         json!({ "type": "string" })
+    }
+}
+
+impl OpenApiSchema for String {
+    fn schema() -> Value {
+        <Self as OpenApiType>::schema()
     }
 }
 
@@ -183,9 +195,21 @@ impl OpenApiType for u32 {
     }
 }
 
+impl OpenApiSchema for u32 {
+    fn schema() -> Value {
+        <Self as OpenApiType>::schema()
+    }
+}
+
 impl OpenApiType for u64 {
     fn schema() -> Value {
         json!({ "type": "integer", "format": "int64" })
+    }
+}
+
+impl OpenApiSchema for u64 {
+    fn schema() -> Value {
+        <Self as OpenApiType>::schema()
     }
 }
 
@@ -195,9 +219,21 @@ impl OpenApiType for i32 {
     }
 }
 
+impl OpenApiSchema for i32 {
+    fn schema() -> Value {
+        <Self as OpenApiType>::schema()
+    }
+}
+
 impl OpenApiType for i64 {
     fn schema() -> Value {
         json!({ "type": "integer", "format": "int64" })
+    }
+}
+
+impl OpenApiSchema for i64 {
+    fn schema() -> Value {
+        <Self as OpenApiType>::schema()
     }
 }
 
@@ -207,9 +243,33 @@ impl OpenApiType for bool {
     }
 }
 
+impl OpenApiSchema for bool {
+    fn schema() -> Value {
+        <Self as OpenApiType>::schema()
+    }
+}
+
 impl OpenApiType for uuid::Uuid {
     fn schema() -> Value {
         json!({ "type": "string", "format": "uuid" })
+    }
+}
+
+impl OpenApiSchema for uuid::Uuid {
+    fn schema() -> Value {
+        <Self as OpenApiType>::schema()
+    }
+}
+
+impl<T: OpenApiSchema> OpenApiSchema for Option<T> {
+    fn schema() -> Value {
+        T::schema()
+    }
+}
+
+impl<T: OpenApiSchema> OpenApiSchema for Vec<T> {
+    fn schema() -> Value {
+        json!({ "type": "array", "items": T::schema() })
     }
 }
 
@@ -321,7 +381,7 @@ impl IntoResponse for () {
 #[derive(Clone, Debug)]
 pub struct Json<T>(pub T);
 
-impl<T: Serialize + Send + 'static> IntoResponse for Json<T> {
+impl<T: Serialize + OpenApiSchema + Send + 'static> IntoResponse for Json<T> {
     fn into_response(self) -> HttpResponse {
         match serde_json::to_vec(&self.0) {
             Ok(bytes) => response_json_bytes(StatusCode::OK, Bytes::from(bytes)),
@@ -335,9 +395,9 @@ impl<T: Serialize + Send + 'static> IntoResponse for Json<T> {
     }
 }
 
-impl<T: Serialize + Send + 'static> ResponseMetadata for Json<T> {
+impl<T: Serialize + OpenApiSchema + Send + 'static> ResponseMetadata for Json<T> {
     fn response_schema() -> Option<Value> {
-        Some(json!({ "type": "object" }))
+        Some(T::schema())
     }
 }
 
@@ -369,7 +429,7 @@ impl IntoResponse for JsonBytes {
 #[derive(Clone, Debug)]
 pub struct Created<T>(pub T);
 
-impl<T: Serialize + Send + 'static> IntoResponse for Created<T> {
+impl<T: Serialize + OpenApiSchema + Send + 'static> IntoResponse for Created<T> {
     fn into_response(self) -> HttpResponse {
         let mut response = Json(self.0).into_response();
         *response.status_mut() = StatusCode::CREATED;
@@ -377,12 +437,12 @@ impl<T: Serialize + Send + 'static> IntoResponse for Created<T> {
     }
 }
 
-impl<T: Serialize + Send + 'static> ResponseMetadata for Created<T> {
+impl<T: Serialize + OpenApiSchema + Send + 'static> ResponseMetadata for Created<T> {
     fn status_code() -> StatusCode {
         StatusCode::CREATED
     }
     fn response_schema() -> Option<Value> {
-        Some(json!({ "type": "object" }))
+        Some(T::schema())
     }
 }
 
@@ -477,12 +537,12 @@ impl<S: Send + Sync + 'static> FromRequest<S> for State<S> {
 
 impl<S: Send + Sync + 'static, T> FromRequest<S> for Path<T>
 where
-    T: FromStr + OpenApiType + Send + 'static,
+    T: FromStr + OpenApiSchema + Send + 'static,
     T::Err: std::fmt::Display,
 {
     fn openapi_request() -> OpenApiRequest {
         OpenApiRequest {
-            path_schemas: vec![T::schema()],
+            path_schemas: vec![<T as OpenApiSchema>::schema()],
             ..OpenApiRequest::default()
         }
     }
@@ -505,10 +565,13 @@ where
 
 impl<S: Send + Sync + 'static, T> FromRequest<S> for Query<T>
 where
-    T: DeserializeOwned + Send + 'static,
+    T: DeserializeOwned + OpenApiQuery + Send + 'static,
 {
     fn openapi_request() -> OpenApiRequest {
-        OpenApiRequest::default()
+        OpenApiRequest {
+            parameters: T::parameters(),
+            ..OpenApiRequest::default()
+        }
     }
 
     fn from_request(
@@ -523,7 +586,7 @@ where
 
 impl<S: Send + Sync + 'static, T> FromRequest<S> for Json<T>
 where
-    T: DeserializeOwned + Send + 'static,
+    T: DeserializeOwned + OpenApiSchema + Send + 'static,
 {
     fn openapi_request() -> OpenApiRequest {
         OpenApiRequest {
@@ -531,7 +594,7 @@ where
                 "required": true,
                 "content": {
                     "application/json": {
-                        "schema": { "type": "object" }
+                        "schema": T::schema()
                     }
                 }
             })),

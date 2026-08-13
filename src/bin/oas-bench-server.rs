@@ -7,7 +7,7 @@ use std::sync::{
 };
 use tokio_postgres::{Client, NoTls, Statement};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, oas_rs::OpenApi)]
 struct Search {
     page: u32,
     active: bool,
@@ -39,7 +39,7 @@ struct DbPool {
     next: AtomicUsize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, oas_rs::OpenApi)]
 struct DbUser {
     id: i64,
     name: String,

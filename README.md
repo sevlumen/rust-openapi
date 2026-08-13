@@ -3,10 +3,10 @@
 Typed HTTP routing on Hyper + Tokio with startup-generated OpenAPI 3.1 metadata.
 
 ```rust
-use oas_rs::{App, Json, Path};
+use oas_rs::{App, Json, OpenApi, Path};
 use uuid::Uuid;
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, OpenApi)]
 struct User { id: Uuid }
 
 async fn get_user(Path(id): Path<Uuid>) -> Json<User> {

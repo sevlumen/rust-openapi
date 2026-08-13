@@ -5,6 +5,9 @@ edition = "2024"
 description = "A small, typed OpenAPI-first HTTP framework on Hyper and Tokio"
 license = "MIT"
 
+[workspace]
+members = [".", "oas-rs-macros"]
+
 [lib]
 name = "oas_rs"
 path = "src/lib.rs"
@@ -23,6 +26,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.45", features = ["macros", "net", "rt-multi-thread", "signal"] }
 tokio-postgres = "0.7"
+oas-rs-macros = { path = "oas-rs-macros" }
 uuid = { version = "1.17", features = ["serde", "v4"] }
 
 [profile.release]
@@ -31,6 +35,9 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[dev-dependencies]
+trybuild = "1.0"
 
 [[bench]]
 name = "router"
