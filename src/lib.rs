@@ -5,18 +5,13 @@
 //! the explicitly registered OpenAPI endpoint is requested.
 
 use bytes::Bytes;
-use http::{header, Request, Response, StatusCode};
+use http::{Request, Response, StatusCode, header};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
-use serde::{de::DeserializeOwned, Serialize};
-use serde_json::{json, Map, Value};
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::{Map, Value, json};
 use std::{
-    collections::HashMap,
-    convert::Infallible,
-    future::Future,
-    pin::Pin,
-    str::FromStr,
-    sync::Arc,
+    collections::HashMap, convert::Infallible, future::Future, pin::Pin, str::FromStr, sync::Arc,
 };
 
 pub use http::Method;
@@ -31,8 +26,11 @@ type HttpResponse = Response<Full<Bytes>>;
 pub struct Params(Vec<(String, String)>);
 
 impl Params {
-    fn get(&self, name: &str) -> Option<&str> {
-        self.0.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str())
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
     }
 }
 
@@ -69,7 +67,11 @@ pub struct ApiError {
 
 impl ApiError {
     pub fn new(status: StatusCode, title: impl Into<String>, detail: impl Into<String>) -> Self {
-        Self { status, title: title.into(), detail: detail.into() }
+        Self {
+            status,
+            title: title.into(),
+            detail: detail.into(),
+        }
     }
 
     pub fn bad_request(detail: impl Into<String>) -> Self {
@@ -114,7 +116,10 @@ impl IntoResponse for Bytes {
 
 impl IntoResponse for () {
     fn into_response(self) -> HttpResponse {
-        Response::builder().status(StatusCode::NO_CONTENT).body(Full::new(Bytes::new())).unwrap()
+        Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(Full::new(Bytes::new()))
+            .unwrap()
     }
 }
 
@@ -127,9 +132,52 @@ impl<T: Serialize + Send + 'static> IntoResponse for Json<T> {
     fn into_response(self) -> HttpResponse {
         match serde_json::to_vec(&self.0) {
             Ok(bytes) => response_json_bytes(StatusCode::OK, Bytes::from(bytes)),
-            Err(error) => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "Serialization Error", error.to_string())
-                .into_response(),
+            Err(error) => ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Serialization Error",
+                error.to_string(),
+            )
+            .into_response(),
         }
+    }
+}
+
+/// A JSON body serialized once at startup. Cloning this value only clones the
+/// immutable `Bytes` handle, so the normal request path does not invoke serde.
+#[derive(Clone, Debug)]
+pub struct JsonBytes(pub Bytes);
+
+impl JsonBytes {
+    pub fn new(bytes: Bytes) -> Self {
+        Self(bytes)
+    }
+}
+
+impl IntoResponse for JsonBytes {
+    fn into_response(self) -> HttpResponse {
+        response_json_bytes(StatusCode::OK, self.0)
+    }
+}
+
+/// A JSON response with the conventional `201 Created` status.
+#[derive(Clone, Debug)]
+pub struct Created<T>(pub T);
+
+impl<T: Serialize + Send + 'static> IntoResponse for Created<T> {
+    fn into_response(self) -> HttpResponse {
+        let mut response = Json(self.0).into_response();
+        *response.status_mut() = StatusCode::CREATED;
+        response
+    }
+}
+
+/// Explicit bodyless response for `204 No Content` handlers.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoContent;
+
+impl IntoResponse for NoContent {
+    fn into_response(self) -> HttpResponse {
+        ().into_response()
     }
 }
 
@@ -145,15 +193,28 @@ impl<T: IntoResponse> IntoResponse for Result<T, ApiError> {
 /// A handler implementation is monomorphized at registration time and stored
 /// as a single erased service only at the router boundary.
 pub trait Handler<S, Args>: Send + Sync + 'static {
-    fn call(&self, request: Request<Bytes>, params: Params, state: Arc<S>) -> BoxFuture<HttpResponse>;
+    fn call(
+        &self,
+        request: Request<Bytes>,
+        params: Params,
+        state: Arc<S>,
+    ) -> BoxFuture<HttpResponse>;
 }
 
 pub trait FromRequest<S>: Sized + Send + 'static {
-    fn from_request(request: &mut Request<Bytes>, params: &Params, state: &Arc<S>) -> BoxFuture<Result<Self, ApiError>>;
+    fn from_request(
+        request: &mut Request<Bytes>,
+        params: &Params,
+        state: &Arc<S>,
+    ) -> BoxFuture<Result<Self, ApiError>>;
 }
 
 impl<S: Send + Sync + 'static> FromRequest<S> for State<S> {
-    fn from_request(_request: &mut Request<Bytes>, _params: &Params, state: &Arc<S>) -> BoxFuture<Result<Self, ApiError>> {
+    fn from_request(
+        _request: &mut Request<Bytes>,
+        _params: &Params,
+        state: &Arc<S>,
+    ) -> BoxFuture<Result<Self, ApiError>> {
         let state = Arc::clone(state);
         Box::pin(async move { Ok(State(state)) })
     }
@@ -164,11 +225,18 @@ where
     T: FromStr + Send + 'static,
     T::Err: std::fmt::Display,
 {
-    fn from_request(_request: &mut Request<Bytes>, params: &Params, _state: &Arc<S>) -> BoxFuture<Result<Self, ApiError>> {
+    fn from_request(
+        _request: &mut Request<Bytes>,
+        params: &Params,
+        _state: &Arc<S>,
+    ) -> BoxFuture<Result<Self, ApiError>> {
         let value = params.0.first().map(|(_, value)| value.clone());
         Box::pin(async move {
             let value = value.ok_or_else(|| ApiError::bad_request("missing path parameter"))?;
-            value.parse::<T>().map(Path).map_err(|error| ApiError::bad_request(error.to_string()))
+            value
+                .parse::<T>()
+                .map(Path)
+                .map_err(|error| ApiError::bad_request(error.to_string()))
         })
     }
 }
@@ -177,17 +245,64 @@ impl<S: Send + Sync + 'static, T> FromRequest<S> for Query<T>
 where
     T: DeserializeOwned + Send + 'static,
 {
-    fn from_request(request: &mut Request<Bytes>, _params: &Params, _state: &Arc<S>) -> BoxFuture<Result<Self, ApiError>> {
+    fn from_request(
+        request: &mut Request<Bytes>,
+        _params: &Params,
+        _state: &Arc<S>,
+    ) -> BoxFuture<Result<Self, ApiError>> {
         let query = request.uri().query().unwrap_or_default().to_owned();
         Box::pin(async move { parse_query(&query).map(Query) })
     }
 }
 
-impl<S: Send + Sync + 'static, T: HeaderSpec> FromRequest<S> for Header<T> {
-    fn from_request(request: &mut Request<Bytes>, _params: &Params, _state: &Arc<S>) -> BoxFuture<Result<Self, ApiError>> {
-        let value = request.headers().get(T::NAME).and_then(|value| value.to_str().ok()).map(str::to_owned);
+impl<S: Send + Sync + 'static, T> FromRequest<S> for Json<T>
+where
+    T: DeserializeOwned + Send + 'static,
+{
+    fn from_request(
+        request: &mut Request<Bytes>,
+        _params: &Params,
+        _state: &Arc<S>,
+    ) -> BoxFuture<Result<Self, ApiError>> {
+        let body = request.body().clone();
+        let content_type = request
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         Box::pin(async move {
-            let value = value.ok_or_else(|| ApiError::bad_request(format!("missing header {}", T::NAME)))?;
+            if !content_type
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("application/json")
+            {
+                return Err(ApiError::new(
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "Unsupported Media Type",
+                    "expected application/json",
+                ));
+            }
+            serde_json::from_slice(&body)
+                .map(Json)
+                .map_err(|error| ApiError::bad_request(error.to_string()))
+        })
+    }
+}
+
+impl<S: Send + Sync + 'static, T: HeaderSpec> FromRequest<S> for Header<T> {
+    fn from_request(
+        request: &mut Request<Bytes>,
+        _params: &Params,
+        _state: &Arc<S>,
+    ) -> BoxFuture<Result<Self, ApiError>> {
+        let value = request
+            .headers()
+            .get(T::NAME)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        Box::pin(async move {
+            let value = value
+                .ok_or_else(|| ApiError::bad_request(format!("missing header {}", T::NAME)))?;
             T::parse(&value).map(Header)
         })
     }
@@ -200,7 +315,12 @@ where
     Fut: Future<Output = R> + Send + 'static,
     R: IntoResponse,
 {
-    fn call(&self, _request: Request<Bytes>, _params: Params, _state: Arc<S>) -> BoxFuture<HttpResponse> {
+    fn call(
+        &self,
+        _request: Request<Bytes>,
+        _params: Params,
+        _state: Arc<S>,
+    ) -> BoxFuture<HttpResponse> {
         let future = (self)();
         Box::pin(async move { future.await.into_response() })
     }
@@ -214,7 +334,12 @@ where
     R: IntoResponse,
     E1: FromRequest<S>,
 {
-    fn call(&self, mut request: Request<Bytes>, params: Params, state: Arc<S>) -> BoxFuture<HttpResponse> {
+    fn call(
+        &self,
+        mut request: Request<Bytes>,
+        params: Params,
+        state: Arc<S>,
+    ) -> BoxFuture<HttpResponse> {
         let result = E1::from_request(&mut request, &params, &state);
         let handler = self.clone();
         Box::pin(async move {
@@ -235,7 +360,12 @@ where
     E1: FromRequest<S>,
     E2: FromRequest<S>,
 {
-    fn call(&self, mut request: Request<Bytes>, params: Params, state: Arc<S>) -> BoxFuture<HttpResponse> {
+    fn call(
+        &self,
+        mut request: Request<Bytes>,
+        params: Params,
+        state: Arc<S>,
+    ) -> BoxFuture<HttpResponse> {
         let first = E1::from_request(&mut request, &params, &state);
         let second = E2::from_request(&mut request, &params, &state);
         let handler = self.clone();
@@ -252,7 +382,8 @@ where
     }
 }
 
-type ErasedHandler<S> = Box<dyn Fn(Request<Bytes>, Params, Arc<S>) -> BoxFuture<HttpResponse> + Send + Sync>;
+type ErasedHandler<S> =
+    Box<dyn Fn(Request<Bytes>, Params, Arc<S>) -> BoxFuture<HttpResponse> + Send + Sync>;
 
 struct Route<S> {
     method: Method,
@@ -302,7 +433,9 @@ impl App<()> {
 }
 
 impl Default for App<()> {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<S: Send + Sync + 'static> App<S> {
@@ -436,8 +569,14 @@ impl<S: Send + Sync + 'static> App<S> {
             if !parameters.is_empty() {
                 operation.insert("parameters".to_owned(), Value::Array(parameters));
             }
-            paths.entry(route.template.clone()).or_insert_with(|| Value::Object(Map::new()));
-            paths.get_mut(&route.template).and_then(Value::as_object_mut).unwrap().insert(method, Value::Object(operation));
+            paths
+                .entry(route.template.clone())
+                .or_insert_with(|| Value::Object(Map::new()));
+            paths
+                .get_mut(&route.template)
+                .and_then(Value::as_object_mut)
+                .unwrap()
+                .insert(method, Value::Object(operation));
         }
         json!({
             "openapi": "3.1.0",
@@ -459,11 +598,18 @@ impl<S: Send + Sync + 'static> App<S> {
                 builder = builder.header(*name, *value);
             }
         }
-        let request = builder.body(body.unwrap_or_default()).expect("valid test request");
-        TestResponse { response: Some(self.handle(request).await) }
+        let request = builder
+            .body(body.unwrap_or_default())
+            .expect("valid test request");
+        TestResponse {
+            response: Some(self.handle(request).await),
+        }
     }
 
-    pub async fn listen(self, address: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn listen(
+        self,
+        address: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listener = tokio::net::TcpListener::bind(address).await?;
         let app = Arc::new(self);
         loop {
@@ -475,11 +621,17 @@ impl<S: Send + Sync + 'static> App<S> {
                     let app = Arc::clone(&app);
                     async move {
                         let (parts, body) = request.into_parts();
-                        let body = body.collect().await.map(|body| body.to_bytes()).unwrap_or_default();
+                        let body = body
+                            .collect()
+                            .await
+                            .map(|body| body.to_bytes())
+                            .unwrap_or_default();
                         Ok::<_, Infallible>(app.handle(Request::from_parts(parts, body)).await)
                     }
                 });
-                let _ = hyper::server::conn::http1::Builder::new().serve_connection(io, service).await;
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(io, service)
+                    .await;
             });
         }
     }
@@ -489,14 +641,30 @@ impl<S: Send + Sync + 'static> App<S> {
         H: Clone + Handler<S, A>,
     {
         let template = normalize_path(path);
-        assert!(self.routes.iter().all(|route| route.method != method || route.template != template), "duplicate route");
+        assert!(
+            self.routes
+                .iter()
+                .all(|route| route.method != method || route.template != template),
+            "duplicate route"
+        );
         let segments = parse_template(&template);
-        let erased: ErasedHandler<S> = Box::new(move |request, params, state| handler.call(request, params, state));
+        let erased: ErasedHandler<S> =
+            Box::new(move |request, params, state| handler.call(request, params, state));
         let index = self.routes.len();
-        if segments.iter().all(|segment| matches!(segment, Segment::Static(_))) {
-            self.static_routes.insert((method.clone(), template.clone()), index);
+        if segments
+            .iter()
+            .all(|segment| matches!(segment, Segment::Static(_)))
+        {
+            self.static_routes
+                .insert((method.clone(), template.clone()), index);
         }
-        self.routes.push(Route { method, template, segments, handler: erased, operation: Operation::default() });
+        self.routes.push(Route {
+            method,
+            template,
+            segments,
+            handler: erased,
+            operation: Operation::default(),
+        });
         self.last_route = Some(index);
     }
 
@@ -504,7 +672,10 @@ impl<S: Send + Sync + 'static> App<S> {
         let method = request.method().clone();
         let path = normalize_path(request.uri().path());
         if self.openapi_path.as_deref() == Some(path.as_str()) && method == Method::GET {
-            return response_json_bytes(StatusCode::OK, Bytes::from(self.openapi_document().to_string()));
+            return response_json_bytes(
+                StatusCode::OK,
+                Bytes::from(self.openapi_document().to_string()),
+            );
         }
         if self.swagger_path.as_deref() == Some(path.as_str()) && method == Method::GET {
             return response_text(StatusCode::OK, Bytes::from_static(SWAGGER_HTML.as_bytes()));
@@ -514,26 +685,44 @@ impl<S: Send + Sync + 'static> App<S> {
             return if allow.is_empty() {
                 not_found()
             } else {
-                Response::builder().status(StatusCode::NO_CONTENT).header(header::ALLOW, allow).body(Full::new(Bytes::new())).unwrap()
+                Response::builder()
+                    .status(StatusCode::NO_CONTENT)
+                    .header(header::ALLOW, allow)
+                    .body(Full::new(Bytes::new()))
+                    .unwrap()
             };
         }
         if let Some(index) = self.static_routes.get(&(method.clone(), path.clone())) {
-            return (self.routes[*index].handler)(request, Params::default(), Arc::clone(&self.state)).await;
+            return (self.routes[*index].handler)(
+                request,
+                Params::default(),
+                Arc::clone(&self.state),
+            )
+            .await;
         }
-        if method == Method::HEAD {
-            if let Some(index) = self.static_routes.get(&(Method::GET, path.clone())) {
-                return (self.routes[*index].handler)(request, Params::default(), Arc::clone(&self.state)).await;
-            }
+        if method == Method::HEAD
+            && let Some(index) = self.static_routes.get(&(Method::GET, path.clone()))
+        {
+            return (self.routes[*index].handler)(
+                request,
+                Params::default(),
+                Arc::clone(&self.state),
+            )
+            .await;
         }
         for route in &self.routes {
-            if route.method == method {
-                if let Some(params) = match_route(&route.segments, &path) {
-                    return (route.handler)(request, params, Arc::clone(&self.state)).await;
-                }
+            if route.method == method
+                && let Some(params) = match_route(&route.segments, &path)
+            {
+                return (route.handler)(request, params, Arc::clone(&self.state)).await;
             }
         }
         if !self.allowed_methods(&path).is_empty() {
-            return Response::builder().status(StatusCode::METHOD_NOT_ALLOWED).header(header::ALLOW, self.allowed_methods(&path)).body(Full::new(Bytes::new())).unwrap();
+            return Response::builder()
+                .status(StatusCode::METHOD_NOT_ALLOWED)
+                .header(header::ALLOW, self.allowed_methods(&path))
+                .body(Full::new(Bytes::new()))
+                .unwrap();
         }
         not_found()
     }
@@ -541,7 +730,11 @@ impl<S: Send + Sync + 'static> App<S> {
     fn allowed_methods(&self, path: &str) -> String {
         let mut methods = Vec::new();
         for route in &self.routes {
-            if match_route(&route.segments, path).is_some() && !methods.iter().any(|method| *method == route.method.as_str()) {
+            if match_route(&route.segments, path).is_some()
+                && !methods
+                    .iter()
+                    .any(|method| *method == route.method.as_str())
+            {
                 methods.push(route.method.as_str());
             }
         }
@@ -560,9 +753,25 @@ impl TestResponse {
         self.response.as_ref().unwrap().status()
     }
 
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.response
+            .as_ref()
+            .and_then(|response| response.headers().get(name))
+            .and_then(|value| value.to_str().ok())
+    }
+
     pub async fn body_string(mut self) -> String {
         let response = self.response.take().unwrap();
-        String::from_utf8(response.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap()
+        String::from_utf8(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap()
     }
 }
 
@@ -596,23 +805,47 @@ fn match_route(segments: &[Segment], path: &str) -> Option<Params> {
 }
 
 fn split_path(path: &str) -> Vec<&str> {
-    if path == "/" { Vec::new() } else { path.trim_matches('/').split('/').filter(|part| !part.is_empty()).collect() }
+    if path == "/" {
+        Vec::new()
+    } else {
+        path.trim_matches('/')
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .collect()
+    }
 }
 
 fn normalize_path(path: &str) -> String {
-    if path.is_empty() { "/".to_owned() } else if path.len() > 1 { path.trim_end_matches('/').to_owned() } else { path.to_owned() }
+    if path.is_empty() {
+        "/".to_owned()
+    } else if path.len() > 1 {
+        path.trim_end_matches('/').to_owned()
+    } else {
+        path.to_owned()
+    }
 }
 
 fn response_text(status: StatusCode, body: Bytes) -> HttpResponse {
-    Response::builder().status(status).header(header::CONTENT_TYPE, "text/plain; charset=utf-8").body(Full::new(body)).unwrap()
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(Full::new(body))
+        .unwrap()
 }
 
 fn response_json<T: Serialize>(status: StatusCode, value: T) -> HttpResponse {
-    response_json_bytes(status, Bytes::from(serde_json::to_vec(&value).unwrap_or_default()))
+    response_json_bytes(
+        status,
+        Bytes::from(serde_json::to_vec(&value).unwrap_or_default()),
+    )
 }
 
 fn response_json_bytes(status: StatusCode, body: Bytes) -> HttpResponse {
-    Response::builder().status(status).header(header::CONTENT_TYPE, "application/json").body(Full::new(body)).unwrap()
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Full::new(body))
+        .unwrap()
 }
 
 fn not_found() -> HttpResponse {
@@ -634,7 +867,8 @@ fn parse_query<T: DeserializeOwned>(query: &str) -> Result<T, ApiError> {
         };
         object.insert(key, json_value);
     }
-    serde_json::from_value(Value::Object(object)).map_err(|error| ApiError::bad_request(error.to_string()))
+    serde_json::from_value(Value::Object(object))
+        .map_err(|error| ApiError::bad_request(error.to_string()))
 }
 
 fn percent_decode(value: &str) -> Result<String, ApiError> {
@@ -643,9 +877,13 @@ fn percent_decode(value: &str) -> Result<String, ApiError> {
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'%' {
-            if index + 2 >= bytes.len() { return Err(ApiError::bad_request("invalid percent encoding")); }
-            let high = hex(bytes[index + 1]).ok_or_else(|| ApiError::bad_request("invalid percent encoding"))?;
-            let low = hex(bytes[index + 2]).ok_or_else(|| ApiError::bad_request("invalid percent encoding"))?;
+            if index + 2 >= bytes.len() {
+                return Err(ApiError::bad_request("invalid percent encoding"));
+            }
+            let high = hex(bytes[index + 1])
+                .ok_or_else(|| ApiError::bad_request("invalid percent encoding"))?;
+            let low = hex(bytes[index + 2])
+                .ok_or_else(|| ApiError::bad_request("invalid percent encoding"))?;
             output.push((high * 16 + low) as char);
             index += 3;
         } else {

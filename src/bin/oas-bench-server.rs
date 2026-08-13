@@ -1,12 +1,5 @@
-use oas_rs::{App, Json};
-use serde::Serialize;
-
-#[derive(Clone, Serialize)]
-struct User {
-    id: u64,
-    name: &'static str,
-}
-
+use bytes::Bytes;
+use oas_rs::{App, JsonBytes};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let implementation = std::env::var("OAS_IMPLEMENTATION").unwrap_or_else(|_| "oas".to_owned());
@@ -14,7 +7,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if implementation == "raw" {
         return raw_server(&address).await;
     }
-    let static_json = Json(User { id: 1, name: "Alice" });
+    let static_json = JsonBytes::new(Bytes::from_static(br#"{"id":1,"name":"Alice"}"#));
     let mut app = App::new().title("oas-rs benchmark").version("0.1.0");
     app.get("/plaintext", || async { "OK" });
     app.get("/json-static", move || {
@@ -39,13 +32,27 @@ async fn raw_server(address: &str) -> Result<(), Box<dyn std::error::Error + Sen
             let io = TokioIo::new(stream);
             let service = hyper::service::service_fn(|request: Request<Incoming>| async move {
                 let response = if request.uri().path() == "/plaintext" {
-                    Response::builder().status(StatusCode::OK).body(Full::new(Bytes::from_static(b"OK"))).unwrap()
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Full::new(Bytes::from_static(b"OK")))
+                        .unwrap()
+                } else if request.uri().path() == "/json-static" {
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header("content-type", "application/json")
+                        .body(Full::new(Bytes::from_static(br#"{"id":1,"name":"Alice"}"#)))
+                        .unwrap()
                 } else {
-                    Response::builder().status(StatusCode::NOT_FOUND).body(Full::new(Bytes::from_static(b"Not Found"))).unwrap()
+                    Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .body(Full::new(Bytes::from_static(b"Not Found")))
+                        .unwrap()
                 };
                 Ok::<_, std::convert::Infallible>(response)
             });
-            let _ = hyper::server::conn::http1::Builder::new().serve_connection(io, service).await;
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(io, service)
+                .await;
         });
     }
 }

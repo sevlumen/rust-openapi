@@ -1,0 +1,41 @@
+services:
+  oas:
+    build:
+      context: ..
+      dockerfile: benchmarks/Dockerfile
+    environment:
+      OAS_IMPLEMENTATION: oas
+      OAS_LISTEN: 0.0.0.0:8080
+    cpuset: "${API_CPUSET:-0-3}"
+    mem_limit: 1g
+    networks: [bench]
+
+  raw:
+    build:
+      context: ..
+      dockerfile: benchmarks/Dockerfile
+    environment:
+      OAS_IMPLEMENTATION: raw
+      OAS_LISTEN: 0.0.0.0:8080
+    cpuset: "${API_CPUSET:-0-3}"
+    mem_limit: 1g
+    networks: [bench]
+
+  k6:
+    image: grafana/k6:0.55.0
+    working_dir: /bench
+    volumes:
+      - ./:/bench:ro
+      - ./results:/results
+    environment:
+      TARGET_URL: http://oas:8080
+      VUS: 32
+      ITERATIONS: 1000000
+      WARMUP_SECONDS: 30
+      RESULT_FILE: /results/k6-summary.json
+    cpuset: "${LOAD_CPUSET:-8-11}"
+    networks: [bench]
+
+networks:
+  bench:
+    driver: bridge
