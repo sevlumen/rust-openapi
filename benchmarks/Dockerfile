@@ -3,6 +3,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY benches ./benches
+COPY oas-rs-macros ./oas-rs-macros
 RUN cargo build --release --locked --bin oas-bench-server
 
 FROM debian:bookworm-slim
