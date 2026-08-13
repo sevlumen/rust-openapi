@@ -14,10 +14,10 @@ Source plan: `C:\Users\Q\Downloads\2026-08-13-oas-rust-framework-acceptance-benc
 | Stage | Command | Evidence |
 |---|---|---|
 | RED | `cargo test --test acceptance` | Initial run compiled dependencies, then failed because `src/lib.rs` was absent. |
-| GREEN | `cargo test --workspace --all-targets` | 3 acceptance tests passed; router microbench executable also completed. |
+| GREEN | `cargo test --workspace --all-targets` | 8 acceptance tests passed; router microbench executable also completed. |
 | GREEN | `cargo test --doc --workspace` | Doc-test target completed with no failures. |
 | GREEN | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Completed with zero warnings. |
-| Docker smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10 -Runs 1 -Vus 1 -Version smoke3` | Both raw and oas containers ran, measured errors were zero; report remains `INCONCLUSIVE` by design. |
+| Docker smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10 -Runs 1 -Vus 1 -Version matrix-smoke3` | Raw and framework containers ran for the header case with zero measured errors; the partial report remains `INCONCLUSIVE` by design. |
 
 ## Guarantees covered by tests
 
@@ -27,8 +27,9 @@ Source plan: `C:\Users\Q\Downloads\2026-08-13-oas-rust-framework-acceptance-benc
 | 2 | HEAD, 405/Allow, OPTIONS, 404 and OpenAPI/Swagger endpoints work | `tests/acceptance.rs::http_semantics_and_typed_body_header_are_preserved` | PASS |
 | 3 | JSON body and typed header extractors reject/parse at the boundary | `tests/acceptance.rs::http_semantics_and_typed_body_header_are_preserved` | PASS |
 | 4 | Registered summary/tag metadata appears in an OpenAPI 3.1 document | `tests/acceptance.rs::openapi_describes_registered_operations` | PASS |
-| 5 | Release profile and raw/framework Docker images build from the same locked dependencies | `cargo build --release --locked`, `benchmarks/Dockerfile` | PASS |
+| 5 | Router precedence, percent-decoding, duplicate detection, malformed templates, and 10k static routes are covered | `tests/acceptance.rs` | PASS |
+| 6 | Release profile and raw/framework Docker images build from the same locked dependencies | `cargo build --release --locked`, `benchmarks/Dockerfile` | PASS |
 
 ## Known gaps
 
-The current implementation is a v0.1 foundation, not evidence that the full 1% release contract has passed. PostgreSQL, allocation counters, CPU/RSS capture, 7-run paired aggregation, 10k-route stress, macro compile-fail tests, and CI dedicated-host gating remain follow-ups. The benchmark script intentionally reports `INCONCLUSIVE` until those gates and confidence intervals are available.
+The current implementation is a v0.1 foundation, not evidence that the full 1% release contract has passed. PostgreSQL connectivity is implemented and smoke-tested with 16 persistent prepared connections, but the full 7-run/1M-request gate was not run. The router microbench currently reports an extra allocation cost versus raw Hyper, and CPU/RSS capture, macro compile-fail tests, fuzzing, and CI dedicated-host gating remain follow-ups. The benchmark script intentionally reports `INCONCLUSIVE` until those gates and confidence intervals are available.

@@ -5,7 +5,7 @@
 //! the explicitly registered OpenAPI endpoint is requested.
 
 use bytes::Bytes;
-use http::{Request, Response, StatusCode, header};
+use http::{HeaderValue, Request, Response, StatusCode, header};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use serde::{Serialize, de::DeserializeOwned};
@@ -31,6 +31,17 @@ impl Params {
             .iter()
             .find(|(key, _)| key == name)
             .map(|(_, value)| value.as_str())
+    }
+}
+
+impl<S: Send + Sync + 'static> FromRequest<S> for Params {
+    fn from_request(
+        _request: &mut Request<Bytes>,
+        params: &Params,
+        _state: &Arc<S>,
+    ) -> BoxFuture<Result<Self, ApiError>> {
+        let params = params.clone();
+        Box::pin(async move { Ok(params) })
     }
 }
 
@@ -96,6 +107,25 @@ pub trait IntoResponse: Send + 'static {
     fn into_response(self) -> HttpResponse;
 }
 
+pub trait ResponseMetadata {
+    fn status_code() -> StatusCode {
+        StatusCode::OK
+    }
+    fn response_schema() -> Option<Value> {
+        None
+    }
+}
+
+impl ResponseMetadata for &'static str {}
+impl ResponseMetadata for String {}
+impl ResponseMetadata for Bytes {}
+impl ResponseMetadata for JsonBytes {}
+impl ResponseMetadata for () {
+    fn status_code() -> StatusCode {
+        StatusCode::NO_CONTENT
+    }
+}
+
 impl IntoResponse for &'static str {
     fn into_response(self) -> HttpResponse {
         response_text(StatusCode::OK, Bytes::from_static(self.as_bytes()))
@@ -118,6 +148,7 @@ impl IntoResponse for () {
     fn into_response(self) -> HttpResponse {
         Response::builder()
             .status(StatusCode::NO_CONTENT)
+            .header(header::CONTENT_LENGTH, "0")
             .body(Full::new(Bytes::new()))
             .unwrap()
     }
@@ -139,6 +170,12 @@ impl<T: Serialize + Send + 'static> IntoResponse for Json<T> {
             )
             .into_response(),
         }
+    }
+}
+
+impl<T: Serialize + Send + 'static> ResponseMetadata for Json<T> {
+    fn response_schema() -> Option<Value> {
+        Some(json!({ "type": "object" }))
     }
 }
 
@@ -171,6 +208,15 @@ impl<T: Serialize + Send + 'static> IntoResponse for Created<T> {
     }
 }
 
+impl<T: Serialize + Send + 'static> ResponseMetadata for Created<T> {
+    fn status_code() -> StatusCode {
+        StatusCode::CREATED
+    }
+    fn response_schema() -> Option<Value> {
+        Some(json!({ "type": "object" }))
+    }
+}
+
 /// Explicit bodyless response for `204 No Content` handlers.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoContent;
@@ -178,6 +224,32 @@ pub struct NoContent;
 impl IntoResponse for NoContent {
     fn into_response(self) -> HttpResponse {
         ().into_response()
+    }
+}
+
+impl ResponseMetadata for NoContent {
+    fn status_code() -> StatusCode {
+        StatusCode::NO_CONTENT
+    }
+}
+
+/// Explicit bodyless `304 Not Modified` response.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NotModified;
+
+impl IntoResponse for NotModified {
+    fn into_response(self) -> HttpResponse {
+        Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::CONTENT_LENGTH, "0")
+            .body(Full::new(Bytes::new()))
+            .unwrap()
+    }
+}
+
+impl ResponseMetadata for NotModified {
+    fn status_code() -> StatusCode {
+        StatusCode::NOT_MODIFIED
     }
 }
 
@@ -190,9 +262,19 @@ impl<T: IntoResponse> IntoResponse for Result<T, ApiError> {
     }
 }
 
+impl<T: ResponseMetadata> ResponseMetadata for Result<T, ApiError> {
+    fn status_code() -> StatusCode {
+        T::status_code()
+    }
+    fn response_schema() -> Option<Value> {
+        T::response_schema()
+    }
+}
+
 /// A handler implementation is monomorphized at registration time and stored
 /// as a single erased service only at the router boundary.
 pub trait Handler<S, Args>: Send + Sync + 'static {
+    type Response: ResponseMetadata;
     fn call(
         &self,
         request: Request<Bytes>,
@@ -313,8 +395,9 @@ where
     S: Send + Sync + 'static,
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = R> + Send + 'static,
-    R: IntoResponse,
+    R: IntoResponse + ResponseMetadata,
 {
+    type Response = R;
     fn call(
         &self,
         _request: Request<Bytes>,
@@ -331,9 +414,10 @@ where
     S: Send + Sync + 'static,
     F: Fn(E1) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = R> + Send + 'static,
-    R: IntoResponse,
+    R: IntoResponse + ResponseMetadata,
     E1: FromRequest<S>,
 {
+    type Response = R;
     fn call(
         &self,
         mut request: Request<Bytes>,
@@ -356,10 +440,11 @@ where
     S: Send + Sync + 'static,
     F: Fn(E1, E2) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = R> + Send + 'static,
-    R: IntoResponse,
+    R: IntoResponse + ResponseMetadata,
     E1: FromRequest<S>,
     E2: FromRequest<S>,
 {
+    type Response = R;
     fn call(
         &self,
         mut request: Request<Bytes>,
@@ -403,6 +488,8 @@ enum Segment {
 struct Operation {
     tag: Option<String>,
     summary: Option<String>,
+    response_status: StatusCode,
+    response_schema: Option<Value>,
 }
 
 /// The application router and runtime.
@@ -569,6 +656,27 @@ impl<S: Send + Sync + 'static> App<S> {
             if !parameters.is_empty() {
                 operation.insert("parameters".to_owned(), Value::Array(parameters));
             }
+            let status = route.operation.response_status.as_u16().to_string();
+            let mut response = Map::new();
+            response.insert(
+                "description".to_owned(),
+                Value::String(
+                    match route.operation.response_status {
+                        StatusCode::NO_CONTENT => "No Content",
+                        StatusCode::NOT_MODIFIED => "Not Modified",
+                        StatusCode::CREATED => "Created",
+                        _ => "Success",
+                    }
+                    .to_owned(),
+                ),
+            );
+            if let Some(schema) = &route.operation.response_schema {
+                response.insert(
+                    "content".to_owned(),
+                    json!({ "application/json": { "schema": schema } }),
+                );
+            }
+            operation.insert("responses".to_owned(), json!({ status: response }));
             paths
                 .entry(route.template.clone())
                 .or_insert_with(|| Value::Object(Map::new()));
@@ -663,7 +771,12 @@ impl<S: Send + Sync + 'static> App<S> {
             template,
             segments,
             handler: erased,
-            operation: Operation::default(),
+            operation: Operation {
+                tag: None,
+                summary: None,
+                response_status: <H::Response as ResponseMetadata>::status_code(),
+                response_schema: <H::Response as ResponseMetadata>::response_schema(),
+            },
         });
         self.last_route = Some(index);
     }
@@ -688,25 +801,26 @@ impl<S: Send + Sync + 'static> App<S> {
                 Response::builder()
                     .status(StatusCode::NO_CONTENT)
                     .header(header::ALLOW, allow)
+                    .header(header::CONTENT_LENGTH, "0")
                     .body(Full::new(Bytes::new()))
                     .unwrap()
             };
         }
         if let Some(index) = self.static_routes.get(&(method.clone(), path.clone())) {
-            return (self.routes[*index].handler)(
-                request,
-                Params::default(),
-                Arc::clone(&self.state),
+            return maybe_head(
+                &method,
+                (self.routes[*index].handler)(request, Params::default(), Arc::clone(&self.state))
+                    .await,
             )
             .await;
         }
         if method == Method::HEAD
             && let Some(index) = self.static_routes.get(&(Method::GET, path.clone()))
         {
-            return (self.routes[*index].handler)(
-                request,
-                Params::default(),
-                Arc::clone(&self.state),
+            return maybe_head(
+                &method,
+                (self.routes[*index].handler)(request, Params::default(), Arc::clone(&self.state))
+                    .await,
             )
             .await;
         }
@@ -714,13 +828,18 @@ impl<S: Send + Sync + 'static> App<S> {
             if route.method == method
                 && let Some(params) = match_route(&route.segments, &path)
             {
-                return (route.handler)(request, params, Arc::clone(&self.state)).await;
+                return maybe_head(
+                    &method,
+                    (route.handler)(request, params, Arc::clone(&self.state)).await,
+                )
+                .await;
             }
         }
         if !self.allowed_methods(&path).is_empty() {
             return Response::builder()
                 .status(StatusCode::METHOD_NOT_ALLOWED)
                 .header(header::ALLOW, self.allowed_methods(&path))
+                .header(header::CONTENT_LENGTH, "0")
                 .body(Full::new(Bytes::new()))
                 .unwrap();
         }
@@ -780,8 +899,13 @@ fn parse_template(path: &str) -> Vec<Segment> {
         .into_iter()
         .map(|part| {
             if part.starts_with('{') && part.ends_with('}') {
+                assert!(part.len() > 2, "invalid route template");
                 Segment::Capture(part[1..part.len() - 1].to_owned())
             } else {
+                assert!(
+                    !part.contains('{') && !part.contains('}'),
+                    "invalid route template"
+                );
                 Segment::Static(part.to_owned())
             }
         })
@@ -798,7 +922,7 @@ fn match_route(segments: &[Segment], path: &str) -> Option<Params> {
         match segment {
             Segment::Static(expected) if expected != part => return None,
             Segment::Static(_) => {}
-            Segment::Capture(name) => captures.push((name.clone(), part.to_owned())),
+            Segment::Capture(name) => captures.push((name.clone(), percent_decode(part).ok()?)),
         }
     }
     Some(Params(captures))
@@ -829,6 +953,7 @@ fn response_text(status: StatusCode, body: Bytes) -> HttpResponse {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::CONTENT_LENGTH, body.len())
         .body(Full::new(body))
         .unwrap()
 }
@@ -844,12 +969,30 @@ fn response_json_bytes(status: StatusCode, body: Bytes) -> HttpResponse {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CONTENT_LENGTH, body.len())
         .body(Full::new(body))
         .unwrap()
 }
 
 fn not_found() -> HttpResponse {
     response_text(StatusCode::NOT_FOUND, Bytes::from_static(b"Not Found"))
+}
+
+async fn maybe_head(method: &Method, response: HttpResponse) -> HttpResponse {
+    if method != Method::HEAD {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let body = body
+        .collect()
+        .await
+        .map(|body| body.to_bytes())
+        .unwrap_or_default();
+    parts.headers.insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&body.len().to_string()).unwrap(),
+    );
+    Response::from_parts(parts, Full::new(Bytes::new()))
 }
 
 fn parse_query<T: DeserializeOwned>(query: &str) -> Result<T, ApiError> {

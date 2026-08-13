@@ -1,4 +1,21 @@
 services:
+  postgres:
+    image: postgres:16.4-bookworm
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    cpuset: "${POSTGRES_CPUSET:-4-7}"
+    mem_limit: 1g
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bench -d bench"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    networks: [bench]
+
   oas:
     build:
       context: ..
@@ -6,8 +23,12 @@ services:
     environment:
       OAS_IMPLEMENTATION: oas
       OAS_LISTEN: 0.0.0.0:8080
+      DATABASE_URL: postgres://bench:bench@postgres:5432/bench
     cpuset: "${API_CPUSET:-0-3}"
     mem_limit: 1g
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks: [bench]
 
   raw:
@@ -17,8 +38,12 @@ services:
     environment:
       OAS_IMPLEMENTATION: raw
       OAS_LISTEN: 0.0.0.0:8080
+      DATABASE_URL: postgres://bench:bench@postgres:5432/bench
     cpuset: "${API_CPUSET:-0-3}"
     mem_limit: 1g
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks: [bench]
 
   k6:
