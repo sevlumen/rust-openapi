@@ -10,13 +10,13 @@ use uuid::Uuid;
 #[derive(Clone, Default)]
 struct TestState;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, oas_rs::OpenApi)]
 struct Search {
     page: u32,
     active: bool,
 }
 
-#[derive(Deserialize, Serialize, PartialEq, Debug)]
+#[derive(Deserialize, Serialize, PartialEq, Debug, oas_rs::OpenApi)]
 struct Payload {
     name: String,
 }
@@ -319,6 +319,14 @@ fn openapi_uses_extractor_types_and_response_statuses() {
     assert_eq!(
         document["paths"]["/optional-trace"]["get"]["parameters"][0]["required"],
         false
+    );
+    assert_eq!(
+        document["paths"]["/search"]["get"]["parameters"][0]["name"],
+        "page"
+    );
+    assert_eq!(
+        document["paths"]["/search"]["get"]["parameters"][1]["schema"]["type"],
+        "boolean"
     );
 }
 
