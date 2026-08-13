@@ -74,6 +74,12 @@ async fn not_modified() -> NotModified {
     NotModified
 }
 
+async fn created() -> oas_rs::Created<Payload> {
+    oas_rs::Created(Payload {
+        name: "created".to_owned(),
+    })
+}
+
 #[tokio::test]
 async fn app_registers_static_dynamic_and_query_routes() {
     let mut app = App::new().with_state(TestState);
@@ -186,6 +192,11 @@ async fn router_supports_multiple_params_precedence_and_percent_encoding() {
             .await,
         "dynamic:a b"
     );
+
+    let response = app.oneshot(Method::HEAD, "/users/42", &[], None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.header("content-length"), Some("2"));
+    assert_eq!(response.body_string().await, "");
 }
 
 #[test]
@@ -234,4 +245,67 @@ fn openapi_marks_uuid_path_and_bodyless_response() {
         document["paths"]["/cached"]["get"]["responses"]["304"]["description"],
         "Not Modified"
     );
+}
+
+#[test]
+fn openapi_uses_extractor_types_and_response_statuses() {
+    let mut app = App::new().with_state(TestState);
+    app.get("/users/{id}", user);
+    app.get("/uuid/{id}", uuid_user);
+    app.post("/created", created);
+    let document = app.openapi_document();
+
+    assert_eq!(
+        document["paths"]["/users/{id}"]["get"]["parameters"][0]["schema"]["type"],
+        "integer"
+    );
+    assert_eq!(
+        document["paths"]["/users/{id}"]["get"]["parameters"][0]["schema"]["format"],
+        "int64"
+    );
+    assert_eq!(
+        document["paths"]["/uuid/{id}"]["get"]["parameters"][0]["schema"]["format"],
+        "uuid"
+    );
+    assert_eq!(
+        document["paths"]["/created"]["post"]["responses"]["201"]["description"],
+        "Created"
+    );
+}
+
+#[tokio::test]
+async fn all_registered_http_methods_and_bodyless_responses_conform() {
+    let mut app = App::new();
+    app.get("/resource", hello);
+    app.head("/head-only", hello);
+    app.post("/resource", hello);
+    app.put("/resource", hello);
+    app.patch("/resource", hello);
+    app.delete("/resource", empty);
+    app.options("/explicit-options", || async { NoContent });
+    app.get("/cached", not_modified);
+
+    for method in [
+        Method::GET,
+        Method::HEAD,
+        Method::POST,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+    ] {
+        let response = app.oneshot(method, "/resource", &[], None).await;
+        assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+    let response = app
+        .oneshot(Method::OPTIONS, "/resource", &[], None)
+        .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(response.body_string().await, "");
+
+    let response = app.oneshot(Method::GET, "/resource/", &[], None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = app.oneshot(Method::GET, "/cached", &[], None).await;
+    assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(response.header("content-length"), Some("0"));
+    assert_eq!(response.body_string().await, "");
 }
