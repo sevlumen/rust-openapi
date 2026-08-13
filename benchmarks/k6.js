@@ -13,18 +13,18 @@ const mode = __ENV.MODE || 'measured';
 const benchmarkCase = __ENV.CASE || 'plaintext';
 
 const cases = {
-  plaintext: { method: 'get', path: '/plaintext', expected: 200 },
-  'static-json': { method: 'get', path: '/json-static', expected: 200 },
-  'static-route': { method: 'get', path: '/fixed/path', expected: 200 },
-  'path-integer': { method: 'get', path: '/users/123456', expected: 200 },
-  'path-uuid': { method: 'get', path: '/uuid/550e8400-e29b-41d4-a716-446655440000', expected: 200 },
-  query: { method: 'get', path: '/search?page=42&active=true', expected: 200 },
-  header: { method: 'get', path: '/trace', headers: { 'X-Trace-ID': 'abc123' }, expected: 200 },
-  'json-small': { method: 'get', path: '/json-small', expected: 200 },
-  'json-100-users': { method: 'get', path: '/users', expected: 200 },
-  postgres: { method: 'get', path: '/users-db', expected: 200 },
-  '404': { method: 'get', path: '/missing', expected: 404 },
-  '405': { method: 'post', path: '/plaintext', expected: 405 },
+  plaintext: { method: 'get', path: '/plaintext', expected: 200, body: (body) => body === 'OK' },
+  'static-json': { method: 'get', path: '/json-static', expected: 200, body: (body) => body === '{"id":1,"name":"Alice"}' },
+  'static-route': { method: 'get', path: '/fixed/path', expected: 200, body: (body) => body === 'OK' },
+  'path-integer': { method: 'get', path: '/users/123456', expected: 200, body: (body) => body === '123456' },
+  'path-uuid': { method: 'get', path: '/uuid/550e8400-e29b-41d4-a716-446655440000', expected: 200, body: (body) => body === '550e8400-e29b-41d4-a716-446655440000' },
+  query: { method: 'get', path: '/search?page=42&active=true', expected: 200, body: (body) => body === '42:true' },
+  header: { method: 'get', path: '/trace', headers: { 'X-Trace-ID': 'abc123' }, expected: 200, body: (body) => body === 'abc123' },
+  'json-small': { method: 'get', path: '/json-small', expected: 200, body: (body) => body === '{"id":1,"name":"Alice"}' },
+  'json-100-users': { method: 'get', path: '/users', expected: 200, body: (body) => body.includes('"User 100"') },
+  postgres: { method: 'get', path: '/users-db', expected: 200, body: (body) => body.includes('user100@example.test') },
+  '404': { method: 'get', path: '/missing', expected: 404, body: (body) => body === 'Not Found' },
+  '405': { method: 'post', path: '/plaintext', expected: 405, body: (body) => body === '' },
 };
 
 function send(selected) {
@@ -52,7 +52,11 @@ export function measured() {
   const response = send(selected);
   measuredRequests.add(1);
   measuredDuration.add(response.timings.duration);
-  if (!check(response, { [`${benchmarkCase} status is expected`]: (value) => value.status === selected.expected })) {
+  const checks = {
+    [`${benchmarkCase} status is expected`]: (value) => value.status === selected.expected,
+    [`${benchmarkCase} body is equivalent`]: (value) => selected.body(value.body),
+  };
+  if (!check(response, checks)) {
     measuredErrors.add(1);
   }
 }
