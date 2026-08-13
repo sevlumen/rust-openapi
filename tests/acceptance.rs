@@ -1,7 +1,8 @@
 use bytes::Bytes;
 use http::StatusCode;
-use oas_rs::{ApiError, App, Header, HeaderSpec, Json, Method, Path, Query, State};
+use oas_rs::{ApiError, App, Header, HeaderSpec, Json, Method, NoContent, Params, Path, Query, State};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Clone, Default)]
 struct TestState;
@@ -46,6 +47,18 @@ async fn echo(Json(payload): Json<Payload>) -> Json<Payload> {
 
 async fn trace(Header(trace): Header<TraceId>) -> String {
     trace.0
+}
+
+async fn params(Params(params): Params) -> String {
+    format!("{}:{}", params.get("org").unwrap(), params.get("user").unwrap())
+}
+
+async fn uuid_user(Path(id): Path<Uuid>) -> Json<Payload> {
+    Json(Payload { name: id.to_string() })
+}
+
+async fn empty() -> NoContent {
+    NoContent
 }
 
 #[tokio::test]
@@ -119,4 +132,54 @@ fn openapi_describes_registered_operations() {
         document["paths"]["/plaintext"]["get"]["summary"],
         "Static response"
     );
+}
+
+#[tokio::test]
+async fn router_supports_multiple_params_precedence_and_percent_encoding() {
+    let mut app = App::new();
+    app.get("/users/{id}", |Path(id): Path<String>| async move { format!("dynamic:{id}") });
+    app.get("/users/me", || async { "static" });
+    app.get("/orgs/{org}/users/{user}", params);
+
+    assert_eq!(app.oneshot(Method::GET, "/users/me", &[], None).await.body_string().await, "static");
+    assert_eq!(app.oneshot(Method::GET, "/users/42", &[], None).await.body_string().await, "dynamic:42");
+    assert_eq!(app.oneshot(Method::GET, "/orgs/acme/users/alice", &[], None).await.body_string().await, "acme:alice");
+    assert_eq!(app.oneshot(Method::GET, "/users/a%20b", &[], None).await.body_string().await, "dynamic:a b");
+}
+
+#[test]
+#[should_panic(expected = "duplicate route")]
+fn duplicate_routes_are_rejected_at_registration() {
+    let mut app = App::new();
+    app.get("/duplicate", hello);
+    app.get("/duplicate", hello);
+}
+
+#[test]
+#[should_panic(expected = "invalid route template")]
+fn malformed_route_templates_are_rejected_at_registration() {
+    let mut app = App::new();
+    app.get("/users/{id", hello);
+}
+
+#[tokio::test]
+async fn ten_thousand_static_routes_remain_correct() {
+    let mut app = App::new();
+    for index in 0..10_000 {
+        let path = format!("/route/{index}");
+        app.get(&path, || async { "OK" });
+    }
+    let response = app.oneshot(Method::GET, "/route/9999", &[], None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.body_string().await, "OK");
+}
+
+#[test]
+fn openapi_marks_uuid_path_and_bodyless_response() {
+    let mut app = App::new();
+    app.get("/users/{id}", uuid_user);
+    app.delete("/users/{id}", empty);
+    let document = app.openapi_document();
+    assert_eq!(document["paths"]["/users/{id}"]["get"]["parameters"][0]["schema"]["format"], "uuid");
+    assert_eq!(document["paths"]["/users/{id}"]["delete"]["responses"]["204"]["description"], "No Content");
 }
