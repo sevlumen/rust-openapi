@@ -11,7 +11,14 @@ use hyper::body::Incoming;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 use std::{
-    collections::HashMap, convert::Infallible, future::Future, pin::Pin, str::FromStr, sync::Arc,
+    collections::HashMap,
+    convert::Infallible,
+    future::Future,
+    mem::{MaybeUninit, align_of, size_of},
+    pin::Pin,
+    str::FromStr,
+    sync::Arc,
+    task::{Context, Poll},
 };
 
 pub use http::Method;
@@ -19,6 +26,91 @@ pub use http::Method as HttpMethod;
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 type HttpResponse = Response<Full<Bytes>>;
+
+const INLINE_FUTURE_SIZE: usize = 128;
+
+#[repr(align(64))]
+struct FutureStorage([MaybeUninit<u8>; INLINE_FUTURE_SIZE]);
+
+struct InlineFuture {
+    storage: FutureStorage,
+    poll_fn: unsafe fn(*mut u8, &mut Context<'_>) -> Poll<HttpResponse>,
+    drop_fn: unsafe fn(*mut u8),
+}
+
+impl InlineFuture {
+    fn new<F>(future: F) -> Self
+    where
+        F: Future<Output = HttpResponse> + Send + 'static,
+    {
+        debug_assert!(size_of::<F>() <= INLINE_FUTURE_SIZE);
+        debug_assert!(align_of::<F>() <= align_of::<FutureStorage>());
+        let mut storage = FutureStorage([MaybeUninit::uninit(); INLINE_FUTURE_SIZE]);
+        unsafe {
+            (storage.0.as_mut_ptr() as *mut F).write(future);
+        }
+        Self {
+            storage,
+            poll_fn: poll_inline::<F>,
+            drop_fn: drop_inline::<F>,
+        }
+    }
+}
+
+impl Drop for InlineFuture {
+    fn drop(&mut self) {
+        unsafe { (self.drop_fn)(self.storage.0.as_mut_ptr() as *mut u8) };
+    }
+}
+
+unsafe fn poll_inline<F>(storage: *mut u8, context: &mut Context<'_>) -> Poll<HttpResponse>
+where
+    F: Future<Output = HttpResponse> + Send + 'static,
+{
+    unsafe { Pin::new_unchecked(&mut *(storage as *mut F)).poll(context) }
+}
+
+unsafe fn drop_inline<F>(storage: *mut u8)
+where
+    F: Future<Output = HttpResponse> + Send + 'static,
+{
+    unsafe { std::ptr::drop_in_place(storage as *mut F) };
+}
+
+pub struct HandlerFuture(HandlerFutureKind);
+
+enum HandlerFutureKind {
+    Inline(InlineFuture),
+    Boxed(BoxFuture<HttpResponse>),
+}
+
+impl HandlerFuture {
+    fn from_future<F>(future: F) -> Self
+    where
+        F: Future<Output = HttpResponse> + Send + 'static,
+    {
+        if size_of::<F>() <= INLINE_FUTURE_SIZE && align_of::<F>() <= align_of::<FutureStorage>() {
+            Self(HandlerFutureKind::Inline(InlineFuture::new(future)))
+        } else {
+            Self(HandlerFutureKind::Boxed(Box::pin(future)))
+        }
+    }
+}
+
+impl Future for HandlerFuture {
+    type Output = HttpResponse;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        unsafe {
+            match &mut self.get_unchecked_mut().0 {
+                HandlerFutureKind::Inline(future) => {
+                    (future.poll_fn)(future.storage.0.as_mut_ptr() as *mut u8, context)
+                }
+                HandlerFutureKind::Boxed(future) => Pin::new_unchecked(future).poll(context),
+            }
+        }
+    }
+}
 
 /// A path capture collection. Values are owned at the dispatch boundary so an
 /// extractor can safely outlive the router's matching call.
@@ -35,6 +127,10 @@ impl Params {
 }
 
 impl<S: Send + Sync + 'static> FromRequest<S> for Params {
+    fn openapi_request() -> OpenApiRequest {
+        OpenApiRequest::default()
+    }
+
     fn from_request(
         _request: &mut Request<Bytes>,
         params: &Params,
@@ -66,6 +162,72 @@ pub struct Header<T>(pub T);
 pub trait HeaderSpec: Sized + Send + 'static {
     const NAME: &'static str;
     fn parse(value: &str) -> Result<Self, ApiError>;
+}
+
+/// The small set of type schemas that can be inferred without runtime
+/// reflection. Applications can implement this trait for their own scalar
+/// path types.
+pub trait OpenApiType {
+    fn schema() -> Value;
+}
+
+impl OpenApiType for String {
+    fn schema() -> Value {
+        json!({ "type": "string" })
+    }
+}
+
+impl OpenApiType for u32 {
+    fn schema() -> Value {
+        json!({ "type": "integer", "format": "int32" })
+    }
+}
+
+impl OpenApiType for u64 {
+    fn schema() -> Value {
+        json!({ "type": "integer", "format": "int64" })
+    }
+}
+
+impl OpenApiType for i32 {
+    fn schema() -> Value {
+        json!({ "type": "integer", "format": "int32" })
+    }
+}
+
+impl OpenApiType for i64 {
+    fn schema() -> Value {
+        json!({ "type": "integer", "format": "int64" })
+    }
+}
+
+impl OpenApiType for bool {
+    fn schema() -> Value {
+        json!({ "type": "boolean" })
+    }
+}
+
+impl OpenApiType for uuid::Uuid {
+    fn schema() -> Value {
+        json!({ "type": "string", "format": "uuid" })
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct OpenApiRequest {
+    path_schemas: Vec<Value>,
+    parameters: Vec<Value>,
+    request_body: Option<Value>,
+}
+
+impl OpenApiRequest {
+    fn merge(&mut self, mut other: Self) {
+        self.path_schemas.append(&mut other.path_schemas);
+        self.parameters.append(&mut other.parameters);
+        if self.request_body.is_none() {
+            self.request_body = other.request_body;
+        }
+    }
 }
 
 /// Problem-details compatible framework error.
@@ -182,17 +344,24 @@ impl<T: Serialize + Send + 'static> ResponseMetadata for Json<T> {
 /// A JSON body serialized once at startup. Cloning this value only clones the
 /// immutable `Bytes` handle, so the normal request path does not invoke serde.
 #[derive(Clone, Debug)]
-pub struct JsonBytes(pub Bytes);
+pub struct JsonBytes {
+    pub bytes: Bytes,
+    content_length: HeaderValue,
+}
 
 impl JsonBytes {
     pub fn new(bytes: Bytes) -> Self {
-        Self(bytes)
+        let content_length = HeaderValue::from_str(&bytes.len().to_string()).unwrap();
+        Self {
+            bytes,
+            content_length,
+        }
     }
 }
 
 impl IntoResponse for JsonBytes {
     fn into_response(self) -> HttpResponse {
-        response_json_bytes(StatusCode::OK, self.0)
+        response_json_bytes_with_length(StatusCode::OK, self.bytes, self.content_length)
     }
 }
 
@@ -275,15 +444,19 @@ impl<T: ResponseMetadata> ResponseMetadata for Result<T, ApiError> {
 /// as a single erased service only at the router boundary.
 pub trait Handler<S, Args>: Send + Sync + 'static {
     type Response: ResponseMetadata;
-    fn call(
-        &self,
-        request: Request<Bytes>,
-        params: Params,
-        state: Arc<S>,
-    ) -> BoxFuture<HttpResponse>;
+
+    fn openapi_request() -> OpenApiRequest {
+        OpenApiRequest::default()
+    }
+
+    fn call(&self, request: Request<Bytes>, params: Params, state: Arc<S>) -> HandlerFuture;
 }
 
 pub trait FromRequest<S>: Sized + Send + 'static {
+    fn openapi_request() -> OpenApiRequest {
+        OpenApiRequest::default()
+    }
+
     fn from_request(
         request: &mut Request<Bytes>,
         params: &Params,
@@ -304,9 +477,16 @@ impl<S: Send + Sync + 'static> FromRequest<S> for State<S> {
 
 impl<S: Send + Sync + 'static, T> FromRequest<S> for Path<T>
 where
-    T: FromStr + Send + 'static,
+    T: FromStr + OpenApiType + Send + 'static,
     T::Err: std::fmt::Display,
 {
+    fn openapi_request() -> OpenApiRequest {
+        OpenApiRequest {
+            path_schemas: vec![T::schema()],
+            ..OpenApiRequest::default()
+        }
+    }
+
     fn from_request(
         _request: &mut Request<Bytes>,
         params: &Params,
@@ -327,6 +507,10 @@ impl<S: Send + Sync + 'static, T> FromRequest<S> for Query<T>
 where
     T: DeserializeOwned + Send + 'static,
 {
+    fn openapi_request() -> OpenApiRequest {
+        OpenApiRequest::default()
+    }
+
     fn from_request(
         request: &mut Request<Bytes>,
         _params: &Params,
@@ -341,6 +525,20 @@ impl<S: Send + Sync + 'static, T> FromRequest<S> for Json<T>
 where
     T: DeserializeOwned + Send + 'static,
 {
+    fn openapi_request() -> OpenApiRequest {
+        OpenApiRequest {
+            request_body: Some(json!({
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": { "type": "object" }
+                    }
+                }
+            })),
+            ..OpenApiRequest::default()
+        }
+    }
+
     fn from_request(
         request: &mut Request<Bytes>,
         _params: &Params,
@@ -372,6 +570,18 @@ where
 }
 
 impl<S: Send + Sync + 'static, T: HeaderSpec> FromRequest<S> for Header<T> {
+    fn openapi_request() -> OpenApiRequest {
+        OpenApiRequest {
+            parameters: vec![json!({
+                "in": "header",
+                "name": T::NAME,
+                "required": true,
+                "schema": { "type": "string" }
+            })],
+            ..OpenApiRequest::default()
+        }
+    }
+
     fn from_request(
         request: &mut Request<Bytes>,
         _params: &Params,
@@ -390,6 +600,36 @@ impl<S: Send + Sync + 'static, T: HeaderSpec> FromRequest<S> for Header<T> {
     }
 }
 
+impl<S, T> FromRequest<S> for Option<T>
+where
+    S: Send + Sync + 'static,
+    T: FromRequest<S>,
+{
+    fn openapi_request() -> OpenApiRequest {
+        let mut metadata = T::openapi_request();
+        for parameter in &mut metadata.parameters {
+            if let Some(object) = parameter.as_object_mut() {
+                object.insert("required".to_owned(), Value::Bool(false));
+            }
+        }
+        if let Some(request_body) = metadata.request_body.as_mut()
+            && let Some(object) = request_body.as_object_mut()
+        {
+            object.insert("required".to_owned(), Value::Bool(false));
+        }
+        metadata
+    }
+
+    fn from_request(
+        request: &mut Request<Bytes>,
+        params: &Params,
+        state: &Arc<S>,
+    ) -> BoxFuture<Result<Self, ApiError>> {
+        let future = T::from_request(request, params, state);
+        Box::pin(async move { Ok(future.await.ok()) })
+    }
+}
+
 impl<S, F, Fut, R> Handler<S, ()> for F
 where
     S: Send + Sync + 'static,
@@ -398,14 +638,14 @@ where
     R: IntoResponse + ResponseMetadata,
 {
     type Response = R;
-    fn call(
-        &self,
-        _request: Request<Bytes>,
-        _params: Params,
-        _state: Arc<S>,
-    ) -> BoxFuture<HttpResponse> {
+
+    fn openapi_request() -> OpenApiRequest {
+        OpenApiRequest::default()
+    }
+
+    fn call(&self, _request: Request<Bytes>, _params: Params, _state: Arc<S>) -> HandlerFuture {
         let future = (self)();
-        Box::pin(async move { future.await.into_response() })
+        HandlerFuture::from_future(async move { future.await.into_response() })
     }
 }
 
@@ -418,15 +658,15 @@ where
     E1: FromRequest<S>,
 {
     type Response = R;
-    fn call(
-        &self,
-        mut request: Request<Bytes>,
-        params: Params,
-        state: Arc<S>,
-    ) -> BoxFuture<HttpResponse> {
+
+    fn openapi_request() -> OpenApiRequest {
+        E1::openapi_request()
+    }
+
+    fn call(&self, mut request: Request<Bytes>, params: Params, state: Arc<S>) -> HandlerFuture {
         let result = E1::from_request(&mut request, &params, &state);
         let handler = self.clone();
-        Box::pin(async move {
+        HandlerFuture::from_future(async move {
             match result.await {
                 Ok(value) => handler(value).await.into_response(),
                 Err(error) => error.into_response(),
@@ -445,16 +685,18 @@ where
     E2: FromRequest<S>,
 {
     type Response = R;
-    fn call(
-        &self,
-        mut request: Request<Bytes>,
-        params: Params,
-        state: Arc<S>,
-    ) -> BoxFuture<HttpResponse> {
+
+    fn openapi_request() -> OpenApiRequest {
+        let mut metadata = E1::openapi_request();
+        metadata.merge(E2::openapi_request());
+        metadata
+    }
+
+    fn call(&self, mut request: Request<Bytes>, params: Params, state: Arc<S>) -> HandlerFuture {
         let first = E1::from_request(&mut request, &params, &state);
         let second = E2::from_request(&mut request, &params, &state);
         let handler = self.clone();
-        Box::pin(async move {
+        HandlerFuture::from_future(async move {
             let first = match first.await {
                 Ok(value) => value,
                 Err(error) => return error.into_response(),
@@ -467,8 +709,7 @@ where
     }
 }
 
-type ErasedHandler<S> =
-    Box<dyn Fn(Request<Bytes>, Params, Arc<S>) -> BoxFuture<HttpResponse> + Send + Sync>;
+type ErasedHandler<S> = Box<dyn Fn(Request<Bytes>, Params, Arc<S>) -> HandlerFuture + Send + Sync>;
 
 struct Route<S> {
     method: Method,
@@ -490,13 +731,14 @@ struct Operation {
     summary: Option<String>,
     response_status: StatusCode,
     response_schema: Option<Value>,
+    request: OpenApiRequest,
 }
 
 /// The application router and runtime.
 pub struct App<S = ()> {
     state: Arc<S>,
     routes: Vec<Route<S>>,
-    static_routes: HashMap<(Method, String), usize>,
+    static_routes: HashMap<String, Vec<(Method, usize)>>,
     last_route: Option<usize>,
     openapi_path: Option<String>,
     swagger_path: Option<String>,
@@ -640,21 +882,38 @@ impl<S: Send + Sync + 'static> App<S> {
             if let Some(summary) = &route.operation.summary {
                 operation.insert("summary".to_owned(), json!(summary));
             }
-            let parameters = route
-                .segments
-                .iter()
-                .filter_map(|segment| match segment {
-                    Segment::Capture(name) => Some(json!({
-                        "in": "path",
-                        "name": name,
-                        "required": true,
-                        "schema": if name == "id" { json!({"type":"string", "format":"uuid"}) } else { json!({"type":"string"}) }
-                    })),
-                    Segment::Static(_) => None,
-                })
-                .collect::<Vec<_>>();
+            let mut parameters = route.operation.request.parameters.clone();
+            let mut path_schema_index = 0;
+            parameters.extend(
+                route
+                    .segments
+                    .iter()
+                    .filter_map(|segment| match segment {
+                        Segment::Capture(name) => {
+                            let schema = route
+                                .operation
+                                .request
+                                .path_schemas
+                                .get(path_schema_index)
+                                .cloned()
+                                .unwrap_or_else(|| json!({ "type": "string" }));
+                            path_schema_index += 1;
+                            Some(json!({
+                                "in": "path",
+                                "name": name,
+                                "required": true,
+                                "schema": schema
+                            }))
+                        }
+                        Segment::Static(_) => None,
+                    })
+                    .collect::<Vec<_>>(),
+            );
             if !parameters.is_empty() {
                 operation.insert("parameters".to_owned(), Value::Array(parameters));
+            }
+            if let Some(request_body) = &route.operation.request.request_body {
+                operation.insert("requestBody".to_owned(), request_body.clone());
             }
             let status = route.operation.response_status.as_u16().to_string();
             let mut response = Map::new();
@@ -764,7 +1023,9 @@ impl<S: Send + Sync + 'static> App<S> {
             .all(|segment| matches!(segment, Segment::Static(_)))
         {
             self.static_routes
-                .insert((method.clone(), template.clone()), index);
+                .entry(template.clone())
+                .or_default()
+                .push((method.clone(), index));
         }
         self.routes.push(Route {
             method,
@@ -776,6 +1037,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 summary: None,
                 response_status: <H::Response as ResponseMetadata>::status_code(),
                 response_schema: <H::Response as ResponseMetadata>::response_schema(),
+                request: H::openapi_request(),
             },
         });
         self.last_route = Some(index);
@@ -783,18 +1045,18 @@ impl<S: Send + Sync + 'static> App<S> {
 
     async fn handle(&self, request: Request<Bytes>) -> HttpResponse {
         let method = request.method().clone();
-        let path = normalize_path(request.uri().path());
-        if self.openapi_path.as_deref() == Some(path.as_str()) && method == Method::GET {
+        let path = normalize_request_path(request.uri().path());
+        if self.openapi_path.as_deref() == Some(path) && method == Method::GET {
             return response_json_bytes(
                 StatusCode::OK,
                 Bytes::from(self.openapi_document().to_string()),
             );
         }
-        if self.swagger_path.as_deref() == Some(path.as_str()) && method == Method::GET {
+        if self.swagger_path.as_deref() == Some(path) && method == Method::GET {
             return response_text(StatusCode::OK, Bytes::from_static(SWAGGER_HTML.as_bytes()));
         }
         if method == Method::OPTIONS {
-            let allow = self.allowed_methods(&path);
+            let allow = self.allowed_methods(path);
             return if allow.is_empty() {
                 not_found()
             } else {
@@ -806,27 +1068,27 @@ impl<S: Send + Sync + 'static> App<S> {
                     .unwrap()
             };
         }
-        if let Some(index) = self.static_routes.get(&(method.clone(), path.clone())) {
+        if let Some(index) = self.static_route(&method, path) {
             return maybe_head(
                 &method,
-                (self.routes[*index].handler)(request, Params::default(), Arc::clone(&self.state))
+                (self.routes[index].handler)(request, Params::default(), Arc::clone(&self.state))
                     .await,
             )
             .await;
         }
         if method == Method::HEAD
-            && let Some(index) = self.static_routes.get(&(Method::GET, path.clone()))
+            && let Some(index) = self.static_route(&Method::GET, path)
         {
             return maybe_head(
                 &method,
-                (self.routes[*index].handler)(request, Params::default(), Arc::clone(&self.state))
+                (self.routes[index].handler)(request, Params::default(), Arc::clone(&self.state))
                     .await,
             )
             .await;
         }
         for route in &self.routes {
             if route.method == method
-                && let Some(params) = match_route(&route.segments, &path)
+                && let Some(params) = match_route(&route.segments, path)
             {
                 return maybe_head(
                     &method,
@@ -835,15 +1097,39 @@ impl<S: Send + Sync + 'static> App<S> {
                 .await;
             }
         }
-        if !self.allowed_methods(&path).is_empty() {
+        if method == Method::HEAD {
+            for route in &self.routes {
+                if route.method == Method::GET
+                    && let Some(params) = match_route(&route.segments, path)
+                {
+                    return maybe_head(
+                        &method,
+                        (route.handler)(request, params, Arc::clone(&self.state)).await,
+                    )
+                    .await;
+                }
+            }
+        }
+        if !self.allowed_methods(path).is_empty() {
             return Response::builder()
                 .status(StatusCode::METHOD_NOT_ALLOWED)
-                .header(header::ALLOW, self.allowed_methods(&path))
+                .header(header::ALLOW, self.allowed_methods(path))
                 .header(header::CONTENT_LENGTH, "0")
                 .body(Full::new(Bytes::new()))
                 .unwrap();
         }
         not_found()
+    }
+
+    fn static_route(&self, method: &Method, path: &str) -> Option<usize> {
+        self.static_routes
+            .get(path)
+            .and_then(|routes| {
+                routes
+                    .iter()
+                    .find(|(route_method, _)| route_method == method)
+            })
+            .map(|(_, index)| *index)
     }
 
     fn allowed_methods(&self, path: &str) -> String {
@@ -949,13 +1235,24 @@ fn normalize_path(path: &str) -> String {
     }
 }
 
+fn normalize_request_path(path: &str) -> &str {
+    if path.len() > 1 {
+        path.trim_end_matches('/')
+    } else {
+        path
+    }
+}
+
 fn response_text(status: StatusCode, body: Bytes) -> HttpResponse {
-    Response::builder()
+    let mut builder = Response::builder()
         .status(status)
-        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .header(header::CONTENT_LENGTH, body.len())
-        .body(Full::new(body))
-        .unwrap()
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8");
+    if body.len() == 2 {
+        builder = builder.header(header::CONTENT_LENGTH, HeaderValue::from_static("2"));
+    } else {
+        builder = builder.header(header::CONTENT_LENGTH, body.len());
+    }
+    builder.body(Full::new(body)).unwrap()
 }
 
 fn response_json<T: Serialize>(status: StatusCode, value: T) -> HttpResponse {
@@ -966,10 +1263,19 @@ fn response_json<T: Serialize>(status: StatusCode, value: T) -> HttpResponse {
 }
 
 fn response_json_bytes(status: StatusCode, body: Bytes) -> HttpResponse {
+    let content_length = HeaderValue::from_str(&body.len().to_string()).unwrap();
+    response_json_bytes_with_length(status, body, content_length)
+}
+
+fn response_json_bytes_with_length(
+    status: StatusCode,
+    body: Bytes,
+    content_length: HeaderValue,
+) -> HttpResponse {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
-        .header(header::CONTENT_LENGTH, body.len())
+        .header(header::CONTENT_LENGTH, content_length)
         .body(Full::new(body))
         .unwrap()
 }

@@ -13,11 +13,12 @@ Source plan: `C:\Users\Q\Downloads\2026-08-13-oas-rust-framework-acceptance-benc
 
 | Stage | Command | Evidence |
 |---|---|---|
-| RED | `cargo test --test acceptance` | Initial run compiled dependencies, then failed because `src/lib.rs` was absent. |
-| GREEN | `cargo test --workspace --all-targets` | 8 acceptance tests passed; router microbench executable also completed. |
+| RED | `cargo test --test acceptance` | The new conformance tests failed for dynamic `HEAD` fallback and name-based UUID inference, proving both regressions before the implementation fix. |
+| GREEN | `cargo test --workspace --all-targets` | 10 acceptance tests passed; router microbench executable also completed. |
 | GREEN | `cargo test --doc --workspace` | Doc-test target completed with no failures. |
 | GREEN | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Completed with zero warnings. |
-| Docker smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10 -Runs 1 -Vus 1 -Version matrix-smoke3` | Raw and framework containers ran for the header case with zero measured errors; the partial report remains `INCONCLUSIVE` by design. |
+| Docker smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10 -Runs 1 -Vus 1 -Version matrix-smoke5` | All 12 P0 cases ran against raw/framework (24 measurements) with zero measured errors; the report remains `INCONCLUSIVE` because it is below the release minimum. |
+| Collector smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10 -Runs 1 -WarmupSeconds 1 -Vus 1 -Cases plaintext -Version smoke-stats` | Expanded p50/p95/p99 report and CPU/RSS artifact paths were generated; the run is correctly `INCONCLUSIVE` because it was too short to produce stable samples. |
 
 ## Guarantees covered by tests
 
@@ -28,8 +29,9 @@ Source plan: `C:\Users\Q\Downloads\2026-08-13-oas-rust-framework-acceptance-benc
 | 3 | JSON body and typed header extractors reject/parse at the boundary | `tests/acceptance.rs::http_semantics_and_typed_body_header_are_preserved` | PASS |
 | 4 | Registered summary/tag metadata appears in an OpenAPI 3.1 document | `tests/acceptance.rs::openapi_describes_registered_operations` | PASS |
 | 5 | Router precedence, percent-decoding, duplicate detection, malformed templates, and 10k static routes are covered | `tests/acceptance.rs` | PASS |
-| 6 | Release profile and raw/framework Docker images build from the same locked dependencies | `cargo build --release --locked`, `benchmarks/Dockerfile` | PASS |
+| 6 | OpenAPI path schemas follow extractor types, JSON request bodies and headers are represented, and optional headers are not required | `tests/acceptance.rs::openapi_uses_extractor_types_and_response_statuses` | PASS |
+| 7 | Release profile and raw/framework Docker images build from the same locked dependencies | `cargo build --release --locked`, `benchmarks/Dockerfile` | PASS |
 
 ## Known gaps
 
-The current implementation is a v0.1 foundation, not evidence that the full 1% release contract has passed. PostgreSQL connectivity is implemented and smoke-tested with 16 persistent prepared connections, but the full 7-run/1M-request gate was not run. The router microbench currently reports an extra allocation cost versus raw Hyper, and CPU/RSS capture, macro compile-fail tests, fuzzing, and CI dedicated-host gating remain follow-ups. The benchmark script intentionally reports `INCONCLUSIVE` until those gates and confidence intervals are available.
+The current implementation is a v0.1 foundation, not evidence that the full 1% release contract has passed. PostgreSQL connectivity is implemented and smoke-tested with 16 persistent prepared connections, but the full 7-run/1M-request matrix on a dedicated host was not run. The static plaintext in-process microbench now reports zero extra allocations versus its raw comparator; dynamic capture/query allocation profiling, macro compile-fail tests, fuzzing, streaming/cancellation coverage, and dedicated-host CI gating remain follow-ups. The benchmark script intentionally reports `INCONCLUSIVE` until all requested gates and confidence intervals are available.

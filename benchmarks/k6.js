@@ -13,7 +13,7 @@ const mode = __ENV.MODE || 'measured';
 const benchmarkCase = __ENV.CASE || 'plaintext';
 
 export const options = {
-  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
+  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)', 'p(99.9)'],
   scenarios: mode === 'warmup'
     ? { warmup: { executor: 'constant-vus', vus, duration: `${warmupSeconds}s`, exec: 'warmup' } }
     : { requests: { executor: 'shared-iterations', vus, iterations, maxDuration: '30m', exec: 'measured' } },

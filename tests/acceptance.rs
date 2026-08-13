@@ -52,6 +52,14 @@ async fn trace(Header(trace): Header<TraceId>) -> String {
     trace.0
 }
 
+async fn optional_trace(value: Option<Header<TraceId>>) -> &'static str {
+    if value.is_some() {
+        "present"
+    } else {
+        "missing"
+    }
+}
+
 async fn params(params: Params) -> String {
     format!(
         "{}:{}",
@@ -108,6 +116,7 @@ async fn http_semantics_and_typed_body_header_are_preserved() {
     app.get("/plaintext", hello);
     app.post("/echo", echo);
     app.get("/trace", trace);
+    app.get("/optional-trace", optional_trace);
     app.openapi("/openapi.json").swagger("/swagger");
 
     let response = app.oneshot(Method::HEAD, "/plaintext", &[], None).await;
@@ -133,6 +142,30 @@ async fn http_semantics_and_typed_body_header_are_preserved() {
         .oneshot(Method::GET, "/trace", &[("x-trace-id", "abc123")], None)
         .await;
     assert_eq!(response.body_string().await, "abc123");
+    let response = app.oneshot(Method::GET, "/trace", &[], None).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.header("content-type"), Some("application/json"));
+    let response = app.oneshot(Method::GET, "/optional-trace", &[], None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.body_string().await, "missing");
+    let response = app
+        .oneshot(
+            Method::POST,
+            "/echo",
+            &[],
+            Some(Bytes::from_static(br#"{"name":"Ada"}"#)),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let response = app
+        .oneshot(
+            Method::POST,
+            "/echo",
+            &[("content-type", "application/json")],
+            Some(Bytes::from_static(br#"not-json"#)),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let response = app.oneshot(Method::GET, "/openapi.json", &[], None).await;
     assert_eq!(response.status(), StatusCode::OK);
     let response = app.oneshot(Method::GET, "/swagger", &[], None).await;
@@ -195,7 +228,7 @@ async fn router_supports_multiple_params_precedence_and_percent_encoding() {
 
     let response = app.oneshot(Method::HEAD, "/users/42", &[], None).await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.header("content-length"), Some("2"));
+    assert_eq!(response.header("content-length"), Some("10"));
     assert_eq!(response.body_string().await, "");
 }
 
@@ -253,6 +286,9 @@ fn openapi_uses_extractor_types_and_response_statuses() {
     app.get("/users/{id}", user);
     app.get("/uuid/{id}", uuid_user);
     app.post("/created", created);
+    app.post("/echo", echo);
+    app.get("/trace", trace);
+    app.get("/optional-trace", optional_trace);
     let document = app.openapi_document();
 
     assert_eq!(
@@ -270,6 +306,19 @@ fn openapi_uses_extractor_types_and_response_statuses() {
     assert_eq!(
         document["paths"]["/created"]["post"]["responses"]["201"]["description"],
         "Created"
+    );
+    assert_eq!(
+        document["paths"]["/echo"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+            ["type"],
+        "object"
+    );
+    assert_eq!(
+        document["paths"]["/trace"]["get"]["parameters"][0]["in"],
+        "header"
+    );
+    assert_eq!(
+        document["paths"]["/optional-trace"]["get"]["parameters"][0]["required"],
+        false
     );
 }
 
@@ -296,9 +345,7 @@ async fn all_registered_http_methods_and_bodyless_responses_conform() {
         let response = app.oneshot(method, "/resource", &[], None).await;
         assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
-    let response = app
-        .oneshot(Method::OPTIONS, "/resource", &[], None)
-        .await;
+    let response = app.oneshot(Method::OPTIONS, "/resource", &[], None).await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert_eq!(response.body_string().await, "");
 
