@@ -4,7 +4,7 @@ param(
     [int]$WarmupSeconds = 30,
     [int[]]$Vus = @(32, 64, 128, 256, 512),
     [string]$Version = "v0.1.0-local",
-    [string[]]$Cases = @("plaintext", "static-json", "static-route", "path-integer", "path-uuid", "query", "header", "json-small", "json-100-users", "postgres", "404", "405")
+    [string[]]$Cases = @("plaintext", "static-json", "static-route", "path-integer", "path-uuid", "validation-success", "query", "header", "json-small", "json-100-users", "postgres", "problem", "raw-handler", "security", "404", "405")
 )
 
 $ErrorActionPreference = "Stop"

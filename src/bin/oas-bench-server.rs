@@ -24,6 +24,25 @@ impl HeaderSpec for TraceId {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ApiKey(String);
+
+impl HeaderSpec for ApiKey {
+    const NAME: &'static str = "x-api-key";
+
+    fn parse(value: &str) -> Result<Self, oas_rs::ApiError> {
+        if value == "abc-secret" {
+            Ok(Self(value.to_owned()))
+        } else {
+            Err(ApiError::new(
+                http::StatusCode::UNAUTHORIZED,
+                "Unauthorized",
+                "invalid API key",
+            ))
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 struct BenchState {
     db: Option<Arc<DbPool>>,
@@ -100,6 +119,28 @@ async fn header_typed(Header(header): Header<TraceId>) -> String {
     header.0
 }
 
+async fn validation_success(Path(id): Path<u64>) -> Result<Json<BenchPayload>, ApiError> {
+    if id == 42 {
+        Ok(Json(BenchPayload {
+            name: "valid-42".to_owned(),
+        }))
+    } else {
+        Err(ApiError::bad_request("id must be 42"))
+    }
+}
+
+async fn problem() -> Result<Json<BenchPayload>, ApiError> {
+    Err(ApiError::bad_request("invalid request"))
+}
+
+async fn secure(Header(key): Header<ApiKey>) -> String {
+    if key.0 == "abc-secret" {
+        "authorized".to_owned()
+    } else {
+        "unauthorized".to_owned()
+    }
+}
+
 async fn json_small() -> JsonBytes {
     JsonBytes::new(Bytes::from_static(br#"{"id":1,"name":"Alice"}"#))
 }
@@ -123,6 +164,11 @@ async fn users_db(State(state): State<BenchState>) -> Result<Json<Vec<DbUser>>, 
             error.to_string(),
         )
     })
+}
+
+#[derive(Serialize, oas_rs::OpenApi)]
+struct BenchPayload {
+    name: String,
 }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -150,6 +196,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     app.get("/uuid/{id}", path_uuid);
     app.get("/search", query_typed);
     app.get("/trace", header_typed);
+    app.get("/validation-success/{id}", validation_success);
+    app.get("/problem", problem);
+    app.get("/raw-handler", || async { "OK" });
+    app.get("/secure", secure);
     app.get("/json-small", json_small);
     app.get("/users", json_users);
     app.get("/users-db", users_db);
@@ -214,6 +264,62 @@ async fn raw_server(
                             .status(StatusCode::OK)
                             .header("content-type", "application/json")
                             .body(Full::new(Bytes::from_static(USERS_JSON)))
+                            .unwrap()
+                    } else if request.uri().path() == "/raw-handler" {
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header("content-type", "text/plain; charset=utf-8")
+                            .header("content-length", "2")
+                            .body(Full::new(Bytes::from_static(b"OK")))
+                            .unwrap()
+                    } else if request.uri().path() == "/problem" {
+                        let body = Bytes::from_static(
+                            br#"{"type":"about:blank","title":"Bad Request","status":400,"detail":"invalid request"}"#,
+                        );
+                        Response::builder()
+                            .status(StatusCode::BAD_REQUEST)
+                            .header("content-type", "application/json")
+                            .header("content-length", body.len())
+                            .body(Full::new(body))
+                            .unwrap()
+                    } else if let Some(value) =
+                        request.uri().path().strip_prefix("/validation-success/")
+                    {
+                        match value.parse::<u64>() {
+                            Ok(42) => {
+                                let body = Bytes::from_static(br#"{"name":"valid-42"}"#);
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header("content-type", "application/json")
+                                    .header("content-length", body.len())
+                                    .body(Full::new(body))
+                                    .unwrap()
+                            }
+                            _ => Response::builder()
+                                .status(StatusCode::BAD_REQUEST)
+                                .body(Full::new(Bytes::from_static(b"Bad Request")))
+                                .unwrap(),
+                        }
+                    } else if request.uri().path() == "/secure" {
+                        let authorized = request
+                            .headers()
+                            .get("x-api-key")
+                            .and_then(|value| value.to_str().ok())
+                            == Some("abc-secret");
+                        let body: &[u8] = if authorized {
+                            b"authorized"
+                        } else {
+                            b"Unauthorized"
+                        };
+                        Response::builder()
+                            .status(if authorized {
+                                StatusCode::OK
+                            } else {
+                                StatusCode::UNAUTHORIZED
+                            })
+                            .header("content-type", "text/plain; charset=utf-8")
+                            .header("content-length", body.len())
+                            .body(Full::new(Bytes::copy_from_slice(body)))
                             .unwrap()
                     } else if let Some(value) = request.uri().path().strip_prefix("/users/") {
                         match value.parse::<u64>() {

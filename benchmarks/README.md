@@ -20,7 +20,8 @@ For a quick Docker smoke test (not a release gate):
 Use `-WarmupSeconds 1` only for a functional smoke of the matrix. Official
 runs keep the default 30-second warm-up.
 
-The default matrix includes the P0 HTTP cases and `postgres` (16 persistent
+The default matrix includes the P0/P1 HTTP cases (`validation-success`,
+`problem`, `raw-handler`, and `security`) and `postgres` (16 persistent
 `tokio-postgres` clients with one prepared statement per connection). Each
 measured pair records p50/p95/p99/p999, zero-error counters, and sampled API
 CPU/RSS CSV data. The full plan requires 7 measured runs per case, randomized
