@@ -5,6 +5,9 @@ use oas_rs::{
     State,
 };
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 #[derive(Clone, Default)]
@@ -369,4 +372,77 @@ async fn all_registered_http_methods_and_bodyless_responses_conform() {
     assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
     assert_eq!(response.header("content-length"), Some("0"));
     assert_eq!(response.body_string().await, "");
+}
+
+#[tokio::test]
+async fn response_headers_and_allow_metadata_follow_http_semantics() {
+    let mut app = App::new();
+    app.get("/text", hello);
+    app.post("/text", hello);
+    app.get("/json", || async {
+        Json(Payload {
+            name: "Ada".to_owned(),
+        })
+    });
+    app.get("/empty", empty);
+    app.get("/not-modified", not_modified);
+
+    let response = app.oneshot(Method::GET, "/text", &[], None).await;
+    assert_eq!(response.header("content-type"), Some("text/plain; charset=utf-8"));
+    assert_eq!(response.header("content-length"), Some("2"));
+
+    let response = app.oneshot(Method::GET, "/json", &[], None).await;
+    assert_eq!(response.header("content-type"), Some("application/json"));
+    assert_eq!(response.header("content-length"), Some("14"));
+
+    let response = app.oneshot(Method::GET, "/empty", &[], None).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(response.header("content-length"), Some("0"));
+    assert_eq!(response.body_string().await, "");
+
+    let response = app
+        .oneshot(Method::PUT, "/text", &[], None)
+        .await;
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(response.header("allow"), Some("GET, POST"));
+    assert_eq!(response.header("content-length"), Some("0"));
+}
+
+#[tokio::test]
+async fn tcp_server_supports_keep_alive_and_connection_close() {
+    let mut app = App::new();
+    app.get("/text", hello);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let server = tokio::spawn(app.serve_listener(listener, async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(
+            b"GET /text HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let mut buffer = vec![0_u8; 4096];
+    let bytes = stream.read(&mut buffer).await.unwrap();
+    let first = String::from_utf8_lossy(&buffer[..bytes]);
+    assert!(first.contains("HTTP/1.1 200 OK"));
+    assert!(first.contains("content-length: 2"));
+    assert!(first.contains("\r\n\r\nOK"));
+
+    stream
+        .write_all(b"GET /text HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut rest = Vec::new();
+    stream.read_to_end(&mut rest).await.unwrap();
+    let second = String::from_utf8_lossy(&rest);
+    assert!(second.contains("HTTP/1.1 200 OK"));
+    assert!(second.contains("\r\n\r\nOK"));
+
+    let _ = shutdown_tx.send(());
+    server.await.unwrap().unwrap();
 }
