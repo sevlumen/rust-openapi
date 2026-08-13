@@ -13,6 +13,7 @@ use hyper::body::Incoming;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 use std::{
+    borrow::Cow,
     collections::HashMap,
     convert::Infallible,
     future::Future,
@@ -169,28 +170,74 @@ impl Future for HandlerFuture {
     }
 }
 
-/// A path capture collection. Values are owned at the dispatch boundary so an
-/// extractor can safely outlive the router's matching call.
-#[derive(Clone, Debug, Default)]
-pub struct Params(Vec<(String, String)>);
+const MAX_CAPTURE_PARAMS: usize = 8;
+
+#[derive(Clone, Copy, Debug)]
+struct CaptureRange {
+    start: usize,
+    end: usize,
+}
+
+/// A path capture collection. Typed extractors use ranges into the request
+/// URI, while the explicit `Params` extractor opts into owned decoded values.
+#[derive(Clone, Debug)]
+pub struct Params {
+    ranges: [Option<CaptureRange>; MAX_CAPTURE_PARAMS],
+    owned: Option<Vec<(String, String)>>,
+}
 
 impl Params {
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.0
+        self.owned
+            .as_ref()?
             .iter()
             .find(|(key, _)| key == name)
             .map(|(_, value)| value.as_str())
     }
+
+    fn first_raw<'a>(&self, path: &'a str) -> Option<&'a str> {
+        self.ranges[0].map(|range| &path[range.start..range.end])
+    }
+
+    fn from_match(
+        names: Arc<[String]>,
+        ranges: [Option<CaptureRange>; MAX_CAPTURE_PARAMS],
+        count: usize,
+        path: &str,
+        materialize: bool,
+    ) -> Self {
+        let owned = materialize.then(|| {
+            let mut values = Vec::with_capacity(count);
+            for (index, name) in names.iter().enumerate() {
+                let range = ranges[index].expect("capture range exists");
+                let value = percent_decode(&path[range.start..range.end])
+                    .expect("route matching validates percent encoding");
+                values.push((name.clone(), value));
+            }
+            values
+        });
+        Self { ranges, owned }
+    }
+}
+
+impl Default for Params {
+    fn default() -> Self {
+        Self {
+            ranges: [None; MAX_CAPTURE_PARAMS],
+            owned: None,
+        }
+    }
 }
 
 impl<S: Send + Sync + 'static> FromRequest<S> for Params {
+    const NEEDS_PARAMS: bool = true;
+
     fn from_request(
         _request: &mut Request<Bytes>,
         params: &Params,
         _state: &Arc<S>,
-    ) -> BoxFuture<Result<Self, ApiError>> {
-        let params = params.clone();
-        Box::pin(async move { Ok(params) })
+    ) -> Result<Self, ApiError> {
+        Ok(params.clone())
     }
 }
 
@@ -228,8 +275,35 @@ pub trait OpenApiSchema {
     fn schema() -> Value;
 }
 
-pub trait OpenApiQuery {
+pub trait OpenApiQuery: Sized {
     fn parameters() -> Vec<Value>;
+
+    fn parse(query: &str) -> Result<Self, ApiError>
+    where
+        Self: DeserializeOwned,
+    {
+        parse_query(query)
+    }
+}
+
+pub trait QueryValue: Sized {
+    fn parse_query_value(value: &str) -> Result<Self, ApiError>;
+}
+
+impl<T> QueryValue for T
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    fn parse_query_value(value: &str) -> Result<Self, ApiError> {
+        value
+            .parse::<Self>()
+            .map_err(|error| ApiError::bad_request(error.to_string()))
+    }
+}
+
+pub fn parse_query_value<T: QueryValue>(value: &str) -> Result<T, ApiError> {
+    T::parse_query_value(value)
 }
 
 impl OpenApiType for String {
@@ -583,6 +657,7 @@ impl<T: ResponseMetadata> ResponseMetadata for Result<T, ApiError> {
 /// as a single erased service only at the router boundary.
 pub trait Handler<S, Args>: Send + Sync + 'static {
     type Response: ResponseMetadata;
+    const NEEDS_PARAMS: bool = false;
 
     fn openapi_request() -> OpenApiRequest {
         OpenApiRequest::default()
@@ -592,6 +667,8 @@ pub trait Handler<S, Args>: Send + Sync + 'static {
 }
 
 pub trait FromRequest<S>: Sized + Send + 'static {
+    const NEEDS_PARAMS: bool = false;
+
     fn openapi_request() -> OpenApiRequest {
         OpenApiRequest::default()
     }
@@ -600,7 +677,7 @@ pub trait FromRequest<S>: Sized + Send + 'static {
         request: &mut Request<Bytes>,
         params: &Params,
         state: &Arc<S>,
-    ) -> BoxFuture<Result<Self, ApiError>>;
+    ) -> Result<Self, ApiError>;
 }
 
 impl<S: Send + Sync + 'static> FromRequest<S> for State<S> {
@@ -608,9 +685,8 @@ impl<S: Send + Sync + 'static> FromRequest<S> for State<S> {
         _request: &mut Request<Bytes>,
         _params: &Params,
         state: &Arc<S>,
-    ) -> BoxFuture<Result<Self, ApiError>> {
-        let state = Arc::clone(state);
-        Box::pin(async move { Ok(State(state)) })
+    ) -> Result<Self, ApiError> {
+        Ok(State(Arc::clone(state)))
     }
 }
 
@@ -627,18 +703,24 @@ where
     }
 
     fn from_request(
-        _request: &mut Request<Bytes>,
+        request: &mut Request<Bytes>,
         params: &Params,
         _state: &Arc<S>,
-    ) -> BoxFuture<Result<Self, ApiError>> {
-        let value = params.0.first().map(|(_, value)| value.clone());
-        Box::pin(async move {
-            let value = value.ok_or_else(|| ApiError::bad_request("missing path parameter"))?;
-            value
-                .parse::<T>()
-                .map(Path)
-                .map_err(|error| ApiError::bad_request(error.to_string()))
-        })
+    ) -> Result<Self, ApiError> {
+        params
+            .first_raw(request.uri().path())
+            .ok_or_else(|| ApiError::bad_request("missing path parameter"))
+            .and_then(|value| {
+                let value = if value.as_bytes().contains(&b'%') {
+                    Cow::Owned(percent_decode(value)?)
+                } else {
+                    Cow::Borrowed(value)
+                };
+                value
+                    .parse::<T>()
+                    .map(Path)
+                    .map_err(|error| ApiError::bad_request(error.to_string()))
+            })
     }
 }
 
@@ -657,9 +739,8 @@ where
         request: &mut Request<Bytes>,
         _params: &Params,
         _state: &Arc<S>,
-    ) -> BoxFuture<Result<Self, ApiError>> {
-        let query = request.uri().query().unwrap_or_default().to_owned();
-        Box::pin(async move { parse_query(&query).map(Query) })
+    ) -> Result<Self, ApiError> {
+        T::parse(request.uri().query().unwrap_or_default()).map(Query)
     }
 }
 
@@ -685,29 +766,23 @@ where
         request: &mut Request<Bytes>,
         _params: &Params,
         _state: &Arc<S>,
-    ) -> BoxFuture<Result<Self, ApiError>> {
+    ) -> Result<Self, ApiError> {
         let body = request.body().clone();
         let content_type = request
             .headers()
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        Box::pin(async move {
-            if !content_type
-                .as_deref()
-                .unwrap_or("")
-                .starts_with("application/json")
-            {
-                return Err(ApiError::new(
-                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    "Unsupported Media Type",
-                    "expected application/json",
-                ));
-            }
-            serde_json::from_slice(&body)
-                .map(Json)
-                .map_err(|error| ApiError::bad_request(error.to_string()))
-        })
+            .unwrap_or_default();
+        if !content_type.starts_with("application/json") {
+            return Err(ApiError::new(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "Unsupported Media Type",
+                "expected application/json",
+            ));
+        }
+        serde_json::from_slice(&body)
+            .map(Json)
+            .map_err(|error| ApiError::bad_request(error.to_string()))
     }
 }
 
@@ -728,17 +803,14 @@ impl<S: Send + Sync + 'static, T: HeaderSpec> FromRequest<S> for Header<T> {
         request: &mut Request<Bytes>,
         _params: &Params,
         _state: &Arc<S>,
-    ) -> BoxFuture<Result<Self, ApiError>> {
-        let value = request
+    ) -> Result<Self, ApiError> {
+        request
             .headers()
             .get(T::NAME)
             .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        Box::pin(async move {
-            let value = value
-                .ok_or_else(|| ApiError::bad_request(format!("missing header {}", T::NAME)))?;
-            T::parse(&value).map(Header)
-        })
+            .ok_or_else(|| ApiError::bad_request(format!("missing header {}", T::NAME)))
+            .and_then(T::parse)
+            .map(Header)
     }
 }
 
@@ -747,6 +819,8 @@ where
     S: Send + Sync + 'static,
     T: FromRequest<S>,
 {
+    const NEEDS_PARAMS: bool = T::NEEDS_PARAMS;
+
     fn openapi_request() -> OpenApiRequest {
         let mut metadata = T::openapi_request();
         for parameter in &mut metadata.parameters {
@@ -766,9 +840,8 @@ where
         request: &mut Request<Bytes>,
         params: &Params,
         state: &Arc<S>,
-    ) -> BoxFuture<Result<Self, ApiError>> {
-        let future = T::from_request(request, params, state);
-        Box::pin(async move { Ok(future.await.ok()) })
+    ) -> Result<Self, ApiError> {
+        Ok(T::from_request(request, params, state).ok())
     }
 }
 
@@ -780,6 +853,7 @@ where
     R: IntoResponse + ResponseMetadata,
 {
     type Response = R;
+    const NEEDS_PARAMS: bool = false;
 
     fn openapi_request() -> OpenApiRequest {
         OpenApiRequest::default()
@@ -800,20 +874,20 @@ where
     E1: FromRequest<S>,
 {
     type Response = R;
+    const NEEDS_PARAMS: bool = E1::NEEDS_PARAMS;
 
     fn openapi_request() -> OpenApiRequest {
         E1::openapi_request()
     }
 
     fn call(&self, mut request: Request<Bytes>, params: Params, state: Arc<S>) -> HandlerFuture {
-        let result = E1::from_request(&mut request, &params, &state);
-        let handler = self.clone();
-        HandlerFuture::from_future(async move {
-            match result.await {
-                Ok(value) => handler(value).await.into_response(),
-                Err(error) => error.into_response(),
+        match E1::from_request(&mut request, &params, &state) {
+            Ok(value) => {
+                let handler = self.clone();
+                HandlerFuture::from_future(async move { handler(value).await.into_response() })
             }
-        })
+            Err(error) => HandlerFuture::from_future(async move { error.into_response() }),
+        }
     }
 }
 
@@ -827,6 +901,7 @@ where
     E2: FromRequest<S>,
 {
     type Response = R;
+    const NEEDS_PARAMS: bool = E1::NEEDS_PARAMS || E2::NEEDS_PARAMS;
 
     fn openapi_request() -> OpenApiRequest {
         let mut metadata = E1::openapi_request();
@@ -837,17 +912,17 @@ where
     fn call(&self, mut request: Request<Bytes>, params: Params, state: Arc<S>) -> HandlerFuture {
         let first = E1::from_request(&mut request, &params, &state);
         let second = E2::from_request(&mut request, &params, &state);
-        let handler = self.clone();
-        HandlerFuture::from_future(async move {
-            let first = match first.await {
-                Ok(value) => value,
-                Err(error) => return error.into_response(),
-            };
-            match second.await {
-                Ok(value) => handler(first, value).await.into_response(),
-                Err(error) => error.into_response(),
+        match (first, second) {
+            (Ok(first), Ok(second)) => {
+                let handler = self.clone();
+                HandlerFuture::from_future(
+                    async move { handler(first, second).await.into_response() },
+                )
             }
-        })
+            (Err(error), _) | (_, Err(error)) => {
+                HandlerFuture::from_future(async move { error.into_response() })
+            }
+        }
     }
 }
 
@@ -857,6 +932,8 @@ struct Route<S> {
     method: Method,
     template: String,
     segments: Vec<Segment>,
+    capture_names: Arc<[String]>,
+    materialize_params: bool,
     handler: ErasedHandler<S>,
     operation: Operation,
 }
@@ -1213,6 +1290,14 @@ impl<S: Send + Sync + 'static> App<S> {
             "duplicate route"
         );
         let segments = parse_template(&template);
+        let capture_names: Arc<[String]> = segments
+            .iter()
+            .filter_map(|segment| match segment {
+                Segment::Capture(name) => Some(name.clone()),
+                Segment::Static(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .into();
         let erased: ErasedHandler<S> =
             Box::new(move |request, params, state| handler.call(request, params, state));
         let index = self.routes.len();
@@ -1229,6 +1314,8 @@ impl<S: Send + Sync + 'static> App<S> {
             method,
             template,
             segments,
+            capture_names,
+            materialize_params: H::NEEDS_PARAMS,
             handler: erased,
             operation: Operation {
                 tag: None,
@@ -1295,7 +1382,12 @@ impl<S: Send + Sync + 'static> App<S> {
         }
         for route in &self.routes {
             if route.method == method
-                && let Some(params) = match_route(&route.segments, path)
+                && let Some(params) = match_route(
+                    &route.segments,
+                    &route.capture_names,
+                    route.materialize_params,
+                    path,
+                )
             {
                 return maybe_head(
                     &method,
@@ -1307,7 +1399,12 @@ impl<S: Send + Sync + 'static> App<S> {
         if method == Method::HEAD {
             for route in &self.routes {
                 if route.method == Method::GET
-                    && let Some(params) = match_route(&route.segments, path)
+                    && let Some(params) = match_route(
+                        &route.segments,
+                        &route.capture_names,
+                        route.materialize_params,
+                        path,
+                    )
                 {
                     return maybe_head(
                         &method,
@@ -1342,7 +1439,7 @@ impl<S: Send + Sync + 'static> App<S> {
     fn allowed_methods(&self, path: &str) -> String {
         let mut methods = Vec::new();
         for route in &self.routes {
-            if match_route(&route.segments, path).is_some()
+            if match_route(&route.segments, &route.capture_names, false, path).is_some()
                 && !methods
                     .iter()
                     .any(|method| *method == route.method.as_str())
@@ -1405,30 +1502,86 @@ fn parse_template(path: &str) -> Vec<Segment> {
         .collect()
 }
 
-fn match_route(segments: &[Segment], path: &str) -> Option<Params> {
-    let parts = split_path(path);
-    if parts.len() != segments.len() {
-        return None;
-    }
-    let mut captures = Vec::new();
-    for (segment, part) in segments.iter().zip(parts) {
+fn match_route(
+    segments: &[Segment],
+    capture_names: &Arc<[String]>,
+    materialize: bool,
+    path: &str,
+) -> Option<Params> {
+    let mut parts = PathParts::new(path);
+    let mut ranges = [None; MAX_CAPTURE_PARAMS];
+    let mut capture_index = 0;
+    for segment in segments {
+        let part = parts.next()?;
         match segment {
-            Segment::Static(expected) if expected != part => return None,
+            Segment::Static(expected) if expected != part.value => return None,
             Segment::Static(_) => {}
-            Segment::Capture(name) => captures.push((name.clone(), percent_decode(part).ok()?)),
+            Segment::Capture(_) => {
+                if capture_index == MAX_CAPTURE_PARAMS || !valid_percent_encoding(part.value) {
+                    return None;
+                }
+                ranges[capture_index] = Some(CaptureRange {
+                    start: part.start,
+                    end: part.end,
+                });
+                capture_index += 1;
+            }
         }
     }
-    Some(Params(captures))
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(Params::from_match(
+        Arc::clone(capture_names),
+        ranges,
+        capture_index,
+        path,
+        materialize,
+    ))
 }
 
 fn split_path(path: &str) -> Vec<&str> {
-    if path == "/" {
-        Vec::new()
-    } else {
-        path.trim_matches('/')
-            .split('/')
-            .filter(|part| !part.is_empty())
-            .collect()
+    PathParts::new(path).map(|part| part.value).collect()
+}
+
+#[derive(Clone, Copy)]
+struct PathPart<'a> {
+    value: &'a str,
+    start: usize,
+    end: usize,
+}
+
+struct PathParts<'a> {
+    path: &'a str,
+    next: usize,
+}
+
+impl<'a> PathParts<'a> {
+    fn new(path: &'a str) -> Self {
+        Self { path, next: 0 }
+    }
+}
+
+impl<'a> Iterator for PathParts<'a> {
+    type Item = PathPart<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let bytes = self.path.as_bytes();
+        while self.next < bytes.len() && bytes[self.next] == b'/' {
+            self.next += 1;
+        }
+        if self.next >= bytes.len() {
+            return None;
+        }
+        let start = self.next;
+        while self.next < bytes.len() && bytes[self.next] != b'/' {
+            self.next += 1;
+        }
+        Some(PathPart {
+            value: &self.path[start..self.next],
+            start,
+            end: self.next,
+        })
     }
 }
 
@@ -1548,6 +1701,33 @@ fn percent_decode(value: &str) -> Result<String, ApiError> {
         }
     }
     Ok(output)
+}
+
+pub fn decode_query_component(value: &str) -> Result<Cow<'_, str>, ApiError> {
+    if value.as_bytes().contains(&b'%') {
+        Ok(Cow::Owned(percent_decode(value)?))
+    } else {
+        Ok(Cow::Borrowed(value))
+    }
+}
+
+fn valid_percent_encoding(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len()
+                || hex(bytes[index + 1]).is_none()
+                || hex(bytes[index + 2]).is_none()
+            {
+                return false;
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    true
 }
 
 fn hex(value: u8) -> Option<u8> {

@@ -29,6 +29,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets
 cargo test --doc --workspace
+cargo build --workspace --examples
 ```
 
 Docker benchmark smoke:
@@ -40,6 +41,11 @@ Docker benchmark smoke:
 Use the default arguments for the release matrix. Reports remain `INCONCLUSIVE`
 until the acceptance plan's seven paired runs, baseline CV and confidence bounds
 are available.
+
+The release-profile router microbench also checks static route counts at
+1/10/100/1,000/10,000 routes and asserts zero extra allocations/bytes for
+typed path, query, and header extraction against request-shape-matched raw
+comparators.
 
 Streaming is opt-in with `StreamResponse<S>`; ordinary text and JSON responses
 continue to use fixed `Bytes` bodies.

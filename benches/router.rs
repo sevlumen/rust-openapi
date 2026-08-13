@@ -1,5 +1,6 @@
 use std::{
     alloc::{GlobalAlloc, Layout, System},
+    collections::HashMap,
     sync::atomic::{AtomicUsize, Ordering},
     time::Instant,
 };
@@ -7,24 +8,71 @@ use std::{
 use bytes::Bytes;
 use http::{Request, Response, StatusCode};
 use http_body_util::Full;
-use oas_rs::{App, Method};
+use oas_rs::{ApiError, App, Header, HeaderSpec, Method, Path, Query};
+use serde::Deserialize;
+use uuid::Uuid;
 
 async fn plaintext() -> &'static str {
     "OK"
 }
 
 async fn raw_plaintext() -> Response<Full<Bytes>> {
-    let _request = Request::builder()
-        .method(Method::GET)
-        .uri("/plaintext")
-        .body(Bytes::new())
-        .unwrap();
+    raw_plaintext_with_request("/plaintext", &[]).await
+}
+
+fn raw_request(uri: &str, headers: &[(&str, &str)]) -> Request<Bytes> {
+    let mut builder = Request::builder().method(Method::GET).uri(uri);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    builder.body(Bytes::new()).unwrap()
+}
+
+async fn raw_plaintext_with_request(uri: &str, headers: &[(&str, &str)]) -> Response<Full<Bytes>> {
+    let _request = raw_request(uri, headers);
+    raw_ok_response()
+}
+
+fn raw_ok_response() -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "text/plain; charset=utf-8")
         .header("content-length", "2")
         .body(Full::new(Bytes::from_static(b"OK")))
         .unwrap()
+}
+
+async fn typed_path(Path(_id): Path<u64>) -> &'static str {
+    "OK"
+}
+
+async fn typed_uuid(Path(_id): Path<Uuid>) -> &'static str {
+    "OK"
+}
+
+#[derive(Deserialize, oas_rs::OpenApi)]
+struct BenchQuery {
+    page: u32,
+    active: bool,
+}
+
+async fn typed_query(Query(query): Query<BenchQuery>) -> &'static str {
+    let _ = (query.page, query.active);
+    "OK"
+}
+
+struct BenchTrace;
+
+impl HeaderSpec for BenchTrace {
+    const NAME: &'static str = "x-trace-id";
+
+    fn parse(_value: &str) -> Result<Self, ApiError> {
+        Ok(Self)
+    }
+}
+
+async fn typed_header(Header(_header): Header<BenchTrace>) -> &'static str {
+    "OK"
 }
 
 struct CountingAllocator;
@@ -46,6 +94,27 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+async fn measure_app(
+    app: &App,
+    method: Method,
+    uri: &str,
+    headers: &[(&str, &str)],
+    iterations: u64,
+) -> (u128, usize, usize) {
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+    let start = Instant::now();
+    for _ in 0..iterations {
+        let response = app.oneshot(method.clone(), uri, headers, None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    (
+        start.elapsed().as_nanos(),
+        ALLOCATIONS.load(Ordering::Relaxed),
+        ALLOCATED_BYTES.load(Ordering::Relaxed),
+    )
+}
 
 #[tokio::main]
 async fn main() {
@@ -118,4 +187,247 @@ async fn main() {
         (openapi_elapsed.as_nanos() as f64 - elapsed.as_nanos() as f64) / iterations as f64,
         ((openapi_elapsed.as_nanos() as f64 / elapsed.as_nanos() as f64) - 1.0) * 100.0,
     );
+
+    let mut path_app = App::new();
+    path_app.get("/users/{id}", typed_path);
+    let (path_elapsed, path_allocations, path_bytes) =
+        measure_app(&path_app, Method::GET, "/users/123456", &[], iterations).await;
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+    let raw_path_start = Instant::now();
+    for _ in 0..iterations {
+        let request = raw_request("/users/123456", &[]);
+        assert_eq!(
+            request
+                .uri()
+                .path()
+                .strip_prefix("/users/")
+                .unwrap()
+                .parse::<u64>()
+                .unwrap(),
+            123456
+        );
+        assert_eq!(raw_ok_response().status(), StatusCode::OK);
+    }
+    let raw_path_elapsed = raw_path_start.elapsed().as_nanos();
+    let raw_path_allocations = ALLOCATIONS.load(Ordering::Relaxed);
+    let raw_path_bytes = ALLOCATED_BYTES.load(Ordering::Relaxed);
+    assert!(
+        path_allocations <= raw_path_allocations,
+        "typed path added heap allocations"
+    );
+    assert!(
+        path_bytes <= raw_path_bytes,
+        "typed path added allocation bytes"
+    );
+    println!(
+        "case=path-integer iterations={iterations} ns_per_op={:.2} raw_ns_per_op={:.2} allocations_per_op={:.4} raw_allocations_per_op={:.4} bytes_per_op={:.2} raw_bytes_per_op={:.2} extra_allocations_per_op={:.4} extra_bytes_per_op={:.2}",
+        path_elapsed as f64 / iterations as f64,
+        raw_path_elapsed as f64 / iterations as f64,
+        path_allocations as f64 / iterations as f64,
+        raw_path_allocations as f64 / iterations as f64,
+        path_bytes as f64 / iterations as f64,
+        raw_path_bytes as f64 / iterations as f64,
+        path_allocations.saturating_sub(raw_path_allocations) as f64 / iterations as f64,
+        path_bytes.saturating_sub(raw_path_bytes) as f64 / iterations as f64,
+    );
+
+    let mut uuid_app = App::new();
+    uuid_app.get("/users/{id}", typed_uuid);
+    let uuid_path = "/users/550e8400-e29b-41d4-a716-446655440000";
+    let (uuid_elapsed, uuid_allocations, uuid_bytes) =
+        measure_app(&uuid_app, Method::GET, uuid_path, &[], iterations).await;
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+    let raw_uuid_start = Instant::now();
+    for _ in 0..iterations {
+        let request = raw_request(uuid_path, &[]);
+        assert_eq!(
+            request
+                .uri()
+                .path()
+                .strip_prefix("/users/")
+                .unwrap()
+                .parse::<Uuid>()
+                .unwrap(),
+            Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap()
+        );
+        assert_eq!(raw_ok_response().status(), StatusCode::OK);
+    }
+    let raw_uuid_elapsed = raw_uuid_start.elapsed().as_nanos();
+    let raw_uuid_allocations = ALLOCATIONS.load(Ordering::Relaxed);
+    let raw_uuid_bytes = ALLOCATED_BYTES.load(Ordering::Relaxed);
+    assert!(
+        uuid_allocations <= raw_uuid_allocations,
+        "typed UUID path added heap allocations"
+    );
+    assert!(
+        uuid_bytes <= raw_uuid_bytes,
+        "typed UUID path added allocation bytes"
+    );
+    println!(
+        "case=path-uuid iterations={iterations} ns_per_op={:.2} raw_ns_per_op={:.2} allocations_per_op={:.4} raw_allocations_per_op={:.4} bytes_per_op={:.2} raw_bytes_per_op={:.2} extra_allocations_per_op={:.4} extra_bytes_per_op={:.2}",
+        uuid_elapsed as f64 / iterations as f64,
+        raw_uuid_elapsed as f64 / iterations as f64,
+        uuid_allocations as f64 / iterations as f64,
+        raw_uuid_allocations as f64 / iterations as f64,
+        uuid_bytes as f64 / iterations as f64,
+        raw_uuid_bytes as f64 / iterations as f64,
+        uuid_allocations.saturating_sub(raw_uuid_allocations) as f64 / iterations as f64,
+        uuid_bytes.saturating_sub(raw_uuid_bytes) as f64 / iterations as f64,
+    );
+
+    let mut query_app = App::new();
+    query_app.get("/search", typed_query);
+    let (query_elapsed, query_allocations, query_bytes) = measure_app(
+        &query_app,
+        Method::GET,
+        "/search?page=42&active=true",
+        &[],
+        iterations,
+    )
+    .await;
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+    let raw_query_start = Instant::now();
+    for _ in 0..iterations {
+        let request = raw_request("/search?page=42&active=true", &[]);
+        let mut values = request.uri().query().unwrap().split('&');
+        let page = values
+            .next()
+            .unwrap()
+            .strip_prefix("page=")
+            .unwrap()
+            .parse::<u32>()
+            .unwrap();
+        let active = values
+            .next()
+            .unwrap()
+            .strip_prefix("active=")
+            .unwrap()
+            .parse::<bool>()
+            .unwrap();
+        assert_eq!((page, active), (42, true));
+        assert_eq!(raw_ok_response().status(), StatusCode::OK);
+    }
+    let raw_query_elapsed = raw_query_start.elapsed().as_nanos();
+    let raw_query_allocations = ALLOCATIONS.load(Ordering::Relaxed);
+    let raw_query_bytes = ALLOCATED_BYTES.load(Ordering::Relaxed);
+    assert!(
+        query_allocations <= raw_query_allocations,
+        "typed query added heap allocations"
+    );
+    assert!(
+        query_bytes <= raw_query_bytes,
+        "typed query added allocation bytes"
+    );
+    println!(
+        "case=query iterations={iterations} ns_per_op={:.2} raw_ns_per_op={:.2} allocations_per_op={:.4} raw_allocations_per_op={:.4} bytes_per_op={:.2} raw_bytes_per_op={:.2} extra_allocations_per_op={:.4} extra_bytes_per_op={:.2}",
+        query_elapsed as f64 / iterations as f64,
+        raw_query_elapsed as f64 / iterations as f64,
+        query_allocations as f64 / iterations as f64,
+        raw_query_allocations as f64 / iterations as f64,
+        query_bytes as f64 / iterations as f64,
+        raw_query_bytes as f64 / iterations as f64,
+        query_allocations.saturating_sub(raw_query_allocations) as f64 / iterations as f64,
+        query_bytes.saturating_sub(raw_query_bytes) as f64 / iterations as f64,
+    );
+
+    let mut header_app = App::new();
+    header_app.get("/trace", typed_header);
+    let (header_elapsed, header_allocations, header_bytes) = measure_app(
+        &header_app,
+        Method::GET,
+        "/trace",
+        &[("x-trace-id", "abc123")],
+        iterations,
+    )
+    .await;
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+    let raw_header_start = Instant::now();
+    for _ in 0..iterations {
+        let request = raw_request("/trace", &[("x-trace-id", "abc123")]);
+        assert_eq!(
+            request
+                .headers()
+                .get("x-trace-id")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "abc123"
+        );
+        assert_eq!(raw_ok_response().status(), StatusCode::OK);
+    }
+    let raw_header_elapsed = raw_header_start.elapsed().as_nanos();
+    let raw_header_allocations = ALLOCATIONS.load(Ordering::Relaxed);
+    let raw_header_bytes = ALLOCATED_BYTES.load(Ordering::Relaxed);
+    assert!(
+        header_allocations <= raw_header_allocations,
+        "typed header added heap allocations"
+    );
+    assert!(
+        header_bytes <= raw_header_bytes,
+        "typed header added allocation bytes"
+    );
+    println!(
+        "case=header iterations={iterations} ns_per_op={:.2} raw_ns_per_op={:.2} allocations_per_op={:.4} raw_allocations_per_op={:.4} bytes_per_op={:.2} raw_bytes_per_op={:.2} extra_allocations_per_op={:.4} extra_bytes_per_op={:.2}",
+        header_elapsed as f64 / iterations as f64,
+        raw_header_elapsed as f64 / iterations as f64,
+        header_allocations as f64 / iterations as f64,
+        raw_header_allocations as f64 / iterations as f64,
+        header_bytes as f64 / iterations as f64,
+        raw_header_bytes as f64 / iterations as f64,
+        header_allocations.saturating_sub(raw_header_allocations) as f64 / iterations as f64,
+        header_bytes.saturating_sub(raw_header_bytes) as f64 / iterations as f64,
+    );
+
+    for route_count in [1_usize, 10, 100, 1_000, 10_000] {
+        let mut route_app = App::new();
+        route_app.get("/fixed/path", plaintext);
+        let mut raw_routes = HashMap::with_capacity(route_count);
+        raw_routes.insert("/fixed/path".to_owned(), vec![Method::GET]);
+        for index in 1..route_count {
+            let path = format!("/static/{index}");
+            route_app.get(&path, plaintext);
+            raw_routes.insert(path, vec![Method::GET]);
+        }
+
+        ALLOCATIONS.store(0, Ordering::Relaxed);
+        ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+        let route_start = Instant::now();
+        for _ in 0..iterations {
+            let response = route_app
+                .oneshot(Method::GET, "/fixed/path", &[], None)
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let route_elapsed = route_start.elapsed();
+        let route_allocations = ALLOCATIONS.load(Ordering::Relaxed);
+        let route_bytes = ALLOCATED_BYTES.load(Ordering::Relaxed);
+
+        ALLOCATIONS.store(0, Ordering::Relaxed);
+        ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+        let raw_route_start = Instant::now();
+        for _ in 0..iterations {
+            assert!(
+                raw_routes
+                    .get("/fixed/path")
+                    .is_some_and(|methods| methods.contains(&Method::GET))
+            );
+            assert_eq!(raw_plaintext().await.status(), StatusCode::OK);
+        }
+        let raw_route_elapsed = raw_route_start.elapsed();
+        let raw_route_allocations = ALLOCATIONS.load(Ordering::Relaxed);
+        let raw_route_bytes = ALLOCATED_BYTES.load(Ordering::Relaxed);
+        println!(
+            "case=static_route_count route_count={route_count} iterations={iterations} ns_per_op={:.2} raw_ns_per_op={:.2} allocations_per_op={:.4} raw_allocations_per_op={:.4} bytes_per_op={:.2} raw_bytes_per_op={:.2}",
+            route_elapsed.as_nanos() as f64 / iterations as f64,
+            raw_route_elapsed.as_nanos() as f64 / iterations as f64,
+            route_allocations as f64 / iterations as f64,
+            raw_route_allocations as f64 / iterations as f64,
+            route_bytes as f64 / iterations as f64,
+            raw_route_bytes as f64 / iterations as f64,
+        );
+    }
 }

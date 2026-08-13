@@ -25,6 +25,10 @@ pub fn derive_openapi(input: TokenStream) -> TokenStream {
     let mut properties = Vec::new();
     let mut required = Vec::new();
     let mut parameters = Vec::new();
+    let mut query_variables = Vec::new();
+    let mut query_arms = Vec::new();
+    let mut query_fields = Vec::new();
+    let mut direct_query_parser = true;
     for field in fields {
         let field_name = field.ident.expect("named field");
         let field_name_string = field_name.to_string();
@@ -45,12 +49,53 @@ pub fn derive_openapi(input: TokenStream) -> TokenStream {
         if !is_optional {
             required.push(quote! { required.push(#field_name_string); });
         }
+        direct_query_parser &= supports_query_value(schema_type);
+        query_variables.push(quote! {
+            let mut #field_name: Option<#schema_type> = None;
+        });
+        query_arms.push(quote! {
+            #field_name_string => {
+                #field_name = Some(::oas_rs::parse_query_value::<#schema_type>(&value)?);
+            }
+        });
+        let query_value = if is_optional {
+            quote! { #field_name }
+        } else {
+            quote! {
+                #field_name.ok_or_else(|| ::oas_rs::ApiError::bad_request(
+                    format!("missing query parameter {}", #field_name_string)
+                ))?
+            }
+        };
+        query_fields.push(quote! { #field_name: #query_value });
     }
 
     let required_value = if required.is_empty() {
         quote! { None }
     } else {
         quote! { Some(::oas_rs::serde_json::json!(required)) }
+    };
+
+    let query_parser = if direct_query_parser {
+        quote! {
+            fn parse(query: &str) -> Result<Self, ::oas_rs::ApiError> {
+                #(#query_variables)*
+                for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+                    let (key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
+                    let key = ::oas_rs::decode_query_component(key)?;
+                    let value = ::oas_rs::decode_query_component(raw_value)?;
+                    match key.as_ref() {
+                        #(#query_arms,)*
+                        _ => {}
+                    }
+                }
+                Ok(Self {
+                    #(#query_fields,)*
+                })
+            }
+        }
+    } else {
+        quote! {}
     };
 
     quote! {
@@ -76,9 +121,30 @@ pub fn derive_openapi(input: TokenStream) -> TokenStream {
                 #(#parameters)*
                 parameters
             }
+
+            #query_parser
         }
     }
     .into()
+}
+
+fn supports_query_value(ty: &Type) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return false;
+    };
+    if segment.ident == "Option"
+        && let PathArguments::AngleBracketed(arguments) = &segment.arguments
+        && let Some(GenericArgument::Type(inner)) = arguments.args.first()
+    {
+        return supports_query_value(inner);
+    }
+    matches!(
+        segment.ident.to_string().as_str(),
+        "String" | "bool" | "u32" | "u64" | "i32" | "i64" | "f32" | "f64" | "Uuid"
+    )
 }
 
 fn option_inner(ty: &Type) -> (&Type, bool) {

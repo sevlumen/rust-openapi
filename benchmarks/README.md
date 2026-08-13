@@ -20,6 +20,14 @@ For a quick Docker smoke test (not a release gate):
 Use `-WarmupSeconds 1` only for a functional smoke of the matrix. Official
 runs keep the default 30-second warm-up.
 
+The script refuses an official run on hosts with fewer than 12 logical
+processors unless `-AllowUndersizedHost` is explicitly supplied. Before each
+pair it validates the API/PostgreSQL CPU affinity and 1 GiB memory limit. The
+retained stats CSV includes Docker CPU%, RSS, PIDs, and cgroup CPU usage; the
+report derives CPU nanoseconds/request from the cgroup usage delta. Incomplete
+request counts, missing CPU/RSS samples, negative timings, baseline CV above
+0.5%, or any measured error remain `INCONCLUSIVE`.
+
 The default matrix includes the P0/P1 HTTP cases (`validation-success`,
 `problem`, `raw-handler`, and `security`) and `postgres` (16 persistent
 `tokio-postgres` clients with one prepared statement per connection). Each

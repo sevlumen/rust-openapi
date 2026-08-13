@@ -19,7 +19,12 @@ async fn deterministic_path_fuzz_smoke_never_panics() {
             value.push(alphabet[(state as usize) % alphabet.len()] as char);
         }
         let uri = format!("/fuzz/{value}");
-        let response = app.oneshot(Method::GET, &uri, &[], Some(Bytes::new())).await;
-        assert!(matches!(response.status().as_u16(), 200 | 400 | 404), "iteration {iteration}");
+        let response = app
+            .oneshot(Method::GET, &uri, &[], Some(Bytes::new()))
+            .await;
+        assert!(
+            matches!(response.status().as_u16(), 200 | 400 | 404),
+            "iteration {iteration}"
+        );
     }
 }

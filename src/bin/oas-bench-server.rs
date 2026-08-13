@@ -2,9 +2,8 @@ use bytes::Bytes;
 use oas_rs::{ApiError, App, Header, HeaderSpec, Json, JsonBytes, Path, Query, State};
 use serde::{Deserialize, Serialize};
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicUsize, Ordering},
-    OnceLock,
 };
 use tokio_postgres::{Client, NoTls, Statement};
 

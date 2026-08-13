@@ -4,7 +4,8 @@ param(
     [int]$WarmupSeconds = 30,
     [int[]]$Vus = @(32, 64, 128, 256, 512),
     [string]$Version = "v0.1.0-local",
-    [string[]]$Cases = @("plaintext", "static-json", "static-route", "path-integer", "path-uuid", "validation-success", "query", "header", "json-small", "json-100-users", "postgres", "problem", "raw-handler", "security", "404", "405")
+    [string[]]$Cases = @("plaintext", "static-json", "static-route", "path-integer", "path-uuid", "validation-success", "query", "header", "json-small", "json-100-users", "postgres", "problem", "raw-handler", "security", "404", "405"),
+    [switch]$AllowUndersizedHost
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,17 +13,54 @@ $compose = Join-Path $PSScriptRoot "docker-compose.yml"
 $resultRoot = Join-Path $PSScriptRoot "results\$Version"
 New-Item -ItemType Directory -Force -Path $resultRoot | Out-Null
 $Cases = @($Cases | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$logicalProcessors = [Environment]::ProcessorCount
+if ($logicalProcessors -lt 12 -and -not $AllowUndersizedHost) {
+    throw "Official benchmark topology requires at least 12 logical processors; found $logicalProcessors. Use -AllowUndersizedHost only for a non-release smoke."
+}
+
+function Assert-ContainerTopology([string]$service) {
+    $container = (docker compose -f $compose ps -q $service).Trim()
+    if (-not $container) { throw "No container found for $service" }
+    $expectedCpu = switch ($service) {
+        "postgres" { if ($env:POSTGRES_CPUSET) { $env:POSTGRES_CPUSET } else { "4-7" } }
+        "raw" { if ($env:API_CPUSET) { $env:API_CPUSET } else { "0-3" } }
+        "oas" { if ($env:API_CPUSET) { $env:API_CPUSET } else { "0-3" } }
+        default { $null }
+    }
+    if ($expectedCpu) {
+        $actualCpu = (docker inspect --format '{{.HostConfig.CpusetCpus}}' $container).Trim()
+        if ($actualCpu -ne $expectedCpu) {
+            throw "CPU affinity mismatch for ${service}: expected $expectedCpu, actual $actualCpu"
+        }
+    }
+    $memoryLimit = [int64](docker inspect --format '{{.HostConfig.Memory}}' $container).Trim()
+    if ($memoryLimit -ne 1GB) {
+        throw "Memory limit mismatch for ${service}: expected 1GiB, actual $memoryLimit bytes"
+    }
+}
 
 function Start-StatsCollector([string]$service, [string]$file) {
     $container = (docker compose -f $compose ps -q $service).Trim()
     if (-not $container) { return $null }
-    "timestamp,cpu_percent,memory_usage,pids" | Set-Content -Path $file
+    "timestamp,cpu_percent,memory_usage,pids,cpu_usage_usec" | Set-Content -Path $file
     return Start-Job -ScriptBlock {
         param($containerId, $statsFile)
         while ($true) {
             $sample = docker stats --no-stream --format "{{.CPUPerc}},{{.MemUsage}},{{.PIDs}}" $containerId 2>$null
+            $cpuUsageUsec = $null
+            $cpuStat = @(docker exec $containerId cat /sys/fs/cgroup/cpu.stat 2>$null)
+            foreach ($line in $cpuStat) {
+                if ($line -match '^usage_usec\s+(\d+)$') {
+                    $cpuUsageUsec = $matches[1]
+                    break
+                }
+                if ($line -match '^\s*(\d+)\s*$') {
+                    $cpuUsageUsec = [math]::Floor([double]$matches[1] / 1000)
+                    break
+                }
+            }
             if ($sample) {
-                "{0},{1}" -f (Get-Date -Format o), $sample | Add-Content -Path $statsFile
+                "{0},{1},{2}" -f (Get-Date -Format o), $sample, $cpuUsageUsec | Add-Content -Path $statsFile
             }
             Start-Sleep -Milliseconds 500
         }
@@ -58,6 +96,8 @@ foreach ($vu in $Vus) {
             docker compose -f $compose down --remove-orphans | Out-Null
             docker compose -f $compose up -d $service
             if ($LASTEXITCODE -ne 0) { throw "Failed to start $service" }
+            Assert-ContainerTopology $service
+            Assert-ContainerTopology "postgres"
             docker compose -f $compose run --rm --no-deps `
                 -e TARGET_URL="$targetUrl" `
                 -e VUS="$vu" `
@@ -147,6 +187,19 @@ function Get-PeakMemoryMiB($records) {
     return ($values | Measure-Object -Maximum).Maximum
 }
 
+function Get-CpuNanosecondsPerRequest($record, $metric) {
+    if (-not (Test-Path $record.stats)) { return $null }
+    $values = @(Get-Content $record.stats | Select-Object -Skip 1 | ForEach-Object {
+        $parts = $_ -split ',', 5
+        if ($parts.Count -ge 5 -and $parts[4] -match '^\d+$') {
+            [double]$parts[4]
+        }
+    })
+    $requests = [double]$metric.metrics.measured_requests.count
+    if ($values.Count -lt 2 -or $requests -le 0) { return $null }
+    (($values | Measure-Object -Maximum).Maximum - ($values | Measure-Object -Minimum).Minimum) * 1000 / $requests
+}
+
 $reportRows = foreach ($case in $Cases) { foreach ($vu in $Vus) {
     $rawRecords = @($records | Where-Object { $_.case -eq $case -and $_.implementation -eq "raw" -and $_.vu -eq $vu } | Sort-Object run)
     $oasRecords = @($records | Where-Object { $_.case -eq $case -and $_.implementation -eq "oas" -and $_.vu -eq $vu } | Sort-Object run)
@@ -173,6 +226,9 @@ $reportRows = foreach ($case in $Cases) { foreach ($vu in $Vus) {
     $rawMean = ($rawRpsValues | Measure-Object -Average).Average
     $rawCv = if ($rawMean -eq 0) { [double]::PositiveInfinity } else { (Get-StdDev $rawRpsValues) / $rawMean }
     $errors = @($rawMetrics + $oasMetrics | ForEach-Object { [double]$_.metrics.measured_errors.count } | Measure-Object -Sum).Sum
+    $invalidRequestCount = @($rawMetrics + $oasMetrics | Where-Object {
+        [double]$_.metrics.measured_requests.count -ne $Iterations
+    }).Count -gt 0
     $invalidTiming = @($rawMetrics + $oasMetrics | ForEach-Object {
         $duration = $_.metrics.measured_http_req_duration
         @('min', 'med', 'max', 'p(95)', 'p(99)', 'p(99.9)') | ForEach-Object {
@@ -181,14 +237,24 @@ $reportRows = foreach ($case in $Cases) { foreach ($vu in $Vus) {
     }) -contains $true
     $rawStatsRecords = @($rawRecords)
     $oasStatsRecords = @($oasRecords)
-    $rawCpu = Get-AverageCpuPercent $rawStatsRecords
-    $oasCpu = Get-AverageCpuPercent $oasStatsRecords
+    $rawCpuNsValues = @()
+    $oasCpuNsValues = @()
+    for ($index = 0; $index -lt [math]::Min($rawRecords.Count, $rawMetrics.Count); $index++) {
+        $value = Get-CpuNanosecondsPerRequest $rawRecords[$index] $rawMetrics[$index]
+        if ($null -ne $value) { $rawCpuNsValues += $value }
+    }
+    for ($index = 0; $index -lt [math]::Min($oasRecords.Count, $oasMetrics.Count); $index++) {
+        $value = Get-CpuNanosecondsPerRequest $oasRecords[$index] $oasMetrics[$index]
+        if ($null -ne $value) { $oasCpuNsValues += $value }
+    }
+    $rawCpuNs = Get-Median $rawCpuNsValues
+    $oasCpuNs = Get-Median $oasCpuNsValues
     $rawMemory = Get-PeakMemoryMiB $rawStatsRecords
     $oasMemory = Get-PeakMemoryMiB $oasStatsRecords
-    $cpuDelta = if ($null -eq $rawCpu -or $rawCpu -eq 0 -or $null -eq $oasCpu) { $null } else { ($oasCpu / $rawCpu) - 1 }
+    $cpuDelta = if ($null -eq $rawCpuNs -or $rawCpuNs -eq 0 -or $null -eq $oasCpuNs) { $null } else { ($oasCpuNs / $rawCpuNs) - 1 }
     $latencyFail = (($oasP50 / $rawP50) - 1) -gt 0.01 -or (($oasP95 / $rawP95) - 1) -gt 0.01 -or (($oasP99 / $rawP99) - 1) -gt 0.01
     $requiredEvidenceMissing = $null -eq $cpuDelta -or $null -eq $rawMemory -or $null -eq $oasMemory
-    $result = if ($errors -gt 0 -or $invalidTiming -or $Runs -lt 7 -or $Iterations -lt 1000000 -or $rawCv -gt 0.005 -or $requiredEvidenceMissing) { "INCONCLUSIVE" } elseif ($medianOverhead -gt 0.01 -or $ciUpper -gt 0.01 -or $latencyFail -or $cpuDelta -gt 0.01) { "FAIL" } else { "PASS" }
+    $result = if ($errors -gt 0 -or $invalidTiming -or $invalidRequestCount -or $Runs -lt 7 -or $Iterations -lt 1000000 -or $rawCv -gt 0.005 -or $requiredEvidenceMissing) { "INCONCLUSIVE" } elseif ($medianOverhead -gt 0.01 -or $ciUpper -gt 0.01 -or $latencyFail -or $cpuDelta -gt 0.01) { "FAIL" } else { "PASS" }
     [pscustomobject]@{
         Case = $case
         Vus = $vu
@@ -204,11 +270,14 @@ $reportRows = foreach ($case in $Cases) { foreach ($vu in $Vus) {
         RawP999 = $rawP999
         OasP999 = $oasP999
         P99Delta = ($oasP99 / $rawP99) - 1
+        RawCpuNsPerRequest = $rawCpuNs
+        OasCpuNsPerRequest = $oasCpuNs
         CpuDelta = $cpuDelta
         RawMemory = $rawMemory
         OasMemory = $oasMemory
         RawCv = $rawCv
         InvalidTiming = $invalidTiming
+        InvalidRequestCount = $invalidRequestCount
         MedianOverhead = $medianOverhead
         Upper95Ci = $ciUpper
         Result = $result
@@ -217,8 +286,9 @@ $reportRows = foreach ($case in $Cases) { foreach ($vu in $Vus) {
 $table = if ($reportRows) {
     ($reportRows | ForEach-Object {
         $cpu = if ($null -eq $_.CpuDelta) { "n/a" } else { "$([math]::Round($_.CpuDelta * 100, 3))%" }
+        $cpuNs = if ($null -eq $_.RawCpuNsPerRequest -or $null -eq $_.OasCpuNsPerRequest) { "n/a" } else { "$([math]::Round($_.RawCpuNsPerRequest, 2))/$([math]::Round($_.OasCpuNsPerRequest, 2))" }
         $rss = if ($null -eq $_.RawMemory -or $null -eq $_.OasMemory) { "n/a" } else { "$([math]::Round($_.RawMemory, 1))/$([math]::Round($_.OasMemory, 1))" }
-        "| $($_.Case) (VU $($_.Vus)) | $([math]::Round($_.RawRps, 2)) | $([math]::Round($_.OasRps, 2)) | $([math]::Round($_.Overhead * 100, 3))% | $([math]::Round($_.RawP50, 4))/$([math]::Round($_.OasP50, 4)) | $([math]::Round($_.RawP95, 4))/$([math]::Round($_.OasP95, 4)) | $([math]::Round($_.RawP99, 4))/$([math]::Round($_.OasP99, 4)) | $([math]::Round($_.RawCv * 100, 3))% | $cpu | $rss | $($_.Result) |"
+        "| $($_.Case) (VU $($_.Vus)) | $([math]::Round($_.RawRps, 2)) | $([math]::Round($_.OasRps, 2)) | $([math]::Round($_.Overhead * 100, 3))% | $([math]::Round($_.RawP50, 4))/$([math]::Round($_.OasP50, 4)) | $([math]::Round($_.RawP95, 4))/$([math]::Round($_.OasP95, 4)) | $([math]::Round($_.RawP99, 4))/$([math]::Round($_.OasP99, 4)) | $([math]::Round($_.RawCv * 100, 3))% | $cpuNs | $cpu | $rss | $($_.Result) |"
     }) -join "`n"
 } else {
     "| no completed cases | pending aggregation | pending aggregation | pending | pending | pending | pending | pending | pending | INCONCLUSIVE |"
@@ -241,13 +311,13 @@ This run collected $($records.Count) raw/framework measurements. Results are
 classified only after the minimum run/request counts, raw-baseline CV, paired
 95% confidence bound, CPU samples, and RSS samples are available.
 
-| Test | Raw RPS | OAS RPS | Overhead | p50 raw/oas (ms) | p95 raw/oas (ms) | p99 raw/oas (ms) | Raw CV | CPU Δ | RSS peak raw/oas (MiB) | Result |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Test | Raw RPS | OAS RPS | Overhead | p50 raw/oas (ms) | p95 raw/oas (ms) | p99 raw/oas (ms) | Raw CV | CPU ns/request raw/oas | CPU Δ | RSS peak raw/oas (MiB) | Result |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 ${table}
 
 $timingNote
 
-The statistical gate uses median paired throughput overhead, upper normal-approximation 95% CI, p50/p95/p99 latency deltas, raw baseline CV, zero measured errors, CPU samples, memory samples, and the requested run/request minimums. Any negative timing sample invalidates the row. p999 is retained in the JSON artifacts for warning analysis. Allocation metrics are reported by the in-process router benchmark.
+The statistical gate uses median paired throughput overhead, upper normal-approximation 95% CI, p50/p95/p99 latency deltas, raw baseline CV, zero measured errors, exact measured request counts, cgroup CPU usage nanoseconds/request, memory samples, and the requested run/request minimums. Any negative timing sample or incomplete request count invalidates the row. p999 is retained in the JSON artifacts for warning analysis. Allocation metrics are reported by the in-process router benchmark.
 
 Raw result files and the exact environment must be retained beside this file.
 "@ | Set-Content -Path (Join-Path $resultRoot "REPORT.md")
@@ -274,10 +344,13 @@ $composeVersion = docker compose version
 - PostgreSQL CPU affinity: $($env:POSTGRES_CPUSET) (default 4-7)
 - Load-generator CPU affinity: $($env:LOAD_CPUSET) (default 8-11)
 - API/PostgreSQL memory limit: 1g
+- Host logical processors observed: $logicalProcessors
+- Official topology guard: at least 12 logical processors unless `-AllowUndersizedHost` was explicitly used
 - Rust compiler:
 
 $rustDetails
 - Docker Compose: $composeVersion
+- Benchmark build image: rust:1.88.0-bookworm
 - PostgreSQL image: postgres:16.4-bookworm
 - k6 image: grafana/k6:0.55.0
 - Release profile: opt-level=3, lto=fat, codegen-units=1, panic=abort, strip=true
