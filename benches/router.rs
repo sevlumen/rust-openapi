@@ -51,6 +51,9 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 async fn main() {
     let mut app = App::new();
     app.get("/plaintext", plaintext);
+    let mut openapi_app = App::new();
+    openapi_app.get("/plaintext", plaintext);
+    openapi_app.openapi("/openapi.json").swagger("/swagger");
     let iterations = std::env::var("OAS_BENCH_ITERATIONS")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -65,6 +68,18 @@ async fn main() {
     let elapsed = start.elapsed();
     let framework_allocations = ALLOCATIONS.load(Ordering::Relaxed);
     let framework_bytes = ALLOCATED_BYTES.load(Ordering::Relaxed);
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+    let openapi_start = Instant::now();
+    for _ in 0..iterations {
+        let response = openapi_app
+            .oneshot(Method::GET, "/plaintext", &[], None)
+            .await;
+        assert_eq!(response.status(), http::StatusCode::OK);
+    }
+    let openapi_elapsed = openapi_start.elapsed();
+    let openapi_allocations = ALLOCATIONS.load(Ordering::Relaxed);
+    let openapi_bytes = ALLOCATED_BYTES.load(Ordering::Relaxed);
     ALLOCATIONS.store(0, Ordering::Relaxed);
     ALLOCATED_BYTES.store(0, Ordering::Relaxed);
     let raw_start = Instant::now();
@@ -90,5 +105,17 @@ async fn main() {
         raw_bytes as f64 / iterations as f64,
         (framework_allocations.saturating_sub(raw_allocations)) as f64 / iterations as f64,
         (framework_bytes.saturating_sub(raw_bytes)) as f64 / iterations as f64,
+    );
+    println!(
+        "case=plaintext_openapi_enabled iterations={iterations} elapsed_ns={} ns_per_op={:.2} allocations={} allocations_per_op={:.4} bytes={} bytes_per_op={:.2} disabled_ns_per_op={:.2} delta_ns_per_op={:.2} delta_percent={:.2}",
+        openapi_elapsed.as_nanos(),
+        openapi_elapsed.as_nanos() as f64 / iterations as f64,
+        openapi_allocations,
+        openapi_allocations as f64 / iterations as f64,
+        openapi_bytes,
+        openapi_bytes as f64 / iterations as f64,
+        elapsed.as_nanos() as f64 / iterations as f64,
+        (openapi_elapsed.as_nanos() as f64 - elapsed.as_nanos() as f64) / iterations as f64,
+        ((openapi_elapsed.as_nanos() as f64 / elapsed.as_nanos() as f64) - 1.0) * 100.0,
     );
 }
