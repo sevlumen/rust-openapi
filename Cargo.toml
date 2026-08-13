@@ -1,0 +1,32 @@
+[package]
+name = "oas-rs"
+version = "0.1.0"
+edition = "2024"
+description = "A small, typed OpenAPI-first HTTP framework on Hyper and Tokio"
+license = "MIT"
+
+[lib]
+name = "oas_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oas-bench-server"
+path = "src/bin/oas-bench-server.rs"
+
+[dependencies]
+bytes = "1.10"
+http = "1.3"
+http-body-util = "0.1"
+hyper = { version = "1.6", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.45", features = ["macros", "net", "rt-multi-thread", "signal"] }
+uuid = { version = "1.17", features = ["serde", "v4"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
