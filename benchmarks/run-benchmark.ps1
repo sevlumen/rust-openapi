@@ -88,8 +88,9 @@ function Get-OhaCase([string]$case) {
     return [pscustomobject]$spec
 }
 
-function Get-OhaArguments($spec, [string]$targetUrl, [int]$connections, [int]$requestCount, [string]$outputPath) {
-    $arguments = @("-n", "$requestCount", "-c", "$connections", "--no-tui", "--output-format", "csv", "--output", $outputPath)
+function Get-OhaArguments($spec, [string]$targetUrl, [int]$connections, [int]$requestCount, [string]$outputPath, [switch]$SummaryOnly) {
+    $outputFormat = if ($SummaryOnly) { "json" } else { "csv" }
+    $arguments = @("-n", "$requestCount", "-c", "$connections", "--no-tui", "--output-format", $outputFormat, "--output", $outputPath)
     if ($spec.Method -ne "GET") { $arguments += @("--method", $spec.Method) }
     foreach ($header in $spec.Headers) { $arguments += @("-H", $header) }
     if ($null -ne $spec.Body) {
@@ -212,8 +213,8 @@ $stoppedEarly = $false
         foreach ($implementation in $order) {
             $service = $implementation
             $file = Join-Path $resultRoot "$case-$implementation-vu$vu-run$run.json"
-            $csvName = "$case-$implementation-vu$vu-run$run.csv"
-            $csvFile = Join-Path $resultRoot $csvName
+            $outputName = if ($ReferenceProfile) { "$case-$implementation-vu$vu-run$run.oha.json" } else { "$case-$implementation-vu$vu-run$run.csv" }
+            $outputFile = Join-Path $resultRoot $outputName
             $spec = Get-OhaCase $case
             $targetUrl = "http://{0}:8080" -f $service
             docker compose -f $compose down --remove-orphans | Out-Null
@@ -227,7 +228,8 @@ $stoppedEarly = $false
             docker compose -f $compose up -d @services
             if ($LASTEXITCODE -ne 0) { throw "Failed to start $service" }
             Assert-ContainerTopology $service
-            if ((docker compose -f $compose ps -q postgres).Trim()) {
+            $postgresContainer = docker compose -f $compose ps -q postgres
+            if ($postgresContainer) {
                 Assert-ContainerTopology "postgres"
             }
             if ($WarmupSeconds -gt 0) {
@@ -246,18 +248,22 @@ $stoppedEarly = $false
             $statsJob = Start-StatsCollector $service $statsFile
             $cpuStartUsec = Get-CgroupCpuUsageUsec $service
             try {
-                if (Test-Path $csvFile) { Remove-Item -LiteralPath $csvFile -Force }
-                $ohaArgs = Get-OhaArguments $spec $targetUrl $vu $Iterations "/results/$csvName"
+                if (Test-Path $outputFile) { Remove-Item -LiteralPath $outputFile -Force }
+                $ohaArgs = Get-OhaArguments $spec $targetUrl $vu $Iterations "/results/$outputName" -SummaryOnly:$ReferenceProfile
                 docker compose -f $compose run --rm --no-deps oha @ohaArgs
                 $exitCode = $LASTEXITCODE
             } finally {
                 Stop-StatsCollector $statsJob
             }
             $cpuEndUsec = Get-CgroupCpuUsageUsec $service
-            $sharedCsv = Join-Path $PSScriptRoot "results\$csvName"
-            if (-not (Test-Path $sharedCsv)) { throw "oha did not write CSV output for $implementation vu=$vu run=$run" }
-            Move-Item -Force $sharedCsv $csvFile
-            $summary = Convert-OhaCsvToSummary -CsvPath $csvFile -ExpectedStatus $spec.ExpectedStatus
+            $sharedOutput = Join-Path $PSScriptRoot "results\$outputName"
+            if (-not (Test-Path $sharedOutput)) { throw "oha did not write output for $implementation vu=$vu run=$run" }
+            Move-Item -Force $sharedOutput $outputFile
+            $summary = if ($ReferenceProfile) {
+                Convert-OhaJsonToSummary -JsonPath $outputFile -ExpectedStatus $spec.ExpectedStatus -ExpectedRequests $Iterations
+            } else {
+                Convert-OhaCsvToSummary -CsvPath $outputFile -ExpectedStatus $spec.ExpectedStatus
+            }
             $summary | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $file
             docker compose -f $compose down --remove-orphans | Out-Null
             if ($exitCode -ne 0) { throw "Benchmark failed for $implementation vu=$vu run=$run" }
@@ -267,7 +273,7 @@ $stoppedEarly = $false
                 vu = $vu
                 run = $run
                 file = $file
-                csv = $csvFile
+                output = $outputFile
                 stats = $statsFile
                 cpu_start_usec = $cpuStartUsec
                 cpu_end_usec = $cpuEndUsec

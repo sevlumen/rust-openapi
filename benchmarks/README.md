@@ -3,8 +3,10 @@
 This harness keeps the raw Hyper comparator and `oas-rs` binary in the same
 release image, with identical memory limits and CPU affinity. The measured
 scenario uses oha exact-request mode, a 30-second warm-up, and an explicit
-zero-error/status threshold. oha writes one CSV row per request; the adapter
-normalizes those rows into the harness JSON metrics schema.
+zero-error/status threshold. Normal diagnostic/official runs retain one CSV row
+per request; the reference profile uses oha's summary JSON instead so the load
+generator's bind-mounted per-request CSV I/O cannot dominate a 1,000,000-request
+run. The JSON adapter still checks the exact response count and expected status.
 
 Run the full release matrix from PowerShell:
 
@@ -29,7 +31,9 @@ cannot be a release PASS. It keeps the reference paths and payload shape
 (`/users` and `/users-static`) while retaining the raw-vs-oas paired
 comparison. The reference k6 numbers must not be compared directly with the
 oha raw-vs-oas overhead; match endpoint, payload, VU, request count, CPU
-affinity, memory limit, and database phase first.
+affinity, memory limit, and database phase first. Because oha has no
+discard-response-bodies mode, its absolute RPS is tool-specific; use the
+dedicated Linux k6 run for final comparison with `D:\Code\demo`.
 
 For a quick Docker smoke test (not a release gate):
 
