@@ -1,0 +1,11 @@
+git_sha=331164d591a755b3bf940dcca85dd947214cf29d
+profile=diagnostic
+cases=json-100-users,users-static
+vus=256
+runs=7
+iterations=1000000
+warmup_seconds=30
+records=28
+expected_records=28
+official_shape_valid=True
+matrix_complete=True
