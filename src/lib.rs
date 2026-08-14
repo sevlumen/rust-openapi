@@ -8,7 +8,7 @@ use bytes::Bytes;
 use futures_core::Stream;
 use http::{HeaderValue, Request, Response, StatusCode, header};
 use http_body::{Body, Frame, SizeHint};
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hyper::body::Incoming;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
@@ -17,6 +17,7 @@ use std::{
     collections::HashMap,
     convert::Infallible,
     future::Future,
+    marker::PhantomPinned,
     mem::{MaybeUninit, align_of, size_of},
     pin::Pin,
     str::FromStr,
@@ -31,6 +32,9 @@ pub use serde_json;
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 pub type HttpResponse = Response<ResponseBody>;
+
+/// Default upper bound for request bodies collected by body extractors.
+pub const DEFAULT_MAX_BODY_SIZE: usize = 1024 * 1024;
 
 pub enum ResponseBody {
     Full(Full<Bytes>),
@@ -94,6 +98,7 @@ struct InlineFuture {
     storage: FutureStorage,
     poll_fn: unsafe fn(*mut u8, &mut Context<'_>) -> Poll<HttpResponse>,
     drop_fn: unsafe fn(*mut u8),
+    _pin: PhantomPinned,
 }
 
 impl InlineFuture {
@@ -111,6 +116,7 @@ impl InlineFuture {
             storage,
             poll_fn: poll_inline::<F>,
             drop_fn: drop_inline::<F>,
+            _pin: PhantomPinned,
         }
     }
 }
@@ -200,7 +206,7 @@ impl Params {
     }
 
     fn from_match(
-        names: Arc<[String]>,
+        names: &[String],
         ranges: [Option<CaptureRange>; MAX_CAPTURE_PARAMS],
         count: usize,
         path: &str,
@@ -431,6 +437,7 @@ pub struct ApiError {
     pub status: StatusCode,
     pub title: String,
     pub detail: String,
+    missing: bool,
 }
 
 impl ApiError {
@@ -439,11 +446,22 @@ impl ApiError {
             status,
             title: title.into(),
             detail: detail.into(),
+            missing: false,
         }
     }
 
     pub fn bad_request(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "Bad Request", detail)
+    }
+
+    fn missing(detail: impl Into<String>) -> Self {
+        let mut error = Self::bad_request(detail);
+        error.missing = true;
+        error
+    }
+
+    fn is_missing(&self) -> bool {
+        self.missing
     }
 }
 
@@ -584,9 +602,15 @@ pub struct Created<T>(pub T);
 
 impl<T: Serialize + OpenApiSchema + Send + 'static> IntoResponse for Created<T> {
     fn into_response(self) -> HttpResponse {
-        let mut response = Json(self.0).into_response();
-        *response.status_mut() = StatusCode::CREATED;
-        response
+        match serde_json::to_vec(&self.0) {
+            Ok(bytes) => response_json_bytes(StatusCode::CREATED, Bytes::from(bytes)),
+            Err(error) => ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Serialization Error",
+                error.to_string(),
+            )
+            .into_response(),
+        }
     }
 }
 
@@ -658,6 +682,7 @@ impl<T: ResponseMetadata> ResponseMetadata for Result<T, ApiError> {
 pub trait Handler<S, Args>: Send + Sync + 'static {
     type Response: ResponseMetadata;
     const NEEDS_PARAMS: bool = false;
+    const NEEDS_BODY: bool = false;
 
     fn openapi_request() -> OpenApiRequest {
         OpenApiRequest::default()
@@ -668,6 +693,7 @@ pub trait Handler<S, Args>: Send + Sync + 'static {
 
 pub trait FromRequest<S>: Sized + Send + 'static {
     const NEEDS_PARAMS: bool = false;
+    const NEEDS_BODY: bool = false;
 
     fn openapi_request() -> OpenApiRequest {
         OpenApiRequest::default()
@@ -748,6 +774,8 @@ impl<S: Send + Sync + 'static, T> FromRequest<S> for Json<T>
 where
     T: DeserializeOwned + OpenApiSchema + Send + 'static,
 {
+    const NEEDS_BODY: bool = true;
+
     fn openapi_request() -> OpenApiRequest {
         OpenApiRequest {
             request_body: Some(json!({
@@ -773,6 +801,9 @@ where
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
+        if body.is_empty() && content_type.is_empty() {
+            return Err(ApiError::missing("missing JSON body"));
+        }
         if !content_type.starts_with("application/json") {
             return Err(ApiError::new(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -808,7 +839,7 @@ impl<S: Send + Sync + 'static, T: HeaderSpec> FromRequest<S> for Header<T> {
             .headers()
             .get(T::NAME)
             .and_then(|value| value.to_str().ok())
-            .ok_or_else(|| ApiError::bad_request(format!("missing header {}", T::NAME)))
+            .ok_or_else(|| ApiError::missing(format!("missing header {}", T::NAME)))
             .and_then(T::parse)
             .map(Header)
     }
@@ -820,6 +851,7 @@ where
     T: FromRequest<S>,
 {
     const NEEDS_PARAMS: bool = T::NEEDS_PARAMS;
+    const NEEDS_BODY: bool = T::NEEDS_BODY;
 
     fn openapi_request() -> OpenApiRequest {
         let mut metadata = T::openapi_request();
@@ -841,7 +873,11 @@ where
         params: &Params,
         state: &Arc<S>,
     ) -> Result<Self, ApiError> {
-        Ok(T::from_request(request, params, state).ok())
+        match T::from_request(request, params, state) {
+            Ok(value) => Ok(Some(value)),
+            Err(error) if error.is_missing() => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -854,6 +890,7 @@ where
 {
     type Response = R;
     const NEEDS_PARAMS: bool = false;
+    const NEEDS_BODY: bool = false;
 
     fn openapi_request() -> OpenApiRequest {
         OpenApiRequest::default()
@@ -875,6 +912,7 @@ where
 {
     type Response = R;
     const NEEDS_PARAMS: bool = E1::NEEDS_PARAMS;
+    const NEEDS_BODY: bool = E1::NEEDS_BODY;
 
     fn openapi_request() -> OpenApiRequest {
         E1::openapi_request()
@@ -902,6 +940,7 @@ where
 {
     type Response = R;
     const NEEDS_PARAMS: bool = E1::NEEDS_PARAMS || E2::NEEDS_PARAMS;
+    const NEEDS_BODY: bool = E1::NEEDS_BODY || E2::NEEDS_BODY;
 
     fn openapi_request() -> OpenApiRequest {
         let mut metadata = E1::openapi_request();
@@ -934,6 +973,7 @@ struct Route<S> {
     segments: Vec<Segment>,
     capture_names: Arc<[String]>,
     materialize_params: bool,
+    needs_body: bool,
     handler: ErasedHandler<S>,
     operation: Operation,
 }
@@ -981,16 +1021,12 @@ impl App<()> {
             version: "0.1.0".to_owned(),
         }
     }
-}
 
-impl Default for App<()> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<S: Send + Sync + 'static> App<S> {
     pub fn with_state<T: Send + Sync + 'static>(self, state: T) -> App<T> {
+        assert!(
+            self.routes.is_empty(),
+            "with_state must be configured before routes"
+        );
         App {
             state: Arc::new(state),
             routes: Vec::new(),
@@ -1003,7 +1039,15 @@ impl<S: Send + Sync + 'static> App<S> {
             version: self.version,
         }
     }
+}
 
+impl Default for App<()> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S: Send + Sync + 'static> App<S> {
     pub fn title(mut self, title: impl Into<String>) -> Self {
         self.title = title.into();
         self.openapi_bytes = None;
@@ -1253,17 +1297,47 @@ impl<S: Send + Sync + 'static> App<S> {
                             let app = Arc::clone(&app);
                             async move {
                                 let (parts, body) = request.into_parts();
-                                let response = match body.collect().await {
-                                    Ok(body) => app.handle(Request::from_parts(parts, body.to_bytes())).await,
-                                    Err(_) => response_json(
-                                        StatusCode::BAD_REQUEST,
+                                let needs_body = app.needs_body(&parts.method, normalize_request_path(parts.uri.path()));
+                                let response = if !needs_body {
+                                    app.handle(Request::from_parts(parts, Bytes::new())).await
+                                } else if parts
+                                    .headers
+                                    .get(header::CONTENT_LENGTH)
+                                    .and_then(|value| value.to_str().ok())
+                                    .and_then(|value| value.parse::<usize>().ok())
+                                    .is_some_and(|length| length > DEFAULT_MAX_BODY_SIZE)
+                                {
+                                    response_json(
+                                        StatusCode::PAYLOAD_TOO_LARGE,
                                         json!({
                                             "type": "about:blank",
-                                            "title": "Bad Request",
-                                            "status": 400,
-                                            "detail": "request body was interrupted"
+                                            "title": "Payload Too Large",
+                                            "status": 413,
+                                            "detail": "request body exceeds the configured limit"
                                         }),
-                                    ),
+                                    )
+                                } else {
+                                    match Limited::new(body, DEFAULT_MAX_BODY_SIZE).collect().await {
+                                        Ok(body) => app.handle(Request::from_parts(parts, body.to_bytes())).await,
+                                        Err(error) if error.downcast_ref::<LengthLimitError>().is_some() => response_json(
+                                            StatusCode::PAYLOAD_TOO_LARGE,
+                                            json!({
+                                                "type": "about:blank",
+                                                "title": "Payload Too Large",
+                                                "status": 413,
+                                                "detail": "request body exceeds the configured limit"
+                                            }),
+                                        ),
+                                        Err(_) => response_json(
+                                            StatusCode::BAD_REQUEST,
+                                            json!({
+                                                "type": "about:blank",
+                                                "title": "Bad Request",
+                                                "status": 400,
+                                                "detail": "request body was interrupted"
+                                            }),
+                                        ),
+                                    }
                                 };
                                 Ok::<_, Infallible>(response)
                             }
@@ -1316,6 +1390,7 @@ impl<S: Send + Sync + 'static> App<S> {
             segments,
             capture_names,
             materialize_params: H::NEEDS_PARAMS,
+            needs_body: H::NEEDS_BODY,
             handler: erased,
             operation: Operation {
                 tag: None,
@@ -1347,7 +1422,7 @@ impl<S: Send + Sync + 'static> App<S> {
             return response_json_bytes(StatusCode::OK, body);
         }
         if self.swagger_path.as_deref() == Some(path) && method == Method::GET {
-            return response_text(StatusCode::OK, Bytes::from_static(SWAGGER_HTML.as_bytes()));
+            return response_text(StatusCode::OK, swagger_html(self.openapi_path.as_deref()));
         }
         if method == Method::OPTIONS {
             let allow = self.allowed_methods(path);
@@ -1367,8 +1442,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 &method,
                 (self.routes[index].handler)(request, Params::default(), Arc::clone(&self.state))
                     .await,
-            )
-            .await;
+            );
         }
         if method == Method::HEAD
             && let Some(index) = self.static_route(&Method::GET, path)
@@ -1377,8 +1451,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 &method,
                 (self.routes[index].handler)(request, Params::default(), Arc::clone(&self.state))
                     .await,
-            )
-            .await;
+            );
         }
         for route in &self.routes {
             if route.method == method
@@ -1392,8 +1465,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 return maybe_head(
                     &method,
                     (route.handler)(request, params, Arc::clone(&self.state)).await,
-                )
-                .await;
+                );
             }
         }
         if method == Method::HEAD {
@@ -1409,8 +1481,7 @@ impl<S: Send + Sync + 'static> App<S> {
                     return maybe_head(
                         &method,
                         (route.handler)(request, params, Arc::clone(&self.state)).await,
-                    )
-                    .await;
+                    );
                 }
             }
         }
@@ -1434,6 +1505,37 @@ impl<S: Send + Sync + 'static> App<S> {
                     .find(|(route_method, _)| route_method == method)
             })
             .map(|(_, index)| *index)
+    }
+
+    fn needs_body(&self, method: &Method, path: &str) -> bool {
+        if *method == Method::OPTIONS {
+            return false;
+        }
+        if let Some(index) = self.static_route(method, path) {
+            return self.routes[index].needs_body;
+        }
+        if *method == Method::HEAD
+            && let Some(index) = self.static_route(&Method::GET, path)
+        {
+            return self.routes[index].needs_body;
+        }
+        for route in &self.routes {
+            if route.method == *method
+                && match_route(&route.segments, &route.capture_names, false, path).is_some()
+            {
+                return route.needs_body;
+            }
+        }
+        if *method == Method::HEAD {
+            for route in &self.routes {
+                if route.method == Method::GET
+                    && match_route(&route.segments, &route.capture_names, false, path).is_some()
+                {
+                    return route.needs_body;
+                }
+            }
+        }
+        false
     }
 
     fn allowed_methods(&self, path: &str) -> String {
@@ -1504,7 +1606,7 @@ fn parse_template(path: &str) -> Vec<Segment> {
 
 fn match_route(
     segments: &[Segment],
-    capture_names: &Arc<[String]>,
+    capture_names: &[String],
     materialize: bool,
     path: &str,
 ) -> Option<Params> {
@@ -1532,7 +1634,7 @@ fn match_route(
         return None;
     }
     Some(Params::from_match(
-        Arc::clone(capture_names),
+        capture_names,
         ranges,
         capture_index,
         path,
@@ -1644,20 +1746,19 @@ fn not_found() -> HttpResponse {
     response_text(StatusCode::NOT_FOUND, Bytes::from_static(b"Not Found"))
 }
 
-async fn maybe_head(method: &Method, response: HttpResponse) -> HttpResponse {
+fn maybe_head(method: &Method, response: HttpResponse) -> HttpResponse {
     if method != Method::HEAD {
         return response;
     }
     let (mut parts, body) = response.into_parts();
-    let body = body
-        .collect()
-        .await
-        .map(|body| body.to_bytes())
-        .unwrap_or_default();
-    parts.headers.insert(
-        header::CONTENT_LENGTH,
-        HeaderValue::from_str(&body.len().to_string()).unwrap(),
-    );
+    if !parts.headers.contains_key(header::CONTENT_LENGTH)
+        && let Some(length) = body.size_hint().exact()
+    {
+        parts.headers.insert(
+            header::CONTENT_LENGTH,
+            HeaderValue::from_str(&length.to_string()).unwrap(),
+        );
+    }
     Response::from_parts(parts, ResponseBody::full(Bytes::new()))
 }
 
@@ -1681,7 +1782,7 @@ fn parse_query<T: DeserializeOwned>(query: &str) -> Result<T, ApiError> {
 }
 
 fn percent_decode(value: &str) -> Result<String, ApiError> {
-    let mut output = String::with_capacity(value.len());
+    let mut output = Vec::with_capacity(value.len());
     let bytes = value.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
@@ -1693,14 +1794,15 @@ fn percent_decode(value: &str) -> Result<String, ApiError> {
                 .ok_or_else(|| ApiError::bad_request("invalid percent encoding"))?;
             let low = hex(bytes[index + 2])
                 .ok_or_else(|| ApiError::bad_request("invalid percent encoding"))?;
-            output.push((high * 16 + low) as char);
+            output.push(high * 16 + low);
             index += 3;
         } else {
-            output.push(bytes[index] as char);
+            output.push(bytes[index]);
             index += 1;
         }
     }
-    Ok(output)
+    String::from_utf8(output)
+        .map_err(|_| ApiError::bad_request("invalid UTF-8 in percent encoding"))
 }
 
 pub fn decode_query_component(value: &str) -> Result<Cow<'_, str>, ApiError> {
@@ -1739,7 +1841,13 @@ fn hex(value: u8) -> Option<u8> {
     }
 }
 
-const SWAGGER_HTML: &str = r##"<!doctype html><html><head><title>Swagger UI</title></head><body><div id="swagger-ui">Swagger UI</div><script>fetch('/openapi.json').then(r=>r.json()).then(d=>document.getElementById('swagger-ui').textContent=JSON.stringify(d))</script></body></html>"##;
+fn swagger_html(openapi_path: Option<&str>) -> Bytes {
+    let openapi_path = openapi_path.unwrap_or("/openapi.json");
+    let encoded_path = serde_json::to_string(openapi_path).unwrap();
+    Bytes::from(format!(
+        "<!doctype html><html><head><title>Swagger UI</title><link rel=\"stylesheet\" href=\"https://unpkg.com/swagger-ui-dist@5/swagger-ui.css\"></head><body><div id=\"swagger-ui\">Loading Swagger UI…</div><script src=\"https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js\"></script><script>window.onload=()=>window.ui=SwaggerUIBundle({{url:{encoded_path},dom_id:'#swagger-ui'}});</script></body></html>"
+    ))
+}
 
 #[cfg(test)]
 mod tests {

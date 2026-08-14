@@ -430,4 +430,37 @@ async fn main() {
             raw_route_bytes as f64 / iterations as f64,
         );
     }
+
+    let dynamic_iterations = std::env::var("OAS_DYNAMIC_ITERATIONS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1_000_u64);
+    for route_count in [1_usize, 10, 100, 1_000, 10_000] {
+        let mut dynamic_app = App::new();
+        for index in 0..route_count {
+            let path = format!("/dynamic/{index}/{{id}}");
+            dynamic_app.get(&path, typed_path);
+        }
+        for (position, target) in [
+            ("first", "/dynamic/0/42".to_owned()),
+            ("middle", format!("/dynamic/{}/42", route_count / 2)),
+            ("last", format!("/dynamic/{}/42", route_count - 1)),
+            ("miss", "/dynamic/missing/42".to_owned()),
+        ] {
+            let expected = if position == "miss" {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::OK
+            };
+            let start = Instant::now();
+            for _ in 0..dynamic_iterations {
+                let response = dynamic_app.oneshot(Method::GET, &target, &[], None).await;
+                assert_eq!(response.status(), expected);
+            }
+            println!(
+                "case=dynamic_route_scale route_count={route_count} position={position} iterations={dynamic_iterations} ns_per_op={:.2}",
+                start.elapsed().as_nanos() as f64 / dynamic_iterations as f64,
+            );
+        }
+    }
 }

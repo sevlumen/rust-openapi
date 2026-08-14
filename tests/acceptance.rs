@@ -2,8 +2,8 @@ use bytes::Bytes;
 use futures_core::Stream;
 use http::StatusCode;
 use oas_rs::{
-    ApiError, App, Header, HeaderSpec, Json, Method, NoContent, NotModified, OpenApiSchema,
-    Params, Path, Query, State, StreamResponse,
+    ApiError, App, Header, HeaderSpec, Json, Method, NoContent, NotModified, OpenApiSchema, Params,
+    Path, Query, State, StreamResponse,
 };
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::json;
@@ -105,7 +105,10 @@ async fn optional_strict_trace(value: Option<Header<StrictTraceId>>) -> &'static
     }
 }
 
-async fn cancellation_handler(State(counter): State<Arc<AtomicUsize>>) -> &'static str {
+async fn body_cancellation_handler(
+    Json(_payload): Json<Payload>,
+    State(counter): State<Arc<AtomicUsize>>,
+) -> &'static str {
     counter.fetch_add(1, Ordering::Relaxed);
     "called"
 }
@@ -145,7 +148,9 @@ impl Serialize for FailingSerialize {
     where
         S: Serializer,
     {
-        Err(serde::ser::Error::custom("intentional serialization failure"))
+        Err(serde::ser::Error::custom(
+            "intentional serialization failure",
+        ))
     }
 }
 
@@ -295,9 +300,14 @@ async fn http_semantics_and_typed_body_header_are_preserved() {
     assert_eq!(response.status(), StatusCode::OK);
     let response = app.oneshot(Method::GET, "/swagger", &[], None).await;
     assert_eq!(response.status(), StatusCode::OK);
+    let swagger = response.body_string().await;
+    assert!(swagger.contains("SwaggerUIBundle"));
+    assert!(swagger.contains("/openapi.json"));
     let response = app.oneshot(Method::GET, "/missing", &[], None).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let response = app.oneshot(Method::GET, "/failing-created", &[], None).await;
+    let response = app
+        .oneshot(Method::GET, "/failing-created", &[], None)
+        .await;
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let response = tokio::time::timeout(
         Duration::from_millis(100),
@@ -310,14 +320,12 @@ async fn http_semantics_and_typed_body_header_are_preserved() {
     assert_eq!(response.body_string().await, "");
 }
 
-#[tokio::test]
-async fn with_state_preserves_routes_registered_before_state() {
+#[test]
+#[should_panic(expected = "with_state must be configured before routes")]
+fn with_state_rejects_routes_registered_before_state() {
     let mut app = App::new();
     app.get("/hello", hello);
-    let app = app.with_state(TestState);
-    let response = app.oneshot(Method::GET, "/hello", &[], None).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.body_string().await, "OK");
+    let _ = app.with_state(TestState);
 }
 
 #[test]
@@ -337,6 +345,18 @@ fn openapi_describes_registered_operations() {
         document["paths"]["/plaintext"]["get"]["operationId"],
         "getPlaintext"
     );
+}
+
+#[tokio::test]
+async fn swagger_uses_configured_openapi_path() {
+    let mut app = App::new();
+    app.get("/plaintext", hello);
+    app.openapi("/spec.json").swagger("/swagger");
+    let response = app.oneshot(Method::GET, "/swagger", &[], None).await;
+    let body = response.body_string().await;
+    assert!(body.contains("SwaggerUIBundle"));
+    assert!(body.contains("/spec.json"));
+    assert!(!body.contains("fetch('/openapi.json')"));
 }
 
 #[tokio::test]
@@ -621,7 +641,7 @@ async fn tcp_server_supports_keep_alive_and_connection_close() {
 async fn interrupted_request_body_does_not_dispatch_handler() {
     let counter = Arc::new(AtomicUsize::new(0));
     let mut app = App::new().with_state(counter.clone());
-    app.post("/cancel", cancellation_handler);
+    app.post("/cancel", body_cancellation_handler);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -648,6 +668,7 @@ async fn interrupted_request_body_does_not_dispatch_handler() {
 async fn bodyless_route_does_not_wait_for_request_body() {
     let mut app = App::new();
     app.get("/plaintext", hello);
+    app.post("/echo", echo);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -667,6 +688,18 @@ async fn bodyless_route_does_not_wait_for_request_body() {
         .unwrap();
     let response = String::from_utf8_lossy(&buffer[..bytes]);
     assert!(response.starts_with("HTTP/1.1 200 OK"));
+
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(b"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1048577\r\n\r\n")
+        .await
+        .unwrap();
+    let bytes = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut buffer))
+        .await
+        .expect("oversized body was not rejected from Content-Length")
+        .unwrap();
+    let response = String::from_utf8_lossy(&buffer[..bytes]);
+    assert!(response.starts_with("HTTP/1.1 413 Payload Too Large"));
 
     let _ = shutdown_tx.send(());
     server.await.unwrap().unwrap();

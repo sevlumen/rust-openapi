@@ -76,6 +76,21 @@ function Stop-StatsCollector($job) {
     }
 }
 
+function Get-CgroupCpuUsageUsec([string]$service) {
+    $container = (docker compose -f $compose ps -q $service).Trim()
+    if (-not $container) { return $null }
+    $cpuStat = @(docker exec $container cat /sys/fs/cgroup/cpu.stat 2>$null)
+    foreach ($line in $cpuStat) {
+        if ($line -match '^usage_usec\s+(\d+)$') {
+            return [double]$matches[1]
+        }
+        if ($line -match '^\s*(\d+)\s*$') {
+            return [math]::Floor([double]$matches[1] / 1000)
+        }
+    }
+    return $null
+}
+
 function Get-NegativeTimingFields([string]$file) {
     if (-not (Test-Path $file)) { return @() }
     $summary = Get-Content -Raw -LiteralPath $file | ConvertFrom-Json
@@ -127,6 +142,7 @@ $stoppedEarly = $false
             if ($LASTEXITCODE -ne 0) { throw "Warmup failed for $implementation vu=$vu run=$run" }
             $statsFile = Join-Path $resultRoot "$case-$implementation-vu$vu-run$run.stats.csv"
             $statsJob = Start-StatsCollector $service $statsFile
+            $cpuStartUsec = Get-CgroupCpuUsageUsec $service
             try {
                 docker compose -f $compose run --rm --no-deps `
                     -e TARGET_URL="$targetUrl" `
@@ -140,11 +156,21 @@ $stoppedEarly = $false
             } finally {
                 Stop-StatsCollector $statsJob
             }
+            $cpuEndUsec = Get-CgroupCpuUsageUsec $service
             $sharedFile = Join-Path $PSScriptRoot "results\$case-$implementation-vu$vu-run$run.json"
             if (Test-Path $sharedFile) { Move-Item -Force $sharedFile $file }
             docker compose -f $compose down --remove-orphans | Out-Null
             if ($exitCode -ne 0) { throw "Benchmark failed for $implementation vu=$vu run=$run" }
-            $records.Add([pscustomobject]@{ case = $case; implementation = $implementation; vu = $vu; run = $run; file = $file; stats = $statsFile })
+            $records.Add([pscustomobject]@{
+                case = $case
+                implementation = $implementation
+                vu = $vu
+                run = $run
+                file = $file
+                stats = $statsFile
+                cpu_start_usec = $cpuStartUsec
+                cpu_end_usec = $cpuEndUsec
+            })
             $negativeTimingFields = Get-NegativeTimingFields $file
             if ($negativeTimingFields.Count -gt 0) {
                 $event = "$case $implementation VU ${vu} run ${run}: $($negativeTimingFields -join ', ')"
@@ -215,6 +241,13 @@ function Get-PeakMemoryMiB($records) {
 }
 
 function Get-CpuNanosecondsPerRequest($record, $metric) {
+    $requests = [double]$metric.metrics.measured_requests.count
+    if ($requests -le 0) { return $null }
+    if ($null -ne $record.cpu_start_usec -and $null -ne $record.cpu_end_usec) {
+        $deltaUsec = [double]$record.cpu_end_usec - [double]$record.cpu_start_usec
+        if ($deltaUsec -lt 0) { return $null }
+        return $deltaUsec * 1000 / $requests
+    }
     if (-not (Test-Path $record.stats)) { return $null }
     $values = @(Get-Content $record.stats | Select-Object -Skip 1 | ForEach-Object {
         $parts = $_ -split ',', 5
@@ -222,9 +255,26 @@ function Get-CpuNanosecondsPerRequest($record, $metric) {
             [double]$parts[4]
         }
     })
-    $requests = [double]$metric.metrics.measured_requests.count
-    if ($values.Count -lt 2 -or $requests -le 0) { return $null }
+    if ($values.Count -lt 2) { return $null }
     (($values | Measure-Object -Maximum).Maximum - ($values | Measure-Object -Minimum).Minimum) * 1000 / $requests
+}
+
+function Get-BootstrapMedianUpper95([double[]]$values) {
+    if ($values.Count -lt 2) { return $null }
+    $resamples = 10000
+    $random = [System.Random]::new(8675309)
+    $medians = [double[]]::new($resamples)
+    for ($sampleIndex = 0; $sampleIndex -lt $resamples; $sampleIndex++) {
+        $sample = [double[]]::new($values.Count)
+        for ($valueIndex = 0; $valueIndex -lt $values.Count; $valueIndex++) {
+            $sample[$valueIndex] = $values[$random.Next(0, $values.Count)]
+        }
+        $medians[$sampleIndex] = Get-Median $sample
+    }
+    $ordered = @($medians | Sort-Object)
+    $index = [math]::Ceiling(0.95 * ($ordered.Count + 1)) - 1
+    $index = [math]::Max(0, [math]::Min($ordered.Count - 1, $index))
+    return [double]$ordered[$index]
 }
 
 $reportRows = foreach ($case in $Cases) { foreach ($vu in $Vus) {
@@ -248,7 +298,7 @@ $reportRows = foreach ($case in $Cases) { foreach ($vu in $Vus) {
         $overheads += 1 - ([double]$oasMetrics[$index].metrics.measured_requests.rate / [double]$rawMetrics[$index].metrics.measured_requests.rate)
     }
     $medianOverhead = Get-Median $overheads
-    $ciUpper = $medianOverhead + (1.96 * (Get-StdDev $overheads) / [math]::Sqrt($overheads.Count))
+    $ciUpper = Get-BootstrapMedianUpper95 $overheads
     $rawRpsValues = @($rawMetrics | ForEach-Object { [double]$_.metrics.measured_requests.rate })
     $rawMean = ($rawRpsValues | Measure-Object -Average).Average
     $rawCv = if ($rawMean -eq 0) { [double]::PositiveInfinity } else { (Get-StdDev $rawRpsValues) / $rawMean }
@@ -281,7 +331,7 @@ $reportRows = foreach ($case in $Cases) { foreach ($vu in $Vus) {
     $oasMemory = Get-PeakMemoryMiB $oasStatsRecords
     $cpuDelta = if ($null -eq $rawCpuNs -or $rawCpuNs -eq 0 -or $null -eq $oasCpuNs) { $null } else { ($oasCpuNs / $rawCpuNs) - 1 }
     $latencyFail = (($oasP50 / $rawP50) - 1) -gt 0.01 -or (($oasP95 / $rawP95) - 1) -gt 0.01 -or (($oasP99 / $rawP99) - 1) -gt 0.01
-    $requiredEvidenceMissing = $null -eq $cpuDelta -or $null -eq $rawMemory -or $null -eq $oasMemory
+    $requiredEvidenceMissing = $null -eq $cpuDelta -or $null -eq $rawMemory -or $null -eq $oasMemory -or $null -eq $ciUpper
     $result = if ($errors -gt 0 -or $invalidTiming -or $invalidRequestCount -or $incompleteRuns -or $Runs -lt 7 -or $Iterations -lt 1000000 -or $rawCv -gt 0.005 -or $requiredEvidenceMissing) { "INCONCLUSIVE" } elseif ($medianOverhead -gt 0.01 -or $ciUpper -gt 0.01 -or $latencyFail -or $cpuDelta -gt 0.01) { "FAIL" } else { "PASS" }
     [pscustomobject]@{
         Case = $case
@@ -351,7 +401,8 @@ Status: $overall
 
 This run collected $($records.Count) raw/framework measurements. Results are
 classified only after the minimum run/request counts, raw-baseline CV, paired
-95% confidence bound, CPU samples, and RSS samples are available.
+95% bootstrap percentile bound for the paired median overhead, exact cgroup
+CPU before/after samples, and RSS samples are available.
 
 | Test | Raw RPS | OAS RPS | Overhead | p50 raw/oas (ms) | p95 raw/oas (ms) | p99 raw/oas (ms) | Raw CV | CPU ns/request raw/oas | CPU Δ | RSS peak raw/oas (MiB) | Result |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
@@ -361,7 +412,15 @@ $timingNote
 $eventNote
 $completionNote
 
-The statistical gate uses median paired throughput overhead, upper normal-approximation 95% CI, p50/p95/p99 latency deltas, raw baseline CV, zero measured errors, exact measured request counts, cgroup CPU usage nanoseconds/request, memory samples, and the requested run/request minimums. Any negative timing sample or incomplete request count invalidates the row. p999 is retained in the JSON artifacts for warning analysis. Allocation metrics are reported by the in-process router benchmark.
+The statistical gate uses median paired throughput overhead, the upper 95%
+percentile bootstrap CI from 10,000 resamples (seed 8675309), p50/p95/p99
+latency deltas, raw baseline CV, zero measured errors, exact measured request
+counts, cgroup CPU usage nanoseconds/request, memory samples, and the requested
+run/request minimums. Any negative timing sample or incomplete request count
+invalidates the row. p999 is retained in the JSON artifacts for warning analysis.
+Authoritative CPU/request values use cgroup `usage_usec` captured immediately
+before and after each measured k6 run; docker stats remains charting evidence.
+Allocation metrics are reported by the in-process router benchmark.
 
 Raw result files and the exact environment must be retained beside this file.
 "@ | Set-Content -Path (Join-Path $resultRoot "REPORT.md")
