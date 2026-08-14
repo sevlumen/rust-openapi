@@ -2125,6 +2125,23 @@ mod tests {
         assert_eq!(app.openapi_bytes.as_ref(), Some(&prepared));
     }
 
+    #[tokio::test]
+    async fn zero_argument_routes_use_the_fast_dispatch_shape() {
+        let mut app = App::new();
+        app.get("/zero", || async { "OK" });
+
+        let resolved = match app.resolve_route(&Method::GET, "/zero") {
+            RouteResolution::Matched(resolved) => resolved,
+            _ => panic!("zero route did not resolve"),
+        };
+        assert!(app.routes[resolved.index].zero_handler.is_some());
+        assert!(resolved.params.is_none());
+
+        let response = app.oneshot(Method::GET, "/zero", &[], None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body_string().await, "OK");
+    }
+
     #[test]
     fn dynamic_routes_use_a_compiled_method_trie() {
         let mut app = App::new();
