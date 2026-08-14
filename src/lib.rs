@@ -8,7 +8,7 @@ use bytes::Bytes;
 use futures_core::Stream;
 use http::{HeaderValue, Request, Response, StatusCode, header};
 use http_body::{Body, Frame, SizeHint};
-use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
+use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper::body::Incoming;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
@@ -16,7 +16,7 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     convert::Infallible,
-    future::Future,
+    future::{self, Future},
     marker::PhantomPinned,
     mem::{MaybeUninit, align_of, size_of},
     pin::Pin,
@@ -37,13 +37,13 @@ pub type HttpResponse = Response<ResponseBody>;
 pub const DEFAULT_MAX_BODY_SIZE: usize = 1024 * 1024;
 
 pub enum ResponseBody {
-    Full(Full<Bytes>),
+    Full(Option<Bytes>),
     Stream(Pin<Box<dyn Stream<Item = Bytes> + Send + 'static>>),
 }
 
 impl ResponseBody {
     fn full(bytes: Bytes) -> Self {
-        Self::Full(Full::new(bytes))
+        Self::Full(Some(bytes))
     }
 
     fn stream<S>(stream: S) -> Self
@@ -62,36 +62,39 @@ impl Body for ResponseBody {
         self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        unsafe {
-            match self.get_unchecked_mut() {
-                Self::Full(body) => Pin::new_unchecked(body).poll_frame(context),
-                Self::Stream(stream) => match stream.as_mut().poll_next(context) {
-                    Poll::Ready(Some(bytes)) => Poll::Ready(Some(Ok(Frame::data(bytes)))),
-                    Poll::Ready(None) => Poll::Ready(None),
-                    Poll::Pending => Poll::Pending,
-                },
-            }
+        match self.get_mut() {
+            Self::Full(body) => Poll::Ready(body.take().map(|bytes| Ok(Frame::data(bytes)))),
+            Self::Stream(stream) => match stream.as_mut().poll_next(context) {
+                Poll::Ready(Some(bytes)) => Poll::Ready(Some(Ok(Frame::data(bytes)))),
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
+            },
         }
     }
 
     fn is_end_stream(&self) -> bool {
         match self {
-            Self::Full(body) => body.is_end_stream(),
+            Self::Full(body) => body.is_none(),
             Self::Stream(_) => false,
         }
     }
 
     fn size_hint(&self) -> SizeHint {
         match self {
-            Self::Full(body) => body.size_hint(),
+            Self::Full(body) => {
+                let mut hint = SizeHint::new();
+                let length = body.as_ref().map_or(0, Bytes::len);
+                hint.set_exact(length as u64);
+                hint
+            }
             Self::Stream(_) => SizeHint::default(),
         }
     }
 }
 
-const INLINE_FUTURE_SIZE: usize = 128;
+const INLINE_FUTURE_SIZE: usize = 64;
 
-#[repr(align(64))]
+#[repr(align(16))]
 struct FutureStorage([MaybeUninit<u8>; INLINE_FUTURE_SIZE]);
 
 struct InlineFuture {
@@ -102,9 +105,10 @@ struct InlineFuture {
 }
 
 impl InlineFuture {
-    fn new<F>(future: F) -> Self
+    fn new<F, R>(future: F) -> Self
     where
-        F: Future<Output = HttpResponse> + Send + 'static,
+        F: Future<Output = R> + Send + 'static,
+        R: IntoResponse,
     {
         debug_assert!(size_of::<F>() <= INLINE_FUTURE_SIZE);
         debug_assert!(align_of::<F>() <= align_of::<FutureStorage>());
@@ -114,7 +118,7 @@ impl InlineFuture {
         }
         Self {
             storage,
-            poll_fn: poll_inline::<F>,
+            poll_fn: poll_response::<F, R>,
             drop_fn: drop_inline::<F>,
             _pin: PhantomPinned,
         }
@@ -127,16 +131,20 @@ impl Drop for InlineFuture {
     }
 }
 
-unsafe fn poll_inline<F>(storage: *mut u8, context: &mut Context<'_>) -> Poll<HttpResponse>
+unsafe fn poll_response<F, R>(storage: *mut u8, context: &mut Context<'_>) -> Poll<HttpResponse>
 where
-    F: Future<Output = HttpResponse> + Send + 'static,
+    F: Future<Output = R> + Send + 'static,
+    R: IntoResponse,
 {
-    unsafe { Pin::new_unchecked(&mut *(storage as *mut F)).poll(context) }
+    match unsafe { Pin::new_unchecked(&mut *(storage as *mut F)).poll(context) } {
+        Poll::Ready(value) => Poll::Ready(value.into_response()),
+        Poll::Pending => Poll::Pending,
+    }
 }
 
 unsafe fn drop_inline<F>(storage: *mut u8)
 where
-    F: Future<Output = HttpResponse> + Send + 'static,
+    F: Send + 'static,
 {
     unsafe { std::ptr::drop_in_place(storage as *mut F) };
 }
@@ -149,14 +157,17 @@ enum HandlerFutureKind {
 }
 
 impl HandlerFuture {
-    fn from_future<F>(future: F) -> Self
+    fn from_response_future<F, R>(future: F) -> Self
     where
-        F: Future<Output = HttpResponse> + Send + 'static,
+        F: Future<Output = R> + Send + 'static,
+        R: IntoResponse,
     {
         if size_of::<F>() <= INLINE_FUTURE_SIZE && align_of::<F>() <= align_of::<FutureStorage>() {
-            Self(HandlerFutureKind::Inline(InlineFuture::new(future)))
+            Self(HandlerFutureKind::Inline(InlineFuture::new::<F, R>(future)))
         } else {
-            Self(HandlerFutureKind::Boxed(Box::pin(future)))
+            Self(HandlerFutureKind::Boxed(Box::pin(async move {
+                future.await.into_response()
+            })))
         }
     }
 }
@@ -234,11 +245,6 @@ impl Default for Params {
         }
     }
 }
-
-const EMPTY_PARAMS: Params = Params {
-    ranges: [None; MAX_CAPTURE_PARAMS],
-    owned: None,
-};
 
 impl<S: Send + Sync + 'static> FromRequest<S> for Params {
     const NEEDS_PARAMS: bool = true;
@@ -564,27 +570,22 @@ impl<T: Serialize + OpenApiSchema + Send + 'static> ResponseMetadata for Json<T>
 #[derive(Clone, Debug)]
 pub struct JsonBytes {
     pub bytes: Bytes,
-    content_length: HeaderValue,
 }
 
 impl JsonBytes {
     pub fn new(bytes: Bytes) -> Self {
-        let content_length = HeaderValue::from_str(&bytes.len().to_string()).unwrap();
-        Self {
-            bytes,
-            content_length,
-        }
+        Self { bytes }
     }
 }
 
 impl IntoResponse for JsonBytes {
     fn into_response(self) -> HttpResponse {
-        response_json_bytes_with_length(StatusCode::OK, self.bytes, self.content_length)
+        response_json_bytes(StatusCode::OK, self.bytes)
     }
 }
 
 /// A response whose chunks are produced lazily by a `Stream`. Streaming is
-/// opt-in; ordinary `Full<Bytes>` responses retain their fixed-size body path.
+/// opt-in; ordinary `Bytes` responses retain their fixed-size body path.
 pub struct StreamResponse<S>(pub S);
 
 impl<S> IntoResponse for StreamResponse<S>
@@ -720,7 +721,7 @@ where
 
     fn call(&self, request: Request<Incoming>) -> HandlerFuture {
         let future = (self)(request);
-        HandlerFuture::from_future(async move { future.await.into_response() })
+        HandlerFuture::from_response_future(future)
     }
 }
 
@@ -837,7 +838,12 @@ where
         if body.is_empty() && content_type.is_empty() {
             return Err(ApiError::missing("missing JSON body"));
         }
-        if !content_type.starts_with("application/json") {
+        let media_type = content_type
+            .split(';')
+            .next()
+            .map(str::trim)
+            .unwrap_or_default();
+        if !media_type.eq_ignore_ascii_case("application/json") {
             return Err(ApiError::new(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "Unsupported Media Type",
@@ -937,14 +943,14 @@ where
         _state: &Arc<S>,
     ) -> HandlerFuture {
         let future = (self)();
-        HandlerFuture::from_future(async move { future.await.into_response() })
+        HandlerFuture::from_response_future(future)
     }
 
     fn zero_handler(&self) -> Option<ErasedZeroHandler> {
         let handler = self.clone();
         Some(Box::new(move || {
             let future = (handler)();
-            HandlerFuture::from_future(async move { future.await.into_response() })
+            HandlerFuture::from_response_future(future)
         }))
     }
 }
@@ -969,9 +975,9 @@ where
         match E1::from_request(request, params, state) {
             Ok(value) => {
                 let future = (self)(value);
-                HandlerFuture::from_future(async move { future.await.into_response() })
+                HandlerFuture::from_response_future(future)
             }
-            Err(error) => HandlerFuture::from_future(async move { error.into_response() }),
+            Err(error) => HandlerFuture::from_response_future(future::ready(error)),
         }
     }
 }
@@ -1001,10 +1007,10 @@ where
         match (first, second) {
             (Ok(first), Ok(second)) => {
                 let future = (self)(first, second);
-                HandlerFuture::from_future(async move { future.await.into_response() })
+                HandlerFuture::from_response_future(future)
             }
             (Err(error), _) | (_, Err(error)) => {
-                HandlerFuture::from_future(async move { error.into_response() })
+                HandlerFuture::from_response_future(future::ready(error))
             }
         }
     }
@@ -1015,16 +1021,36 @@ type ErasedHandler<S> =
     Box<dyn Fn(&mut Request<Bytes>, &Params, &Arc<S>) -> HandlerFuture + Send + Sync>;
 type ErasedRawHandler = Box<dyn Fn(Request<Incoming>) -> HandlerFuture + Send + Sync>;
 
+enum HandlerKind<S> {
+    Zero(ErasedZeroHandler),
+    Typed(ErasedHandler<S>),
+    Raw(ErasedRawHandler),
+    Builtin(BuiltinHandler),
+}
+
+#[derive(Clone, Copy)]
+enum BuiltinHandler {
+    OpenApi,
+    Swagger,
+}
+
 struct Route<S> {
-    method: Method,
-    template: String,
-    segments: Vec<Segment>,
+    plan: RoutePlan<S>,
+    metadata: RouteMetadata,
+}
+
+struct RoutePlan<S> {
     capture_names: Arc<[String]>,
     materialize_params: bool,
     needs_body: bool,
-    handler: Option<ErasedHandler<S>>,
-    zero_handler: Option<ErasedZeroHandler>,
-    raw_handler: Option<ErasedRawHandler>,
+    handler: HandlerKind<S>,
+}
+
+struct RouteMetadata {
+    builtin: bool,
+    method: Method,
+    template: String,
+    segments: Vec<Segment>,
     operation: Operation,
 }
 
@@ -1045,39 +1071,75 @@ struct DynamicRouteNode {
     routes: Option<RouteSet>,
 }
 
-#[derive(Default)]
 struct RouteSet {
-    routes: Vec<(Method, usize)>,
+    routes: [usize; 7],
     allowed_methods: String,
+}
+
+impl Default for RouteSet {
+    fn default() -> Self {
+        Self {
+            routes: [usize::MAX; 7],
+            allowed_methods: String::new(),
+        }
+    }
 }
 
 impl RouteSet {
     fn insert(&mut self, method: Method, route: usize) {
-        assert!(
-            self.routes
-                .iter()
-                .all(|(registered_method, _)| registered_method != method),
+        let slot = method_slot(&method).expect("unsupported route method");
+        assert_eq!(
+            self.routes[slot],
+            usize::MAX,
             "duplicate route pattern and method"
         );
-        self.routes.push((method, route));
-        let mut methods: Vec<_> = self
-            .routes
+        self.routes[slot] = route;
+        self.allowed_methods = METHOD_NAMES
             .iter()
-            .map(|(method, _)| method.as_str())
-            .collect();
-        methods.sort_unstable();
-        self.allowed_methods = methods.join(", ");
+            .enumerate()
+            .filter_map(|(index, name)| (self.routes[index] != usize::MAX).then_some(*name))
+            .collect::<Vec<_>>()
+            .join(", ");
     }
 
     fn route(&self, method: &Method) -> Option<usize> {
-        self.routes
-            .iter()
-            .find(|(registered_method, _)| registered_method == method)
-            .map(|(_, route)| *route)
+        method_slot(method)
+            .and_then(|slot| (self.routes[slot] != usize::MAX).then_some(self.routes[slot]))
     }
 
     fn allowed_methods(&self) -> &str {
         &self.allowed_methods
+    }
+
+    fn remove(&mut self, method: &Method) {
+        if let Some(slot) = method_slot(method) {
+            self.routes[slot] = usize::MAX;
+            self.allowed_methods = METHOD_NAMES
+                .iter()
+                .enumerate()
+                .filter_map(|(index, name)| (self.routes[index] != usize::MAX).then_some(*name))
+                .collect::<Vec<_>>()
+                .join(", ");
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.routes.iter().all(|route| *route == usize::MAX)
+    }
+}
+
+const METHOD_NAMES: [&str; 7] = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"];
+
+fn method_slot(method: &Method) -> Option<usize> {
+    match method.as_str() {
+        "DELETE" => Some(0),
+        "GET" => Some(1),
+        "HEAD" => Some(2),
+        "OPTIONS" => Some(3),
+        "PATCH" => Some(4),
+        "POST" => Some(5),
+        "PUT" => Some(6),
+        _ => None,
     }
 }
 
@@ -1087,9 +1149,47 @@ struct DynamicPathMatch<'a> {
     count: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct CaptureSet {
+    packed: [u64; MAX_CAPTURE_PARAMS],
+    count: u8,
+}
+
+impl CaptureSet {
+    fn from_ranges(ranges: [Option<CaptureRange>; MAX_CAPTURE_PARAMS], count: usize) -> Self {
+        let mut packed = [0; MAX_CAPTURE_PARAMS];
+        for (index, range) in ranges.into_iter().take(count).enumerate() {
+            let range = range.expect("capture range exists");
+            debug_assert!(range.start <= u32::MAX as usize);
+            debug_assert!(range.end <= u32::MAX as usize);
+            packed[index] = ((range.start as u32 as u64) << 32) | range.end as u32 as u64;
+        }
+        Self {
+            packed,
+            count: count as u8,
+        }
+    }
+
+    fn ranges(self) -> [Option<CaptureRange>; MAX_CAPTURE_PARAMS] {
+        let mut ranges = [None; MAX_CAPTURE_PARAMS];
+        for (index, packed) in self
+            .packed
+            .into_iter()
+            .take(self.count as usize)
+            .enumerate()
+        {
+            ranges[index] = Some(CaptureRange {
+                start: (packed >> 32) as usize,
+                end: packed as u32 as usize,
+            });
+        }
+        ranges
+    }
+}
+
 struct ResolvedRoute {
     index: usize,
-    params: Option<Params>,
+    captures: CaptureSet,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -1221,6 +1321,8 @@ pub struct App<S = ()> {
     openapi_path: Option<String>,
     openapi_bytes: Option<Bytes>,
     swagger_path: Option<String>,
+    openapi_route: Option<usize>,
+    swagger_route: Option<usize>,
     title: String,
     version: String,
 }
@@ -1236,6 +1338,8 @@ impl App<()> {
             openapi_path: None,
             openapi_bytes: None,
             swagger_path: None,
+            openapi_route: None,
+            swagger_route: None,
             title: "oas-rs API".to_owned(),
             version: "0.1.0".to_owned(),
         }
@@ -1255,6 +1359,8 @@ impl App<()> {
             openapi_path: self.openapi_path,
             openapi_bytes: self.openapi_bytes,
             swagger_path: self.swagger_path,
+            openapi_route: self.openapi_route,
+            swagger_route: self.swagger_route,
             title: self.title,
             version: self.version,
         }
@@ -1349,7 +1455,7 @@ impl<S: Send + Sync + 'static> App<S> {
 
     pub fn tag(&mut self, tag: impl Into<String>) -> &mut Self {
         if let Some(index) = self.last_route {
-            self.routes[index].operation.tag = Some(tag.into());
+            self.routes[index].metadata.operation.tag = Some(tag.into());
             self.openapi_bytes = None;
         }
         self
@@ -1357,7 +1463,7 @@ impl<S: Send + Sync + 'static> App<S> {
 
     pub fn summary(&mut self, summary: impl Into<String>) -> &mut Self {
         if let Some(index) = self.last_route {
-            self.routes[index].operation.summary = Some(summary.into());
+            self.routes[index].metadata.operation.summary = Some(summary.into());
             self.openapi_bytes = None;
         }
         self
@@ -1367,51 +1473,60 @@ impl<S: Send + Sync + 'static> App<S> {
         let operation_id = operation_id.into();
         assert!(
             self.routes.iter().all(|route| {
-                route.operation.operation_id.as_deref() != Some(operation_id.as_str())
+                route.metadata.operation.operation_id.as_deref() != Some(operation_id.as_str())
             }),
             "duplicate operation id"
         );
         if let Some(index) = self.last_route {
-            self.routes[index].operation.operation_id = Some(operation_id);
+            self.routes[index].metadata.operation.operation_id = Some(operation_id);
             self.openapi_bytes = None;
         }
         self
     }
 
     pub fn openapi(&mut self, path: &str) -> &mut Self {
-        self.openapi_path = Some(normalize_path(path));
+        let path = normalize_path(path);
+        self.openapi_path = Some(path.clone());
+        self.install_builtin_route(path, BuiltinHandler::OpenApi, true);
         self.openapi_bytes = None;
         self
     }
 
     pub fn swagger(&mut self, path: &str) -> &mut Self {
-        self.swagger_path = Some(normalize_path(path));
+        let path = normalize_path(path);
+        self.swagger_path = Some(path.clone());
+        self.install_builtin_route(path, BuiltinHandler::Swagger, false);
         self
     }
 
     pub fn openapi_document(&self) -> Value {
         let mut paths = Map::new();
         for route in &self.routes {
-            let method = route.method.as_str().to_ascii_lowercase();
+            if route.metadata.builtin {
+                continue;
+            }
+            let method = route.metadata.method.as_str().to_ascii_lowercase();
             let mut operation = Map::new();
-            if let Some(tag) = &route.operation.tag {
+            if let Some(tag) = &route.metadata.operation.tag {
                 operation.insert("tags".to_owned(), json!([tag]));
             }
-            if let Some(summary) = &route.operation.summary {
+            if let Some(summary) = &route.metadata.operation.summary {
                 operation.insert("summary".to_owned(), json!(summary));
             }
-            if let Some(operation_id) = &route.operation.operation_id {
+            if let Some(operation_id) = &route.metadata.operation.operation_id {
                 operation.insert("operationId".to_owned(), json!(operation_id));
             }
-            let mut parameters = route.operation.request.parameters.clone();
+            let mut parameters = route.metadata.operation.request.parameters.clone();
             let mut path_schema_index = 0;
             parameters.extend(
                 route
+                    .metadata
                     .segments
                     .iter()
                     .filter_map(|segment| match segment {
                         Segment::Capture(name) => {
                             let schema = route
+                                .metadata
                                 .operation
                                 .request
                                 .path_schemas
@@ -1433,15 +1548,20 @@ impl<S: Send + Sync + 'static> App<S> {
             if !parameters.is_empty() {
                 operation.insert("parameters".to_owned(), Value::Array(parameters));
             }
-            if let Some(request_body) = &route.operation.request.request_body {
+            if let Some(request_body) = &route.metadata.operation.request.request_body {
                 operation.insert("requestBody".to_owned(), request_body.clone());
             }
-            let status = route.operation.response_status.as_u16().to_string();
+            let status = route
+                .metadata
+                .operation
+                .response_status
+                .as_u16()
+                .to_string();
             let mut response = Map::new();
             response.insert(
                 "description".to_owned(),
                 Value::String(
-                    match route.operation.response_status {
+                    match route.metadata.operation.response_status {
                         StatusCode::NO_CONTENT => "No Content",
                         StatusCode::NOT_MODIFIED => "Not Modified",
                         StatusCode::CREATED => "Created",
@@ -1450,7 +1570,7 @@ impl<S: Send + Sync + 'static> App<S> {
                     .to_owned(),
                 ),
             );
-            if let Some(schema) = &route.operation.response_schema {
+            if let Some(schema) = &route.metadata.operation.response_schema {
                 response.insert(
                     "content".to_owned(),
                     json!({ "application/json": { "schema": schema } }),
@@ -1458,10 +1578,10 @@ impl<S: Send + Sync + 'static> App<S> {
             }
             operation.insert("responses".to_owned(), json!({ status: response }));
             paths
-                .entry(route.template.clone())
+                .entry(route.metadata.template.clone())
                 .or_insert_with(|| Value::Object(Map::new()));
             paths
-                .get_mut(&route.template)
+                .get_mut(&route.metadata.template)
                 .and_then(Value::as_object_mut)
                 .unwrap()
                 .insert(method, Value::Object(operation));
@@ -1528,17 +1648,15 @@ impl<S: Send + Sync + 'static> App<S> {
                             let app = Arc::clone(&app);
                             async move {
                                 let path = normalize_request_path(request.uri().path());
-                                let response = if let Some(response) =
-                                    app.special_response(request.method(), path)
-                                {
-                                    response
-                                } else {
-                                    match app.resolve_route(request.method(), path) {
+                                let response = match app.resolve_route(request.method(), path) {
                                         RouteResolution::Matched(resolved) => {
                                             let route = &app.routes[resolved.index];
-                                            let is_raw = route.raw_handler.is_some();
-                                            let is_zero = route.zero_handler.is_some();
-                                            let needs_body = route.needs_body;
+                                            let is_raw = matches!(route.plan.handler, HandlerKind::Raw(_));
+                                            let is_zero = matches!(
+                                                route.plan.handler,
+                                                HandlerKind::Zero(_) | HandlerKind::Builtin(_)
+                                            );
+                                            let needs_body = route.plan.needs_body;
                                             if is_raw {
                                                 app.handle_incoming(request, resolved).await
                                             } else if is_zero && !needs_body {
@@ -1612,7 +1730,6 @@ impl<S: Send + Sync + 'static> App<S> {
                                             method_not_allowed_response(allow)
                                         }
                                         RouteResolution::NotFound => not_found(),
-                                    }
                                 };
                                 Ok::<_, Infallible>(response)
                             }
@@ -1635,7 +1752,7 @@ impl<S: Send + Sync + 'static> App<S> {
         assert!(
             self.routes
                 .iter()
-                .all(|route| route.method != method || route.template != template),
+                .all(|route| route.metadata.method != method || route.metadata.template != template),
             "duplicate route"
         );
         let segments = parse_template(&template);
@@ -1647,9 +1764,12 @@ impl<S: Send + Sync + 'static> App<S> {
             })
             .collect::<Vec<_>>()
             .into();
-        let zero_handler = handler.zero_handler();
-        let erased: ErasedHandler<S> =
-            Box::new(move |request, params, state| handler.call(request, params, state));
+        let handler = match handler.zero_handler() {
+            Some(zero_handler) => HandlerKind::Zero(zero_handler),
+            None => HandlerKind::Typed(Box::new(move |request, params, state| {
+                handler.call(request, params, state)
+            })),
+        };
         let index = self.routes.len();
         if segments
             .iter()
@@ -1663,22 +1783,25 @@ impl<S: Send + Sync + 'static> App<S> {
             self.dynamic_routes.insert(&segments, method.clone(), index);
         }
         self.routes.push(Route {
-            method,
-            template,
-            segments,
-            capture_names,
-            materialize_params: H::NEEDS_PARAMS,
-            needs_body: H::NEEDS_BODY,
-            handler: Some(erased),
-            zero_handler,
-            raw_handler: None,
-            operation: Operation {
-                tag: None,
-                summary: None,
-                operation_id: None,
-                response_status: <H::Response as ResponseMetadata>::status_code(),
-                response_schema: <H::Response as ResponseMetadata>::response_schema(),
-                request: H::openapi_request(),
+            plan: RoutePlan {
+                capture_names,
+                materialize_params: H::NEEDS_PARAMS,
+                needs_body: H::NEEDS_BODY,
+                handler,
+            },
+            metadata: RouteMetadata {
+                builtin: false,
+                method,
+                template,
+                segments,
+                operation: Operation {
+                    tag: None,
+                    summary: None,
+                    operation_id: None,
+                    response_status: <H::Response as ResponseMetadata>::status_code(),
+                    response_schema: <H::Response as ResponseMetadata>::response_schema(),
+                    request: H::openapi_request(),
+                },
             },
         });
         self.openapi_bytes = None;
@@ -1693,7 +1816,7 @@ impl<S: Send + Sync + 'static> App<S> {
         assert!(
             self.routes
                 .iter()
-                .all(|route| route.method != method || route.template != template),
+                .all(|route| route.metadata.method != method || route.metadata.template != template),
             "duplicate route"
         );
         let segments = parse_template(&template);
@@ -1705,7 +1828,7 @@ impl<S: Send + Sync + 'static> App<S> {
             })
             .collect::<Vec<_>>()
             .into();
-        let erased: ErasedRawHandler = Box::new(move |request| handler.call(request));
+        let handler = HandlerKind::Raw(Box::new(move |request| handler.call(request)));
         let index = self.routes.len();
         if segments
             .iter()
@@ -1719,26 +1842,93 @@ impl<S: Send + Sync + 'static> App<S> {
             self.dynamic_routes.insert(&segments, method.clone(), index);
         }
         self.routes.push(Route {
-            method,
-            template,
-            segments,
-            capture_names,
-            materialize_params: false,
-            needs_body: false,
-            handler: None,
-            zero_handler: None,
-            raw_handler: Some(erased),
-            operation: Operation {
-                tag: None,
-                summary: None,
-                operation_id: None,
-                response_status: <H::Response as ResponseMetadata>::status_code(),
-                response_schema: <H::Response as ResponseMetadata>::response_schema(),
-                request: OpenApiRequest::default(),
+            plan: RoutePlan {
+                capture_names,
+                materialize_params: false,
+                needs_body: false,
+                handler,
+            },
+            metadata: RouteMetadata {
+                builtin: false,
+                method,
+                template,
+                segments,
+                operation: Operation {
+                    tag: None,
+                    summary: None,
+                    operation_id: None,
+                    response_status: <H::Response as ResponseMetadata>::status_code(),
+                    response_schema: <H::Response as ResponseMetadata>::response_schema(),
+                    request: OpenApiRequest::default(),
+                },
             },
         });
         self.openapi_bytes = None;
         self.last_route = Some(index);
+    }
+
+    fn install_builtin_route(&mut self, path: String, builtin: BuiltinHandler, is_openapi: bool) {
+        let existing = if is_openapi {
+            self.openapi_route
+        } else {
+            self.swagger_route
+        };
+        if let Some(index) = existing {
+            let old_path = self.routes[index].metadata.template.clone();
+            if old_path != path {
+                if let Some(routes) = self.static_routes.get_mut(&old_path) {
+                    routes.remove(&Method::GET);
+                }
+                if self
+                    .static_routes
+                    .get(&old_path)
+                    .is_some_and(RouteSet::is_empty)
+                {
+                    self.static_routes.remove(&old_path);
+                }
+                self.routes[index].metadata.template = path.clone();
+                self.routes[index].metadata.segments = parse_template(&path);
+                self.static_routes
+                    .entry(path)
+                    .or_default()
+                    .insert(Method::GET, index);
+            }
+            self.routes[index].plan.handler = HandlerKind::Builtin(builtin);
+            return;
+        }
+
+        let index = self.routes.len();
+        self.static_routes
+            .entry(path.clone())
+            .or_default()
+            .insert(Method::GET, index);
+        self.routes.push(Route {
+            plan: RoutePlan {
+                capture_names: Vec::new().into(),
+                materialize_params: false,
+                needs_body: false,
+                handler: HandlerKind::Builtin(builtin),
+            },
+            metadata: RouteMetadata {
+                builtin: true,
+                method: Method::GET,
+                template: path,
+                segments: Vec::new(),
+                operation: Operation {
+                    tag: None,
+                    summary: None,
+                    operation_id: None,
+                    response_status: StatusCode::OK,
+                    response_schema: None,
+                    request: OpenApiRequest::default(),
+                },
+            },
+        });
+        if is_openapi {
+            self.openapi_route = Some(index);
+        } else {
+            self.swagger_route = Some(index);
+        }
     }
 
     fn prepare_openapi(&mut self) {
@@ -1750,9 +1940,6 @@ impl<S: Send + Sync + 'static> App<S> {
     async fn handle(&self, request: Request<Bytes>) -> HttpResponse {
         let method = request.method().clone();
         let path = normalize_request_path(request.uri().path());
-        if let Some(response) = self.special_response(&method, path) {
-            return response;
-        }
         match self.resolve_route(&method, path) {
             RouteResolution::Matched(resolved) => self.handle_typed(request, resolved).await,
             RouteResolution::Options(allow) => options_response(allow),
@@ -1761,26 +1948,9 @@ impl<S: Send + Sync + 'static> App<S> {
         }
     }
 
-    fn special_response(&self, method: &Method, path: &str) -> Option<HttpResponse> {
-        if self.openapi_path.as_deref() == Some(path) && method == Method::GET {
-            let body = self
-                .openapi_bytes
-                .clone()
-                .unwrap_or_else(|| Bytes::from(self.openapi_document().to_string()));
-            return Some(response_json_bytes(StatusCode::OK, body));
-        }
-        if self.swagger_path.as_deref() == Some(path) && method == Method::GET {
-            return Some(response_text(
-                StatusCode::OK,
-                swagger_html(self.openapi_path.as_deref()),
-            ));
-        }
-        None
-    }
-
     fn resolve_route(&self, method: &Method, path: &str) -> RouteResolution<'_> {
         if let Some(routes) = self.static_routes.get(path) {
-            return self.resolve_route_set(method, routes, None, path);
+            return self.resolve_route_set(method, routes, None);
         }
         let Some(path_match) = self.dynamic_routes.find(path) else {
             return RouteResolution::NotFound;
@@ -1789,7 +1959,6 @@ impl<S: Send + Sync + 'static> App<S> {
             method,
             path_match.routes,
             Some((path_match.ranges, path_match.count)),
-            path,
         )
     }
 
@@ -1798,53 +1967,47 @@ impl<S: Send + Sync + 'static> App<S> {
         method: &Method,
         routes: &'a RouteSet,
         captures: Option<([Option<CaptureRange>; MAX_CAPTURE_PARAMS], usize)>,
-        path: &str,
     ) -> RouteResolution<'a> {
-        if *method == Method::OPTIONS {
-            return RouteResolution::Options(routes.allowed_methods());
-        }
         let index = routes.route(method).or_else(|| {
             (method == Method::HEAD)
                 .then(|| routes.route(&Method::GET))
                 .flatten()
         });
+        if index.is_none() && *method == Method::OPTIONS {
+            return RouteResolution::Options(routes.allowed_methods());
+        }
         let Some(index) = index else {
             return RouteResolution::MethodNotAllowed(routes.allowed_methods());
         };
-        let route = &self.routes[index];
-        let params = if route.zero_handler.is_some() {
-            None
-        } else {
-            Some(match captures {
-                Some((ranges, count)) => Params::from_match(
-                    &route.capture_names,
-                    ranges,
-                    count,
-                    path,
-                    route.materialize_params,
-                ),
-                None => Params::default(),
-            })
-        };
-        RouteResolution::Matched(ResolvedRoute { index, params })
+        let captures = captures.map_or_else(CaptureSet::default, |(ranges, count)| {
+            CaptureSet::from_ranges(ranges, count)
+        });
+        RouteResolution::Matched(ResolvedRoute { index, captures })
     }
 
     async fn handle_typed(&self, request: Request<Bytes>, resolved: ResolvedRoute) -> HttpResponse {
         let method = request.method().clone();
         let route = &self.routes[resolved.index];
-        if let Some(handler) = route.zero_handler.as_ref() {
+        if let HandlerKind::Zero(handler) = &route.plan.handler {
             return maybe_head(&method, handler().await);
         }
         let mut request = request;
-        let params = resolved.params.as_ref().unwrap_or(&EMPTY_PARAMS);
+        let path = normalize_request_path(request.uri().path());
+        let params = Params::from_match(
+            &route.plan.capture_names,
+            resolved.captures.ranges(),
+            resolved.captures.count as usize,
+            path,
+            route.plan.materialize_params,
+        );
         maybe_head(
             &method,
-            (route.handler.as_ref().expect("typed route handler"))(
-                &mut request,
-                params,
-                &self.state,
-            )
-            .await,
+            match &route.plan.handler {
+                HandlerKind::Typed(handler) => handler(&mut request, &params, &self.state).await,
+                HandlerKind::Zero(_) => unreachable!("zero route handled above"),
+                HandlerKind::Raw(_) => unreachable!("raw route handled separately"),
+                HandlerKind::Builtin(builtin) => self.builtin_response(*builtin),
+            },
         )
     }
 
@@ -1852,8 +2015,28 @@ impl<S: Send + Sync + 'static> App<S> {
         let route = &self.routes[resolved.index];
         maybe_head(
             method,
-            (route.zero_handler.as_ref().expect("zero route handler"))().await,
+            match &route.plan.handler {
+                HandlerKind::Zero(handler) => handler().await,
+                HandlerKind::Typed(_) => unreachable!("typed route handled separately"),
+                HandlerKind::Raw(_) => unreachable!("raw route handled separately"),
+                HandlerKind::Builtin(builtin) => self.builtin_response(*builtin),
+            },
         )
+    }
+
+    fn builtin_response(&self, builtin: BuiltinHandler) -> HttpResponse {
+        match builtin {
+            BuiltinHandler::OpenApi => {
+                let body = self
+                    .openapi_bytes
+                    .clone()
+                    .unwrap_or_else(|| Bytes::from(self.openapi_document().to_string()));
+                response_json_bytes(StatusCode::OK, body)
+            }
+            BuiltinHandler::Swagger => {
+                response_text(StatusCode::OK, swagger_html(self.openapi_path.as_deref()))
+            }
+        }
     }
 
     async fn handle_incoming(
@@ -1865,7 +2048,12 @@ impl<S: Send + Sync + 'static> App<S> {
         let route = &self.routes[resolved.index];
         maybe_head(
             &method,
-            (route.raw_handler.as_ref().expect("raw route handler"))(request).await,
+            match &route.plan.handler {
+                HandlerKind::Raw(handler) => handler(request).await,
+                HandlerKind::Zero(_) => unreachable!("zero route handled separately"),
+                HandlerKind::Typed(_) => unreachable!("typed route handled separately"),
+                HandlerKind::Builtin(_) => unreachable!("builtin route handled separately"),
+            },
         )
     }
 }
@@ -2004,19 +2192,9 @@ fn response_json<T: Serialize>(status: StatusCode, value: T) -> HttpResponse {
 }
 
 fn response_json_bytes(status: StatusCode, body: Bytes) -> HttpResponse {
-    let content_length = HeaderValue::from_str(&body.len().to_string()).unwrap();
-    response_json_bytes_with_length(status, body, content_length)
-}
-
-fn response_json_bytes_with_length(
-    status: StatusCode,
-    body: Bytes,
-    content_length: HeaderValue,
-) -> HttpResponse {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
-        .header(header::CONTENT_LENGTH, content_length)
         .body(ResponseBody::full(body))
         .unwrap()
 }
@@ -2181,8 +2359,11 @@ mod tests {
             RouteResolution::Matched(resolved) => resolved,
             _ => panic!("zero route did not resolve"),
         };
-        assert!(app.routes[resolved.index].zero_handler.is_some());
-        assert!(resolved.params.is_none());
+        assert!(matches!(
+            app.routes[resolved.index].plan.handler,
+            HandlerKind::Zero(_)
+        ));
+        assert_eq!(resolved.captures.count, 0);
 
         let response = app.oneshot(Method::GET, "/zero", &[], None).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -2204,6 +2385,42 @@ mod tests {
             .expect("dynamic route match");
         assert_eq!(matched.routes.route(&Method::GET), Some(9_999));
         assert!(app.dynamic_routes.find("/dynamic/missing/42").is_none());
+    }
+
+    #[test]
+    fn report_hot_path_layout_sizes() {
+        println!(
+            "HandlerFuture={} InlineFuture={} Params={} RouteResolution={}",
+            size_of::<HandlerFuture>(),
+            size_of::<InlineFuture>(),
+            size_of::<Params>(),
+            size_of::<RouteResolution<'static>>(),
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_future_preserves_pinned_application_future() {
+        struct PinnedReady {
+            _pin: PhantomPinned,
+        }
+
+        impl Future for PinnedReady {
+            type Output = &'static str;
+
+            fn poll(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+                Poll::Ready("OK")
+            }
+        }
+
+        let response = HandlerFuture::from_response_future(PinnedReady {
+            _pin: PhantomPinned,
+        })
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            Bytes::from_static(b"OK")
+        );
     }
 
     #[tokio::test]

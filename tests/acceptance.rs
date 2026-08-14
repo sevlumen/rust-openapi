@@ -297,6 +297,15 @@ async fn http_semantics_and_typed_body_header_are_preserved() {
         .oneshot(
             Method::POST,
             "/echo",
+            &[("content-type", "application/jsonfoo")],
+            Some(Bytes::from_static(br#"{"name":"Ada"}"#)),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let response = app
+        .oneshot(
+            Method::POST,
+            "/echo",
             &[("content-type", "application/json")],
             Some(Bytes::from_static(br#"not-json"#)),
         )
@@ -551,7 +560,7 @@ async fn all_registered_http_methods_and_bodyless_responses_conform() {
     app.put("/resource", hello);
     app.patch("/resource", hello);
     app.delete("/resource", empty);
-    app.options("/explicit-options", || async { NoContent });
+    app.options("/explicit-options", || async { "explicit" });
     app.get("/cached", not_modified);
 
     for method in [
@@ -568,6 +577,12 @@ async fn all_registered_http_methods_and_bodyless_responses_conform() {
     let response = app.oneshot(Method::OPTIONS, "/resource", &[], None).await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert_eq!(response.body_string().await, "");
+
+    let response = app
+        .oneshot(Method::OPTIONS, "/explicit-options", &[], None)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.body_string().await, "explicit");
 
     let response = app.oneshot(Method::GET, "/resource/", &[], None).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -599,7 +614,7 @@ async fn response_headers_and_allow_metadata_follow_http_semantics() {
 
     let response = app.oneshot(Method::GET, "/json", &[], None).await;
     assert_eq!(response.header("content-type"), Some("application/json"));
-    assert_eq!(response.header("content-length"), Some("14"));
+    assert_eq!(response.header("content-length"), None);
 
     let response = app.oneshot(Method::GET, "/empty", &[], None).await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -616,6 +631,11 @@ async fn response_headers_and_allow_metadata_follow_http_semantics() {
 async fn tcp_server_supports_keep_alive_and_connection_close() {
     let mut app = App::new();
     app.get("/text", hello);
+    app.get("/json", || async {
+        Json(Payload {
+            name: "Ada".to_owned(),
+        })
+    });
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -644,6 +664,17 @@ async fn tcp_server_supports_keep_alive_and_connection_close() {
     let second = String::from_utf8_lossy(&rest);
     assert!(second.contains("HTTP/1.1 200 OK"));
     assert!(second.contains("\r\n\r\nOK"));
+
+    let mut json_stream = TcpStream::connect(address).await.unwrap();
+    json_stream
+        .write_all(b"GET /json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut json_bytes = Vec::new();
+    json_stream.read_to_end(&mut json_bytes).await.unwrap();
+    let json_response = String::from_utf8_lossy(&json_bytes);
+    assert!(json_response.contains("content-length: 14"));
+    assert!(json_response.ends_with("\r\n\r\n{\"name\":\"Ada\"}"));
 
     let _ = shutdown_tx.send(());
     server.await.unwrap().unwrap();
