@@ -1875,4 +1875,21 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(app.openapi_bytes.as_ref(), Some(&prepared));
     }
+
+    #[test]
+    fn dynamic_routes_use_a_compiled_method_trie() {
+        let mut app = App::new();
+        for index in 0..10_000 {
+            let path = format!("/dynamic/{index}/{{id}}");
+            app.get(&path, || async { "OK" });
+        }
+
+        let trie = app
+            .dynamic_routes
+            .get(&Method::GET)
+            .expect("GET dynamic route trie");
+        assert!(trie.node_count() < 20_010);
+        assert_eq!(app.dynamic_route(&Method::GET, "/dynamic/9999/42"), Some(9_999));
+        assert_eq!(app.dynamic_route(&Method::GET, "/dynamic/missing/42"), None);
+    }
 }
