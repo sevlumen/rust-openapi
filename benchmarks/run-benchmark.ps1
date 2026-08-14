@@ -418,7 +418,7 @@ latency deltas, raw baseline CV, zero measured errors, exact measured request
 counts, cgroup CPU usage nanoseconds/request, memory samples, and the requested
 run/request minimums. Any negative timing sample or incomplete request count
 invalidates the row. p999 is retained in the JSON artifacts for warning analysis.
-Authoritative CPU/request values use cgroup `usage_usec` captured immediately
+Authoritative CPU/request values use cgroup usage_usec captured immediately
 before and after each measured k6 run; docker stats remains charting evidence.
 Allocation metrics are reported by the in-process router benchmark.
 
@@ -448,7 +448,7 @@ $composeVersion = docker compose version
 - Load-generator CPU affinity: $($env:LOAD_CPUSET) (default 8-11)
 - API/PostgreSQL memory limit: 1g
 - Host logical processors observed: $logicalProcessors
-- Official topology guard: at least 12 logical processors unless `-AllowUndersizedHost` was explicitly used
+- Official topology guard: at least 12 logical processors unless -AllowUndersizedHost was explicitly used
 - Rust compiler:
 
 $rustDetails
