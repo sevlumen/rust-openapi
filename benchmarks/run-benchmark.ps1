@@ -94,13 +94,15 @@ function Get-CgroupCpuUsageUsec([string]$service) {
 function Get-NegativeTimingFields([string]$file) {
     if (-not (Test-Path $file)) { return @() }
     $summary = Get-Content -Raw -LiteralPath $file | ConvertFrom-Json
-    $duration = $summary.metrics.measured_http_req_duration
-    if ($null -eq $duration) { return @() }
     $fields = @()
-    foreach ($field in @('min', 'med', 'max', 'p(95)', 'p(99)', 'p(99.9)')) {
-        $property = $duration.PSObject.Properties[$field]
-        if ($null -ne $property -and [double]$property.Value -lt 0) {
-            $fields += $field
+    foreach ($metricProperty in $summary.metrics.PSObject.Properties) {
+        if ($metricProperty.Name -notlike 'http_req_*') { continue }
+        $metric = $metricProperty.Value
+        foreach ($field in @('min', 'med', 'max', 'p(95)', 'p(99)', 'p(99.9)')) {
+            $property = $metric.PSObject.Properties[$field]
+            if ($null -ne $property -and [double]$property.Value -lt 0) {
+                $fields += "$($metricProperty.Name).$field"
+            }
         }
     }
     return $fields
@@ -306,11 +308,8 @@ $reportRows = foreach ($case in $Cases) { foreach ($vu in $Vus) {
     $invalidRequestCount = @($rawMetrics + $oasMetrics | Where-Object {
         [double]$_.metrics.measured_requests.count -ne $Iterations
     }).Count -gt 0
-    $invalidTiming = @($rawMetrics + $oasMetrics | ForEach-Object {
-        $duration = $_.metrics.measured_http_req_duration
-        @('min', 'med', 'max', 'p(95)', 'p(99)', 'p(99.9)') | ForEach-Object {
-            [double]$duration.$_ -lt 0
-        }
+    $invalidTiming = @($rawRecords + $oasRecords | ForEach-Object {
+        (Get-NegativeTimingFields $_.file).Count -gt 0
     }) -contains $true
     $rawStatsRecords = @($rawRecords)
     $oasStatsRecords = @($oasRecords)

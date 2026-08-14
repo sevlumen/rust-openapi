@@ -835,13 +835,14 @@ impl<S: Send + Sync + 'static, T: HeaderSpec> FromRequest<S> for Header<T> {
         _params: &Params,
         _state: &Arc<S>,
     ) -> Result<Self, ApiError> {
-        request
+        let value = request
             .headers()
             .get(T::NAME)
-            .and_then(|value| value.to_str().ok())
-            .ok_or_else(|| ApiError::missing(format!("missing header {}", T::NAME)))
-            .and_then(T::parse)
-            .map(Header)
+            .ok_or_else(|| ApiError::missing(format!("missing header {}", T::NAME)))?;
+        let value = value
+            .to_str()
+            .map_err(|_| ApiError::bad_request(format!("invalid header {}", T::NAME)))?;
+        T::parse(value).map(Header)
     }
 }
 
