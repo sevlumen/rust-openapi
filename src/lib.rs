@@ -235,6 +235,11 @@ impl Default for Params {
     }
 }
 
+const EMPTY_PARAMS: Params = Params {
+    ranges: [None; MAX_CAPTURE_PARAMS],
+    owned: None,
+};
+
 impl<S: Send + Sync + 'static> FromRequest<S> for Params {
     const NEEDS_PARAMS: bool = true;
 
@@ -688,7 +693,11 @@ pub trait Handler<S, Args>: Send + Sync + 'static {
         OpenApiRequest::default()
     }
 
-    fn call(&self, request: Request<Bytes>, params: Params, state: Arc<S>) -> HandlerFuture;
+    fn call(&self, request: &mut Request<Bytes>, params: &Params, state: &Arc<S>) -> HandlerFuture;
+
+    fn zero_handler(&self) -> Option<ErasedZeroHandler> {
+        None
+    }
 }
 
 /// An escape hatch for handlers that need Hyper's original streaming request
@@ -909,7 +918,7 @@ where
 impl<S, F, Fut, R> Handler<S, ()> for F
 where
     S: Send + Sync + 'static,
-    F: Fn() -> Fut + Send + Sync + 'static,
+    F: Fn() -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = R> + Send + 'static,
     R: IntoResponse + ResponseMetadata,
 {
@@ -921,16 +930,29 @@ where
         OpenApiRequest::default()
     }
 
-    fn call(&self, _request: Request<Bytes>, _params: Params, _state: Arc<S>) -> HandlerFuture {
+    fn call(
+        &self,
+        _request: &mut Request<Bytes>,
+        _params: &Params,
+        _state: &Arc<S>,
+    ) -> HandlerFuture {
         let future = (self)();
         HandlerFuture::from_future(async move { future.await.into_response() })
+    }
+
+    fn zero_handler(&self) -> Option<ErasedZeroHandler> {
+        let handler = self.clone();
+        Some(Box::new(move || {
+            let future = (handler)();
+            HandlerFuture::from_future(async move { future.await.into_response() })
+        }))
     }
 }
 
 impl<S, F, Fut, R, E1> Handler<S, (E1,)> for F
 where
     S: Send + Sync + 'static,
-    F: Fn(E1) -> Fut + Clone + Send + Sync + 'static,
+    F: Fn(E1) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = R> + Send + 'static,
     R: IntoResponse + ResponseMetadata,
     E1: FromRequest<S>,
@@ -943,11 +965,11 @@ where
         E1::openapi_request()
     }
 
-    fn call(&self, mut request: Request<Bytes>, params: Params, state: Arc<S>) -> HandlerFuture {
-        match E1::from_request(&mut request, &params, &state) {
+    fn call(&self, request: &mut Request<Bytes>, params: &Params, state: &Arc<S>) -> HandlerFuture {
+        match E1::from_request(request, params, state) {
             Ok(value) => {
-                let handler = self.clone();
-                HandlerFuture::from_future(async move { handler(value).await.into_response() })
+                let future = (self)(value);
+                HandlerFuture::from_future(async move { future.await.into_response() })
             }
             Err(error) => HandlerFuture::from_future(async move { error.into_response() }),
         }
@@ -957,7 +979,7 @@ where
 impl<S, F, Fut, R, E1, E2> Handler<S, (E1, E2)> for F
 where
     S: Send + Sync + 'static,
-    F: Fn(E1, E2) -> Fut + Clone + Send + Sync + 'static,
+    F: Fn(E1, E2) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = R> + Send + 'static,
     R: IntoResponse + ResponseMetadata,
     E1: FromRequest<S>,
@@ -973,15 +995,13 @@ where
         metadata
     }
 
-    fn call(&self, mut request: Request<Bytes>, params: Params, state: Arc<S>) -> HandlerFuture {
-        let first = E1::from_request(&mut request, &params, &state);
-        let second = E2::from_request(&mut request, &params, &state);
+    fn call(&self, request: &mut Request<Bytes>, params: &Params, state: &Arc<S>) -> HandlerFuture {
+        let first = E1::from_request(request, params, state);
+        let second = E2::from_request(request, params, state);
         match (first, second) {
             (Ok(first), Ok(second)) => {
-                let handler = self.clone();
-                HandlerFuture::from_future(
-                    async move { handler(first, second).await.into_response() },
-                )
+                let future = (self)(first, second);
+                HandlerFuture::from_future(async move { future.await.into_response() })
             }
             (Err(error), _) | (_, Err(error)) => {
                 HandlerFuture::from_future(async move { error.into_response() })
@@ -990,7 +1010,9 @@ where
     }
 }
 
-type ErasedHandler<S> = Box<dyn Fn(Request<Bytes>, Params, Arc<S>) -> HandlerFuture + Send + Sync>;
+pub type ErasedZeroHandler = Box<dyn Fn() -> HandlerFuture + Send + Sync>;
+type ErasedHandler<S> =
+    Box<dyn Fn(&mut Request<Bytes>, &Params, &Arc<S>) -> HandlerFuture + Send + Sync>;
 type ErasedRawHandler = Box<dyn Fn(Request<Incoming>) -> HandlerFuture + Send + Sync>;
 
 struct Route<S> {
@@ -1001,6 +1023,7 @@ struct Route<S> {
     materialize_params: bool,
     needs_body: bool,
     handler: Option<ErasedHandler<S>>,
+    zero_handler: Option<ErasedZeroHandler>,
     raw_handler: Option<ErasedRawHandler>,
     operation: Operation,
 }
@@ -1066,7 +1089,7 @@ struct DynamicPathMatch<'a> {
 
 struct ResolvedRoute {
     index: usize,
-    params: Params,
+    params: Option<Params>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -1512,10 +1535,14 @@ impl<S: Send + Sync + 'static> App<S> {
                                 } else {
                                     match app.resolve_route(request.method(), path) {
                                         RouteResolution::Matched(resolved) => {
-                                            let is_raw = app.routes[resolved.index].raw_handler.is_some();
-                                            let needs_body = app.routes[resolved.index].needs_body;
+                                            let route = &app.routes[resolved.index];
+                                            let is_raw = route.raw_handler.is_some();
+                                            let is_zero = route.zero_handler.is_some();
+                                            let needs_body = route.needs_body;
                                             if is_raw {
                                                 app.handle_incoming(request, resolved).await
+                                            } else if is_zero && !needs_body {
+                                                app.handle_zero(request.method(), resolved).await
                                             } else {
                                                 let (parts, body) = request.into_parts();
                                                 if !needs_body {
@@ -1620,6 +1647,7 @@ impl<S: Send + Sync + 'static> App<S> {
             })
             .collect::<Vec<_>>()
             .into();
+        let zero_handler = handler.zero_handler();
         let erased: ErasedHandler<S> =
             Box::new(move |request, params, state| handler.call(request, params, state));
         let index = self.routes.len();
@@ -1642,6 +1670,7 @@ impl<S: Send + Sync + 'static> App<S> {
             materialize_params: H::NEEDS_PARAMS,
             needs_body: H::NEEDS_BODY,
             handler: Some(erased),
+            zero_handler,
             raw_handler: None,
             operation: Operation {
                 tag: None,
@@ -1697,6 +1726,7 @@ impl<S: Send + Sync + 'static> App<S> {
             materialize_params: false,
             needs_body: false,
             handler: None,
+            zero_handler: None,
             raw_handler: Some(erased),
             operation: Operation {
                 tag: None,
@@ -1782,15 +1812,19 @@ impl<S: Send + Sync + 'static> App<S> {
             return RouteResolution::MethodNotAllowed(routes.allowed_methods());
         };
         let route = &self.routes[index];
-        let params = match captures {
-            Some((ranges, count)) => Params::from_match(
-                &route.capture_names,
-                ranges,
-                count,
-                path,
-                route.materialize_params,
-            ),
-            None => Params::default(),
+        let params = if route.zero_handler.is_some() {
+            None
+        } else {
+            Some(match captures {
+                Some((ranges, count)) => Params::from_match(
+                    &route.capture_names,
+                    ranges,
+                    count,
+                    path,
+                    route.materialize_params,
+                ),
+                None => Params::default(),
+            })
         };
         RouteResolution::Matched(ResolvedRoute { index, params })
     }
@@ -1798,14 +1832,27 @@ impl<S: Send + Sync + 'static> App<S> {
     async fn handle_typed(&self, request: Request<Bytes>, resolved: ResolvedRoute) -> HttpResponse {
         let method = request.method().clone();
         let route = &self.routes[resolved.index];
+        if let Some(handler) = route.zero_handler.as_ref() {
+            return maybe_head(&method, handler().await);
+        }
+        let mut request = request;
+        let params = resolved.params.as_ref().unwrap_or(&EMPTY_PARAMS);
         maybe_head(
             &method,
             (route.handler.as_ref().expect("typed route handler"))(
-                request,
-                resolved.params,
-                Arc::clone(&self.state),
+                &mut request,
+                params,
+                &self.state,
             )
             .await,
+        )
+    }
+
+    async fn handle_zero(&self, method: &Method, resolved: ResolvedRoute) -> HttpResponse {
+        let route = &self.routes[resolved.index];
+        maybe_head(
+            method,
+            (route.zero_handler.as_ref().expect("zero route handler"))().await,
         )
     }
 
