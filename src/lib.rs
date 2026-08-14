@@ -985,6 +985,109 @@ enum Segment {
     Capture(String),
 }
 
+#[derive(Default)]
+struct DynamicRouteTrie {
+    nodes: Vec<DynamicRouteNode>,
+}
+
+#[derive(Default)]
+struct DynamicRouteNode {
+    static_children: HashMap<String, usize>,
+    capture_child: Option<usize>,
+    route: Option<usize>,
+}
+
+impl DynamicRouteTrie {
+    fn new() -> Self {
+        Self {
+            nodes: vec![DynamicRouteNode::default()],
+        }
+    }
+
+    #[cfg(test)]
+    fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    fn insert(&mut self, segments: &[Segment], route: usize) {
+        let mut node_index = 0;
+        for segment in segments {
+            let next_index = match segment {
+                Segment::Static(value) => {
+                    if let Some(index) = self.nodes[node_index].static_children.get(value) {
+                        *index
+                    } else {
+                        let index = self.nodes.len();
+                        self.nodes.push(DynamicRouteNode::default());
+                        self.nodes[node_index]
+                            .static_children
+                            .insert(value.clone(), index);
+                        index
+                    }
+                }
+                Segment::Capture(_) => {
+                    if let Some(index) = self.nodes[node_index].capture_child {
+                        index
+                    } else {
+                        let index = self.nodes.len();
+                        self.nodes.push(DynamicRouteNode::default());
+                        self.nodes[node_index].capture_child = Some(index);
+                        index
+                    }
+                }
+            };
+            node_index = next_index;
+        }
+        assert!(
+            self.nodes[node_index].route.replace(route).is_none(),
+            "duplicate dynamic route pattern"
+        );
+    }
+
+    fn find(
+        &self,
+        path: &str,
+    ) -> Option<(usize, [Option<CaptureRange>; MAX_CAPTURE_PARAMS], usize)> {
+        self.find_node(0, PathParts::new(path), [None; MAX_CAPTURE_PARAMS], 0)
+    }
+
+    fn find_node(
+        &self,
+        node_index: usize,
+        mut parts: PathParts<'_>,
+        ranges: [Option<CaptureRange>; MAX_CAPTURE_PARAMS],
+        capture_count: usize,
+    ) -> Option<(usize, [Option<CaptureRange>; MAX_CAPTURE_PARAMS], usize)> {
+        let node = &self.nodes[node_index];
+        let Some(part) = parts.next() else {
+            return node.route.map(|route| (route, ranges, capture_count));
+        };
+
+        // Static branches have precedence over captures, but the capture
+        // branch remains available if the static branch fails deeper down.
+        if let Some(&child) = node.static_children.get(part.value)
+            && let Some(found) = self.find_node(child, parts, ranges, capture_count)
+        {
+            return Some(found);
+        }
+
+        if capture_count < MAX_CAPTURE_PARAMS
+            && valid_percent_encoding(part.value)
+            && let Some(child) = node.capture_child
+        {
+            let mut captured = ranges;
+            captured[capture_count] = Some(CaptureRange {
+                start: part.start,
+                end: part.end,
+            });
+            if let Some(found) = self.find_node(child, parts, captured, capture_count + 1) {
+                return Some(found);
+            }
+        }
+        None
+    }
+}
+
 #[derive(Clone, Default)]
 struct Operation {
     tag: Option<String>,
@@ -1000,6 +1103,7 @@ pub struct App<S = ()> {
     state: Arc<S>,
     routes: Vec<Route<S>>,
     static_routes: HashMap<String, Vec<(Method, usize)>>,
+    dynamic_routes: HashMap<Method, DynamicRouteTrie>,
     last_route: Option<usize>,
     openapi_path: Option<String>,
     openapi_bytes: Option<Bytes>,
@@ -1014,6 +1118,7 @@ impl App<()> {
             state: Arc::new(()),
             routes: Vec::new(),
             static_routes: HashMap::new(),
+            dynamic_routes: HashMap::new(),
             last_route: None,
             openapi_path: None,
             openapi_bytes: None,
@@ -1032,6 +1137,7 @@ impl App<()> {
             state: Arc::new(state),
             routes: Vec::new(),
             static_routes: HashMap::new(),
+            dynamic_routes: HashMap::new(),
             last_route: None,
             openapi_path: self.openapi_path,
             openapi_bytes: self.openapi_bytes,
@@ -1384,6 +1490,11 @@ impl<S: Send + Sync + 'static> App<S> {
                 .entry(template.clone())
                 .or_default()
                 .push((method.clone(), index));
+        } else {
+            self.dynamic_routes
+                .entry(method.clone())
+                .or_insert_with(DynamicRouteTrie::new)
+                .insert(&segments, index);
         }
         self.routes.push(Route {
             method,
@@ -1454,36 +1565,20 @@ impl<S: Send + Sync + 'static> App<S> {
                     .await,
             );
         }
-        for route in &self.routes {
-            if route.method == method
-                && let Some(params) = match_route(
-                    &route.segments,
-                    &route.capture_names,
-                    route.materialize_params,
-                    path,
-                )
-            {
+        if let Some((index, params)) = self.dynamic_match(&method, path) {
+            let route = &self.routes[index];
+            return maybe_head(
+                &method,
+                (route.handler)(request, params, Arc::clone(&self.state)).await,
+            );
+        }
+        if method == Method::HEAD {
+            if let Some((index, params)) = self.dynamic_match(&Method::GET, path) {
+                let route = &self.routes[index];
                 return maybe_head(
                     &method,
                     (route.handler)(request, params, Arc::clone(&self.state)).await,
                 );
-            }
-        }
-        if method == Method::HEAD {
-            for route in &self.routes {
-                if route.method == Method::GET
-                    && let Some(params) = match_route(
-                        &route.segments,
-                        &route.capture_names,
-                        route.materialize_params,
-                        path,
-                    )
-                {
-                    return maybe_head(
-                        &method,
-                        (route.handler)(request, params, Arc::clone(&self.state)).await,
-                    );
-                }
             }
         }
         if !self.allowed_methods(path).is_empty() {
@@ -1508,6 +1603,28 @@ impl<S: Send + Sync + 'static> App<S> {
             .map(|(_, index)| *index)
     }
 
+    fn dynamic_route(&self, method: &Method, path: &str) -> Option<usize> {
+        self.dynamic_routes
+            .get(method)?
+            .find(path)
+            .map(|(index, _, _)| index)
+    }
+
+    fn dynamic_match(&self, method: &Method, path: &str) -> Option<(usize, Params)> {
+        let (index, ranges, count) = self.dynamic_routes.get(method)?.find(path)?;
+        let route = &self.routes[index];
+        Some((
+            index,
+            Params::from_match(
+                &route.capture_names,
+                ranges,
+                count,
+                path,
+                route.materialize_params,
+            ),
+        ))
+    }
+
     fn needs_body(&self, method: &Method, path: &str) -> bool {
         if *method == Method::OPTIONS {
             return false;
@@ -1520,20 +1637,12 @@ impl<S: Send + Sync + 'static> App<S> {
         {
             return self.routes[index].needs_body;
         }
-        for route in &self.routes {
-            if route.method == *method
-                && match_route(&route.segments, &route.capture_names, false, path).is_some()
-            {
-                return route.needs_body;
-            }
+        if let Some(index) = self.dynamic_route(method, path) {
+            return self.routes[index].needs_body;
         }
         if *method == Method::HEAD {
-            for route in &self.routes {
-                if route.method == Method::GET
-                    && match_route(&route.segments, &route.capture_names, false, path).is_some()
-                {
-                    return route.needs_body;
-                }
+            if let Some(index) = self.dynamic_route(&Method::GET, path) {
+                return self.routes[index].needs_body;
             }
         }
         false
@@ -1654,6 +1763,7 @@ struct PathPart<'a> {
     end: usize,
 }
 
+#[derive(Clone, Copy)]
 struct PathParts<'a> {
     path: &'a str,
     next: usize,
@@ -1889,7 +1999,10 @@ mod tests {
             .get(&Method::GET)
             .expect("GET dynamic route trie");
         assert!(trie.node_count() < 20_010);
-        assert_eq!(app.dynamic_route(&Method::GET, "/dynamic/9999/42"), Some(9_999));
+        assert_eq!(
+            app.dynamic_route(&Method::GET, "/dynamic/9999/42"),
+            Some(9_999)
+        );
         assert_eq!(app.dynamic_route(&Method::GET, "/dynamic/missing/42"), None);
     }
 }
