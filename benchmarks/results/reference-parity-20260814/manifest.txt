@@ -1,0 +1,12 @@
+git_sha=4accada
+measured_server_source_sha=81a1f95640c564b0a2afb3ee9c85d69d489dc75b
+profile=reference-compatible
+cases=json-100-users,users-static
+vus=32,64,128,256,512
+runs=1
+iterations=1000000
+warmup_seconds=0
+records=20
+expected_records=20
+official_shape_valid=True
+matrix_complete=True
