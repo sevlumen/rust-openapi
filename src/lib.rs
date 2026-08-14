@@ -691,6 +691,30 @@ pub trait Handler<S, Args>: Send + Sync + 'static {
     fn call(&self, request: Request<Bytes>, params: Params, state: Arc<S>) -> HandlerFuture;
 }
 
+/// An escape hatch for handlers that need Hyper's original streaming request
+/// body. Unlike typed extractors, a raw handler receives `Incoming` without
+/// the framework collecting it first.
+pub trait RawHandler<S>: Send + Sync + 'static {
+    type Response: ResponseMetadata;
+
+    fn call(&self, request: Request<Incoming>) -> HandlerFuture;
+}
+
+impl<S, F, Fut, R> RawHandler<S> for F
+where
+    S: Send + Sync + 'static,
+    F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoResponse + ResponseMetadata,
+{
+    type Response = R;
+
+    fn call(&self, request: Request<Incoming>) -> HandlerFuture {
+        let future = (self)(request);
+        HandlerFuture::from_future(async move { future.await.into_response() })
+    }
+}
+
 pub trait FromRequest<S>: Sized + Send + 'static {
     const NEEDS_PARAMS: bool = false;
     const NEEDS_BODY: bool = false;
@@ -967,6 +991,7 @@ where
 }
 
 type ErasedHandler<S> = Box<dyn Fn(Request<Bytes>, Params, Arc<S>) -> HandlerFuture + Send + Sync>;
+type ErasedRawHandler = Box<dyn Fn(Request<Incoming>) -> HandlerFuture + Send + Sync>;
 
 struct Route<S> {
     method: Method,
@@ -975,7 +1000,8 @@ struct Route<S> {
     capture_names: Arc<[String]>,
     materialize_params: bool,
     needs_body: bool,
-    handler: ErasedHandler<S>,
+    handler: Option<ErasedHandler<S>>,
+    raw_handler: Option<ErasedRawHandler>,
     operation: Operation,
 }
 
@@ -1223,6 +1249,17 @@ impl<S: Send + Sync + 'static> App<S> {
         self
     }
 
+    /// Register a GET handler that receives Hyper's streaming `Incoming`
+    /// body directly. The framework does not collect or size-limit this body;
+    /// the handler owns cancellation and any upload limits.
+    pub fn raw_get<H>(&mut self, path: &str, handler: H) -> &mut Self
+    where
+        H: RawHandler<S>,
+    {
+        self.add_raw_route(Method::GET, path, handler);
+        self
+    }
+
     pub fn tag(&mut self, tag: impl Into<String>) -> &mut Self {
         if let Some(index) = self.last_route {
             self.routes[index].operation.tag = Some(tag.into());
@@ -1403,30 +1440,23 @@ impl<S: Send + Sync + 'static> App<S> {
                         let service = hyper::service::service_fn(move |request: Request<Incoming>| {
                             let app = Arc::clone(&app);
                             async move {
-                                let (parts, body) = request.into_parts();
-                                let needs_body = app.needs_body(&parts.method, normalize_request_path(parts.uri.path()));
-                                let response = if !needs_body {
-                                    app.handle(Request::from_parts(parts, Bytes::new())).await
-                                } else if parts
-                                    .headers
-                                    .get(header::CONTENT_LENGTH)
-                                    .and_then(|value| value.to_str().ok())
-                                    .and_then(|value| value.parse::<usize>().ok())
-                                    .is_some_and(|length| length > DEFAULT_MAX_BODY_SIZE)
-                                {
-                                    response_json(
-                                        StatusCode::PAYLOAD_TOO_LARGE,
-                                        json!({
-                                            "type": "about:blank",
-                                            "title": "Payload Too Large",
-                                            "status": 413,
-                                            "detail": "request body exceeds the configured limit"
-                                        }),
-                                    )
+                                let path = normalize_request_path(request.uri().path());
+                                let needs_incoming = app.needs_incoming(&request.method(), path);
+                                let response = if needs_incoming {
+                                    app.handle_incoming(request).await
                                 } else {
-                                    match Limited::new(body, DEFAULT_MAX_BODY_SIZE).collect().await {
-                                        Ok(body) => app.handle(Request::from_parts(parts, body.to_bytes())).await,
-                                        Err(error) if error.downcast_ref::<LengthLimitError>().is_some() => response_json(
+                                    let (parts, body) = request.into_parts();
+                                    let needs_body = app.needs_body(&parts.method, normalize_request_path(parts.uri.path()));
+                                    if !needs_body {
+                                        app.handle(Request::from_parts(parts, Bytes::new())).await
+                                    } else if parts
+                                        .headers
+                                        .get(header::CONTENT_LENGTH)
+                                        .and_then(|value| value.to_str().ok())
+                                        .and_then(|value| value.parse::<usize>().ok())
+                                        .is_some_and(|length| length > DEFAULT_MAX_BODY_SIZE)
+                                    {
+                                        response_json(
                                             StatusCode::PAYLOAD_TOO_LARGE,
                                             json!({
                                                 "type": "about:blank",
@@ -1434,16 +1464,29 @@ impl<S: Send + Sync + 'static> App<S> {
                                                 "status": 413,
                                                 "detail": "request body exceeds the configured limit"
                                             }),
-                                        ),
-                                        Err(_) => response_json(
-                                            StatusCode::BAD_REQUEST,
-                                            json!({
-                                                "type": "about:blank",
-                                                "title": "Bad Request",
-                                                "status": 400,
-                                                "detail": "request body was interrupted"
-                                            }),
-                                        ),
+                                        )
+                                    } else {
+                                        match Limited::new(body, DEFAULT_MAX_BODY_SIZE).collect().await {
+                                            Ok(body) => app.handle(Request::from_parts(parts, body.to_bytes())).await,
+                                            Err(error) if error.downcast_ref::<LengthLimitError>().is_some() => response_json(
+                                                StatusCode::PAYLOAD_TOO_LARGE,
+                                                json!({
+                                                    "type": "about:blank",
+                                                    "title": "Payload Too Large",
+                                                    "status": 413,
+                                                    "detail": "request body exceeds the configured limit"
+                                                }),
+                                            ),
+                                            Err(_) => response_json(
+                                                StatusCode::BAD_REQUEST,
+                                                json!({
+                                                    "type": "about:blank",
+                                                    "title": "Bad Request",
+                                                    "status": 400,
+                                                    "detail": "request body was interrupted"
+                                                }),
+                                            ),
+                                        }
                                     }
                                 };
                                 Ok::<_, Infallible>(response)
@@ -1503,7 +1546,8 @@ impl<S: Send + Sync + 'static> App<S> {
             capture_names,
             materialize_params: H::NEEDS_PARAMS,
             needs_body: H::NEEDS_BODY,
-            handler: erased,
+            handler: Some(erased),
+            raw_handler: None,
             operation: Operation {
                 tag: None,
                 summary: None,
@@ -1511,6 +1555,64 @@ impl<S: Send + Sync + 'static> App<S> {
                 response_status: <H::Response as ResponseMetadata>::status_code(),
                 response_schema: <H::Response as ResponseMetadata>::response_schema(),
                 request: H::openapi_request(),
+            },
+        });
+        self.openapi_bytes = None;
+        self.last_route = Some(index);
+    }
+
+    fn add_raw_route<H>(&mut self, method: Method, path: &str, handler: H)
+    where
+        H: RawHandler<S>,
+    {
+        let template = normalize_path(path);
+        assert!(
+            self.routes
+                .iter()
+                .all(|route| route.method != method || route.template != template),
+            "duplicate route"
+        );
+        let segments = parse_template(&template);
+        let capture_names: Arc<[String]> = segments
+            .iter()
+            .filter_map(|segment| match segment {
+                Segment::Capture(name) => Some(name.clone()),
+                Segment::Static(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let erased: ErasedRawHandler = Box::new(move |request| handler.call(request));
+        let index = self.routes.len();
+        if segments
+            .iter()
+            .all(|segment| matches!(segment, Segment::Static(_)))
+        {
+            self.static_routes
+                .entry(template.clone())
+                .or_default()
+                .push((method.clone(), index));
+        } else {
+            self.dynamic_routes
+                .entry(method.clone())
+                .or_insert_with(DynamicRouteTrie::new)
+                .insert(&segments, index);
+        }
+        self.routes.push(Route {
+            method,
+            template,
+            segments,
+            capture_names,
+            materialize_params: false,
+            needs_body: false,
+            handler: None,
+            raw_handler: Some(erased),
+            operation: Operation {
+                tag: None,
+                summary: None,
+                operation_id: None,
+                response_status: <H::Response as ResponseMetadata>::status_code(),
+                response_schema: <H::Response as ResponseMetadata>::response_schema(),
+                request: OpenApiRequest::default(),
             },
         });
         self.openapi_bytes = None;
@@ -1552,8 +1654,15 @@ impl<S: Send + Sync + 'static> App<S> {
         if let Some(index) = self.static_route(&method, path) {
             return maybe_head(
                 &method,
-                (self.routes[index].handler)(request, Params::default(), Arc::clone(&self.state))
-                    .await,
+                (self.routes[index]
+                    .handler
+                    .as_ref()
+                    .expect("typed route handler"))(
+                    request,
+                    Params::default(),
+                    Arc::clone(&self.state),
+                )
+                .await,
             );
         }
         if method == Method::HEAD
@@ -1561,15 +1670,27 @@ impl<S: Send + Sync + 'static> App<S> {
         {
             return maybe_head(
                 &method,
-                (self.routes[index].handler)(request, Params::default(), Arc::clone(&self.state))
-                    .await,
+                (self.routes[index]
+                    .handler
+                    .as_ref()
+                    .expect("typed route handler"))(
+                    request,
+                    Params::default(),
+                    Arc::clone(&self.state),
+                )
+                .await,
             );
         }
         if let Some((index, params)) = self.dynamic_match(&method, path) {
             let route = &self.routes[index];
             return maybe_head(
                 &method,
-                (route.handler)(request, params, Arc::clone(&self.state)).await,
+                (route.handler.as_ref().expect("typed route handler"))(
+                    request,
+                    params,
+                    Arc::clone(&self.state),
+                )
+                .await,
             );
         }
         if method == Method::HEAD {
@@ -1577,7 +1698,12 @@ impl<S: Send + Sync + 'static> App<S> {
                 let route = &self.routes[index];
                 return maybe_head(
                     &method,
-                    (route.handler)(request, params, Arc::clone(&self.state)).await,
+                    (route.handler.as_ref().expect("typed route handler"))(
+                        request,
+                        params,
+                        Arc::clone(&self.state),
+                    )
+                    .await,
                 );
             }
         }
@@ -1590,6 +1716,34 @@ impl<S: Send + Sync + 'static> App<S> {
                 .unwrap();
         }
         not_found()
+    }
+
+    async fn handle_incoming(&self, request: Request<Incoming>) -> HttpResponse {
+        let method = request.method().clone();
+        let path = normalize_request_path(request.uri().path());
+        if let Some(index) = self.static_route(&method, path)
+            && let Some(handler) = self.routes[index].raw_handler.as_ref()
+        {
+            return maybe_head(&method, handler(request).await);
+        }
+        if method == Method::HEAD
+            && let Some(index) = self.static_route(&Method::GET, path)
+            && let Some(handler) = self.routes[index].raw_handler.as_ref()
+        {
+            return maybe_head(&method, handler(request).await);
+        }
+        if let Some(index) = self.dynamic_route(&method, path)
+            && let Some(handler) = self.routes[index].raw_handler.as_ref()
+        {
+            return maybe_head(&method, handler(request).await);
+        }
+        if method == Method::HEAD
+            && let Some(index) = self.dynamic_route(&Method::GET, path)
+            && let Some(handler) = self.routes[index].raw_handler.as_ref()
+        {
+            return maybe_head(&method, handler(request).await);
+        }
+        unreachable!("raw request was dispatched without a matching raw route")
     }
 
     fn static_route(&self, method: &Method, path: &str) -> Option<usize> {
@@ -1644,6 +1798,26 @@ impl<S: Send + Sync + 'static> App<S> {
             if let Some(index) = self.dynamic_route(&Method::GET, path) {
                 return self.routes[index].needs_body;
             }
+        }
+        false
+    }
+
+    fn needs_incoming(&self, method: &Method, path: &str) -> bool {
+        if let Some(index) = self.static_route(method, path) {
+            return self.routes[index].raw_handler.is_some();
+        }
+        if *method == Method::HEAD
+            && let Some(index) = self.static_route(&Method::GET, path)
+        {
+            return self.routes[index].raw_handler.is_some();
+        }
+        if let Some(index) = self.dynamic_route(method, path) {
+            return self.routes[index].raw_handler.is_some();
+        }
+        if *method == Method::HEAD
+            && let Some(index) = self.dynamic_route(&Method::GET, path)
+        {
+            return self.routes[index].raw_handler.is_some();
         }
         false
     }

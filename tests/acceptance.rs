@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use futures_core::Stream;
 use http::{Request, StatusCode};
+use hyper::body::Incoming;
 use oas_rs::{
     ApiError, App, Header, HeaderSpec, Json, Method, NoContent, NotModified, OpenApiSchema, Params,
     Path, Query, State, StreamResponse,
@@ -20,7 +21,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
-use hyper::body::Incoming;
 
 #[derive(Clone, Default)]
 struct TestState;
@@ -712,6 +712,36 @@ async fn bodyless_route_does_not_wait_for_request_body() {
         .unwrap();
     let response = String::from_utf8_lossy(&buffer[..bytes]);
     assert!(response.starts_with("HTTP/1.1 413 Payload Too Large"));
+
+    let _ = shutdown_tx.send(());
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn raw_route_receives_incoming_without_collecting_request_body() {
+    let mut app = App::new();
+    app.raw_get("/raw-incoming", raw_incoming);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let server = tokio::spawn(app.serve_listener(listener, async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(
+            b"GET /raw-incoming HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1048576\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let mut buffer = [0_u8; 512];
+    let bytes = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut buffer))
+        .await
+        .expect("raw handler waited for request body")
+        .unwrap();
+    let response = String::from_utf8_lossy(&buffer[..bytes]);
+    assert!(response.starts_with("HTTP/1.1 200 OK"));
 
     let _ = shutdown_tx.send(());
     server.await.unwrap().unwrap();
