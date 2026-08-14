@@ -5,7 +5,8 @@ param(
     [int[]]$Vus = @(32, 64, 128, 256, 512),
     [string]$Version = "v0.1.0-local",
     [string[]]$Cases = @("plaintext", "static-json", "static-route", "path-integer", "path-uuid", "validation-success", "query", "header", "json-small", "json-100-users", "postgres", "problem", "raw-handler", "security", "404", "405"),
-    [switch]$AllowUndersizedHost
+    [switch]$AllowUndersizedHost,
+    [switch]$ContinueAfterInvalidTiming
 )
 
 $ErrorActionPreference = "Stop"
@@ -75,12 +76,29 @@ function Stop-StatsCollector($job) {
     }
 }
 
+function Get-NegativeTimingFields([string]$file) {
+    if (-not (Test-Path $file)) { return @() }
+    $summary = Get-Content -Raw -LiteralPath $file | ConvertFrom-Json
+    $duration = $summary.metrics.measured_http_req_duration
+    if ($null -eq $duration) { return @() }
+    $fields = @()
+    foreach ($field in @('min', 'med', 'max', 'p(95)', 'p(99)', 'p(99.9)')) {
+        $property = $duration.PSObject.Properties[$field]
+        if ($null -ne $property -and [double]$property.Value -lt 0) {
+            $fields += $field
+        }
+    }
+    return $fields
+}
+
 docker compose -f $compose build --no-cache
 if ($LASTEXITCODE -ne 0) { throw "Docker image build failed" }
 
 $records = [System.Collections.Generic.List[object]]::new()
-foreach ($case in $Cases) {
-foreach ($vu in $Vus) {
+$invalidTimingEvents = [System.Collections.Generic.List[string]]::new()
+$stoppedEarly = $false
+:BenchmarkMatrix foreach ($case in $Cases) {
+:VusMatrix foreach ($vu in $Vus) {
     for ($run = 1; $run -le $Runs; $run++) {
         $order = @("raw", "oas") | Get-Random -Count 2
         foreach ($implementation in $order) {
@@ -127,6 +145,15 @@ foreach ($vu in $Vus) {
             docker compose -f $compose down --remove-orphans | Out-Null
             if ($exitCode -ne 0) { throw "Benchmark failed for $implementation vu=$vu run=$run" }
             $records.Add([pscustomobject]@{ case = $case; implementation = $implementation; vu = $vu; run = $run; file = $file; stats = $statsFile })
+            $negativeTimingFields = Get-NegativeTimingFields $file
+            if ($negativeTimingFields.Count -gt 0) {
+                $event = "$case $implementation VU ${vu} run ${run}: $($negativeTimingFields -join ', ')"
+                $invalidTimingEvents.Add($event)
+                if (-not $ContinueAfterInvalidTiming) {
+                    $stoppedEarly = $true
+                    break BenchmarkMatrix
+                }
+            }
         }
     }
 }
@@ -237,6 +264,7 @@ $reportRows = foreach ($case in $Cases) { foreach ($vu in $Vus) {
     }) -contains $true
     $rawStatsRecords = @($rawRecords)
     $oasStatsRecords = @($oasRecords)
+    $incompleteRuns = $rawMetrics.Count -lt $Runs -or $oasMetrics.Count -lt $Runs
     $rawCpuNsValues = @()
     $oasCpuNsValues = @()
     for ($index = 0; $index -lt [math]::Min($rawRecords.Count, $rawMetrics.Count); $index++) {
@@ -254,7 +282,7 @@ $reportRows = foreach ($case in $Cases) { foreach ($vu in $Vus) {
     $cpuDelta = if ($null -eq $rawCpuNs -or $rawCpuNs -eq 0 -or $null -eq $oasCpuNs) { $null } else { ($oasCpuNs / $rawCpuNs) - 1 }
     $latencyFail = (($oasP50 / $rawP50) - 1) -gt 0.01 -or (($oasP95 / $rawP95) - 1) -gt 0.01 -or (($oasP99 / $rawP99) - 1) -gt 0.01
     $requiredEvidenceMissing = $null -eq $cpuDelta -or $null -eq $rawMemory -or $null -eq $oasMemory
-    $result = if ($errors -gt 0 -or $invalidTiming -or $invalidRequestCount -or $Runs -lt 7 -or $Iterations -lt 1000000 -or $rawCv -gt 0.005 -or $requiredEvidenceMissing) { "INCONCLUSIVE" } elseif ($medianOverhead -gt 0.01 -or $ciUpper -gt 0.01 -or $latencyFail -or $cpuDelta -gt 0.01) { "FAIL" } else { "PASS" }
+    $result = if ($errors -gt 0 -or $invalidTiming -or $invalidRequestCount -or $incompleteRuns -or $Runs -lt 7 -or $Iterations -lt 1000000 -or $rawCv -gt 0.005 -or $requiredEvidenceMissing) { "INCONCLUSIVE" } elseif ($medianOverhead -gt 0.01 -or $ciUpper -gt 0.01 -or $latencyFail -or $cpuDelta -gt 0.01) { "FAIL" } else { "PASS" }
     [pscustomobject]@{
         Case = $case
         Vus = $vu
@@ -278,6 +306,9 @@ $reportRows = foreach ($case in $Cases) { foreach ($vu in $Vus) {
         RawCv = $rawCv
         InvalidTiming = $invalidTiming
         InvalidRequestCount = $invalidRequestCount
+        IncompleteRuns = $incompleteRuns
+        CollectedRawRuns = $rawMetrics.Count
+        CollectedOasRuns = $oasMetrics.Count
         MedianOverhead = $medianOverhead
         Upper95Ci = $ciUpper
         Result = $result
@@ -301,6 +332,16 @@ $timingNote = if ($invalidRows.Count -gt 0) {
 } else {
     "Timing invalidation: no negative latency samples detected in completed rows."
 }
+$eventNote = if ($invalidTimingEvents.Count -gt 0) {
+    "Observed invalid timing fields: $($invalidTimingEvents -join '; ')."
+} else {
+    "Observed invalid timing fields: none."
+}
+$completionNote = if ($stoppedEarly) {
+    "Execution stopped at the first invalid timing sample. Partial results are INCONCLUSIVE by construction."
+} else {
+    "Execution completed all requested case/VU/run loops."
+}
 
 @"
 # Benchmark report $Version
@@ -316,6 +357,8 @@ classified only after the minimum run/request counts, raw-baseline CV, paired
 ${table}
 
 $timingNote
+$eventNote
+$completionNote
 
 The statistical gate uses median paired throughput overhead, upper normal-approximation 95% CI, p50/p95/p99 latency deltas, raw baseline CV, zero measured errors, exact measured request counts, cgroup CPU usage nanoseconds/request, memory samples, and the requested run/request minimums. Any negative timing sample or incomplete request count invalidates the row. p999 is retained in the JSON artifacts for warning analysis. Allocation metrics are reported by the in-process router benchmark.
 

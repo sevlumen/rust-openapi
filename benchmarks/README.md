@@ -26,7 +26,10 @@ pair it validates the API/PostgreSQL CPU affinity and 1 GiB memory limit. The
 retained stats CSV includes Docker CPU%, RSS, PIDs, and cgroup CPU usage; the
 report derives CPU nanoseconds/request from the cgroup usage delta. Incomplete
 request counts, missing CPU/RSS samples, negative timings, baseline CV above
-0.5%, or any measured error remain `INCONCLUSIVE`.
+0.5%, or any measured error remain `INCONCLUSIVE`. Official runs stop at the
+first negative timing sample and write a partial `INCONCLUSIVE` report; use
+`-ContinueAfterInvalidTiming` only when collecting diagnostic artifacts after
+that invalidation.
 
 The default matrix includes the P0/P1 HTTP cases (`validation-success`,
 `problem`, `raw-handler`, and `security`) and `postgres` (16 persistent
