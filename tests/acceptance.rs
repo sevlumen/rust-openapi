@@ -2,10 +2,11 @@ use bytes::Bytes;
 use futures_core::Stream;
 use http::StatusCode;
 use oas_rs::{
-    ApiError, App, Header, HeaderSpec, Json, Method, NoContent, NotModified, Params, Path, Query,
-    State, StreamResponse,
+    ApiError, App, Header, HeaderSpec, Json, Method, NoContent, NotModified, OpenApiSchema,
+    Params, Path, Query, State, StreamResponse,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
+use serde_json::json;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -73,6 +74,37 @@ async fn optional_trace(value: Option<Header<TraceId>>) -> &'static str {
     }
 }
 
+async fn optional_json(value: Option<Json<Payload>>) -> &'static str {
+    if value.is_some() {
+        "present"
+    } else {
+        "missing"
+    }
+}
+
+#[derive(Clone, Debug)]
+struct StrictTraceId;
+
+impl HeaderSpec for StrictTraceId {
+    const NAME: &'static str = "x-strict-trace-id";
+
+    fn parse(value: &str) -> Result<Self, ApiError> {
+        if value == "valid" {
+            Ok(Self)
+        } else {
+            Err(ApiError::bad_request("invalid strict trace id"))
+        }
+    }
+}
+
+async fn optional_strict_trace(value: Option<Header<StrictTraceId>>) -> &'static str {
+    if value.is_some() {
+        "present"
+    } else {
+        "missing"
+    }
+}
+
 async fn cancellation_handler(State(counter): State<Arc<AtomicUsize>>) -> &'static str {
     counter.fetch_add(1, Ordering::Relaxed);
     "called"
@@ -90,6 +122,41 @@ impl Stream for OneChunk {
 
 async fn stream_response() -> StreamResponse<OneChunk> {
     StreamResponse(OneChunk(Some(Bytes::from_static(b"streamed"))))
+}
+
+struct NeverStream;
+
+impl Stream for NeverStream {
+    type Item = Bytes;
+
+    fn poll_next(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Pending
+    }
+}
+
+async fn never_stream() -> StreamResponse<NeverStream> {
+    StreamResponse(NeverStream)
+}
+
+struct FailingSerialize;
+
+impl Serialize for FailingSerialize {
+    fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        Err(serde::ser::Error::custom("intentional serialization failure"))
+    }
+}
+
+impl OpenApiSchema for FailingSerialize {
+    fn schema() -> serde_json::Value {
+        json!({"type": "object"})
+    }
+}
+
+async fn failing_created() -> oas_rs::Created<FailingSerialize> {
+    oas_rs::Created(FailingSerialize)
 }
 
 async fn params(params: Params) -> String {
@@ -150,6 +217,10 @@ async fn http_semantics_and_typed_body_header_are_preserved() {
     app.post("/echo", echo);
     app.get("/trace", trace);
     app.get("/optional-trace", optional_trace);
+    app.get("/optional-strict-trace", optional_strict_trace);
+    app.post("/optional-json", optional_json);
+    app.get("/never-stream", never_stream);
+    app.get("/failing-created", failing_created);
     app.openapi("/openapi.json").swagger("/swagger");
 
     let response = app.oneshot(Method::HEAD, "/plaintext", &[], None).await;
@@ -183,6 +254,27 @@ async fn http_semantics_and_typed_body_header_are_preserved() {
     assert_eq!(response.body_string().await, "missing");
     let response = app
         .oneshot(
+            Method::GET,
+            "/optional-strict-trace",
+            &[("x-strict-trace-id", "invalid")],
+            None,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = app.oneshot(Method::POST, "/optional-json", &[], None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.body_string().await, "missing");
+    let response = app
+        .oneshot(
+            Method::POST,
+            "/optional-json",
+            &[("content-type", "application/json")],
+            Some(Bytes::from_static(br#"not-json"#)),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = app
+        .oneshot(
             Method::POST,
             "/echo",
             &[],
@@ -205,6 +297,27 @@ async fn http_semantics_and_typed_body_header_are_preserved() {
     assert_eq!(response.status(), StatusCode::OK);
     let response = app.oneshot(Method::GET, "/missing", &[], None).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let response = app.oneshot(Method::GET, "/failing-created", &[], None).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let response = tokio::time::timeout(
+        Duration::from_millis(100),
+        app.oneshot(Method::HEAD, "/never-stream", &[], None),
+    )
+    .await
+    .expect("HEAD must not consume an unbounded stream");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.header("content-length"), None);
+    assert_eq!(response.body_string().await, "");
+}
+
+#[tokio::test]
+async fn with_state_preserves_routes_registered_before_state() {
+    let mut app = App::new();
+    app.get("/hello", hello);
+    let app = app.with_state(TestState);
+    let response = app.oneshot(Method::GET, "/hello", &[], None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.body_string().await, "OK");
 }
 
 #[test]
@@ -263,11 +376,26 @@ async fn router_supports_multiple_params_precedence_and_percent_encoding() {
             .await,
         "dynamic:a b"
     );
+    assert_eq!(
+        app.oneshot(Method::GET, "/users/%C3%A9", &[], None)
+            .await
+            .body_string()
+            .await,
+        "dynamic:é"
+    );
 
     let response = app.oneshot(Method::HEAD, "/users/42", &[], None).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.header("content-length"), Some("10"));
     assert_eq!(response.body_string().await, "");
+}
+
+#[test]
+fn percent_decoding_preserves_utf8_and_literal_plus() {
+    assert_eq!(
+        oas_rs::decode_query_component("%E2%82%AC+value").unwrap(),
+        "€+value"
+    );
 }
 
 #[test]
@@ -511,6 +639,34 @@ async fn interrupted_request_body_does_not_dispatch_handler() {
     stream.shutdown().await.unwrap();
     sleep(Duration::from_millis(50)).await;
     assert_eq!(counter.load(Ordering::Relaxed), 0);
+
+    let _ = shutdown_tx.send(());
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn bodyless_route_does_not_wait_for_request_body() {
+    let mut app = App::new();
+    app.get("/plaintext", hello);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let server = tokio::spawn(app.serve_listener(listener, async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(b"GET /plaintext HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buffer = [0_u8; 512];
+    let bytes = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut buffer))
+        .await
+        .expect("bodyless route waited for request body")
+        .unwrap();
+    let response = String::from_utf8_lossy(&buffer[..bytes]);
+    assert!(response.starts_with("HTTP/1.1 200 OK"));
 
     let _ = shutdown_tx.send(());
     server.await.unwrap().unwrap();
