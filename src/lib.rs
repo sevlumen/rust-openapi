@@ -1011,7 +1011,6 @@ enum Segment {
     Capture(String),
 }
 
-#[derive(Default)]
 struct DynamicRouteTrie {
     nodes: Vec<DynamicRouteNode>,
 }
@@ -1023,13 +1022,15 @@ struct DynamicRouteNode {
     route: Option<usize>,
 }
 
-impl DynamicRouteTrie {
-    fn new() -> Self {
+impl Default for DynamicRouteTrie {
+    fn default() -> Self {
         Self {
             nodes: vec![DynamicRouteNode::default()],
         }
     }
+}
 
+impl DynamicRouteTrie {
     #[cfg(test)]
     fn node_count(&self) -> usize {
         self.nodes.len()
@@ -1441,7 +1442,7 @@ impl<S: Send + Sync + 'static> App<S> {
                             let app = Arc::clone(&app);
                             async move {
                                 let path = normalize_request_path(request.uri().path());
-                                let needs_incoming = app.needs_incoming(&request.method(), path);
+                                let needs_incoming = app.needs_incoming(request.method(), path);
                                 let response = if needs_incoming {
                                     app.handle_incoming(request).await
                                 } else {
@@ -1536,7 +1537,7 @@ impl<S: Send + Sync + 'static> App<S> {
         } else {
             self.dynamic_routes
                 .entry(method.clone())
-                .or_insert_with(DynamicRouteTrie::new)
+                .or_default()
                 .insert(&segments, index);
         }
         self.routes.push(Route {
@@ -1594,7 +1595,7 @@ impl<S: Send + Sync + 'static> App<S> {
         } else {
             self.dynamic_routes
                 .entry(method.clone())
-                .or_insert_with(DynamicRouteTrie::new)
+                .or_default()
                 .insert(&segments, index);
         }
         self.routes.push(Route {
@@ -1693,19 +1694,19 @@ impl<S: Send + Sync + 'static> App<S> {
                 .await,
             );
         }
-        if method == Method::HEAD {
-            if let Some((index, params)) = self.dynamic_match(&Method::GET, path) {
-                let route = &self.routes[index];
-                return maybe_head(
-                    &method,
-                    (route.handler.as_ref().expect("typed route handler"))(
-                        request,
-                        params,
-                        Arc::clone(&self.state),
-                    )
-                    .await,
-                );
-            }
+        if method == Method::HEAD
+            && let Some((index, params)) = self.dynamic_match(&Method::GET, path)
+        {
+            let route = &self.routes[index];
+            return maybe_head(
+                &method,
+                (route.handler.as_ref().expect("typed route handler"))(
+                    request,
+                    params,
+                    Arc::clone(&self.state),
+                )
+                .await,
+            );
         }
         if !self.allowed_methods(path).is_empty() {
             return Response::builder()
@@ -1794,10 +1795,10 @@ impl<S: Send + Sync + 'static> App<S> {
         if let Some(index) = self.dynamic_route(method, path) {
             return self.routes[index].needs_body;
         }
-        if *method == Method::HEAD {
-            if let Some(index) = self.dynamic_route(&Method::GET, path) {
-                return self.routes[index].needs_body;
-            }
+        if *method == Method::HEAD
+            && let Some(index) = self.dynamic_route(&Method::GET, path)
+        {
+            return self.routes[index].needs_body;
         }
         false
     }
