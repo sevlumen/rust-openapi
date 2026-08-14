@@ -14,7 +14,7 @@ Source plan: `C:\Users\Q\Downloads\2026-08-13-oas-rust-framework-acceptance-benc
 | Stage | Command | Evidence |
 |---|---|---|
 | RED | `cargo test --test acceptance` | The new conformance tests failed for dynamic `HEAD` fallback and name-based UUID inference, proving both regressions before the implementation fix. |
-| GREEN | `cargo test --workspace --all-targets` | 15 acceptance tests passed; router microbench executable also completed. |
+| GREEN | `cargo test --workspace --all-targets` | 21 acceptance tests passed; router microbench executable also completed. |
 | GREEN | `cargo test --workspace --all-targets` | Startup OpenAPI cache, shared benchmark DTO serialization, examples, and deterministic fuzz smoke all passed alongside the existing suite. |
 | GREEN | `cargo test --doc --workspace` | Doc-test target completed with no failures. |
 | GREEN | `cargo build --workspace --examples` | `hello` and `users-api` reference examples compiled. |
@@ -22,10 +22,13 @@ Source plan: `C:\Users\Q\Downloads\2026-08-13-oas-rust-framework-acceptance-benc
 | Allocation hot paths | `OAS_BENCH_ITERATIONS=1000000 cargo bench --bench router -- --nocapture` | Plaintext, integer/UUID path, typed query, and typed header all passed executable zero-extra-allocation assertions; each measured 0 extra allocations and 0 extra bytes/op versus a request-shape-matched raw comparator. |
 | OpenAPI hot path | `OAS_BENCH_ITERATIONS=1000000 cargo bench --bench router -- --nocapture` | OpenAPI/Swagger enabled and disabled apps both measured 4 allocations/op; the latest single release sample showed -0.49% enabled-vs-disabled time delta, which is supporting evidence rather than a statistical gate. |
 | Static route-count sweep | `cargo bench --bench router -- --nocapture` | In-process static lookup sweep covered 1, 10, 100, 1,000, and 10,000 routes with stable 4 allocations/op on the framework path; this is not an end-to-end release gate. |
+| Dynamic route trie | `cargo test --lib dynamic_routes_use_a_compiled_method_trie` and `cargo bench --bench router -- --nocapture` | Dynamic route lookup uses a compiled method trie; the 1/10/100/1,000/10,000 route sweep remains bounded by path depth for hits, while misses are retained as scaling evidence. |
+| Raw Incoming escape hatch | `cargo test --test acceptance raw_` | Raw handlers receive `Request<Incoming>` directly; a TCP request with a 1 MiB declared body returns without framework-side collection. |
 | Docker smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10 -Runs 1 -Vus 1 -Version matrix-smoke5` | All 12 P0 cases ran against raw/framework (24 measurements) with zero measured errors; the report remains `INCONCLUSIVE` because it is below the release minimum. |
 | Collector smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10 -Runs 1 -WarmupSeconds 1 -Vus 1 -Cases plaintext -Version smoke-stats` | Expanded p50/p95/p99 report and CPU/RSS artifact paths were generated; the run is correctly `INCONCLUSIVE` because it was too short to produce stable samples. Official runs now stop at the first negative timing sample and retain a partial `INCONCLUSIVE` report. |
 | Extended plaintext | `./benchmarks/run-benchmark.ps1 -Iterations 1000000 -Runs 7 -WarmupSeconds 30 -Vus 32 -Cases plaintext -Version plaintext-official2` | 14 measurements and zero measured errors were collected; raw CV was 8.39%, throughput overhead was 4.55%, CPU delta was 4.04%, and negative timing samples were observed, so the gate is `INCONCLUSIVE`/invalid rather than PASS. |
 | Benchmark status smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10 -Runs 1 -WarmupSeconds 1 -Vus 1 -Cases plaintext,problem,404,405,header,security -Version oha-status-smoke` | All 6 cases × raw/framework completed (12 measurements), with per-request expected-status checks passing and zero measured errors; response-body correctness remains covered by the Rust acceptance suite. |
+| Final Docker smoke | `./benchmarks/run-benchmark.ps1 -Iterations 1000 -Runs 1 -WarmupSeconds 1 -Vus 1 -Cases plaintext,path-integer,raw-handler,404 -Version oha-final-smoke -AllowUndersizedHost` | 8 raw/framework measurements completed, all 8,000 requests returned their expected status, no negative timings were observed, and the result remains `INCONCLUSIVE` because it is below release minimums. |
 | HTTP transport | `cargo test --test acceptance` | Keep-alive, connection-close, interrupted request body, and streaming response tests pass. |
 | P1 smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10 -Runs 1 -WarmupSeconds 1 -Vus 1 -Cases validation-success,problem,raw-handler,security -Version smoke-p1` | 8 raw/framework measurements completed with per-request status checks and zero measured errors; response-body correctness remains covered by the Rust acceptance suite and the result remains `INCONCLUSIVE` by design. |
 | CPU/topology smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10000 -Runs 1 -WarmupSeconds 1 -Vus 1 -Cases plaintext -Version smoke-topology-cpu` | Docker affinity/memory assertions passed; cgroup CPU usage and RSS samples were captured, with exact request counts and an `INCONCLUSIVE` report because it was below release minimums. |
@@ -47,6 +50,8 @@ Source plan: `C:\Users\Q\Downloads\2026-08-13-oas-rust-framework-acceptance-benc
 | 11 | OpenAPI DTO/query schema derivation has pass and compile-fail coverage | `cargo test --test compile` | PASS |
 | 12 | OpenAPI documents are prepared before listener dispatch rather than regenerated on normal requests | `src/lib.rs::openapi_document_is_prepared_once_for_server_dispatch` | PASS |
 | 13 | Release profile and raw/framework Docker images build from the same locked dependencies | `cargo build --release --locked`, `benchmarks/Dockerfile` | PASS |
+| 14 | Dynamic routes are compiled into per-method trie nodes instead of a request-time route scan | `src/lib.rs::dynamic_routes_use_a_compiled_method_trie`, `benches/router.rs` | PASS |
+| 15 | Raw handlers can receive Hyper `Incoming` without global request-body collection | `tests/acceptance.rs::raw_route_receives_incoming_without_collecting_request_body` | PASS |
 
 ## Known gaps
 
