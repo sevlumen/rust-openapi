@@ -1,0 +1,11 @@
+git_sha=a87fce037c5bbba510cb03fde3e31f7b582ad1c0
+profile=diagnostic
+cases=plaintext,raw-handler
+vus=256
+runs=7
+iterations=1000000
+warmup_seconds=30
+records=28
+expected_records=28
+official_shape_valid=True
+matrix_complete=True
