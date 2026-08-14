@@ -462,5 +462,38 @@ async fn main() {
                 start.elapsed().as_nanos() as f64 / dynamic_iterations as f64,
             );
         }
+
+        for (case, method, target, expected) in [
+            (
+                "dynamic-405",
+                Method::POST,
+                format!("/dynamic/{}/42", route_count / 2),
+                StatusCode::METHOD_NOT_ALLOWED,
+            ),
+            (
+                "dynamic-options",
+                Method::OPTIONS,
+                format!("/dynamic/{}/42", route_count / 2),
+                StatusCode::NO_CONTENT,
+            ),
+            (
+                "dynamic-miss-405",
+                Method::POST,
+                "/dynamic/missing/42".to_owned(),
+                StatusCode::NOT_FOUND,
+            ),
+        ] {
+            let start = Instant::now();
+            for _ in 0..dynamic_iterations {
+                let response = dynamic_app
+                    .oneshot(method.clone(), &target, &[], None)
+                    .await;
+                assert_eq!(response.status(), expected);
+            }
+            println!(
+                "case=dynamic_route_scale route_count={route_count} position={case} iterations={dynamic_iterations} ns_per_op={:.2}",
+                start.elapsed().as_nanos() as f64 / dynamic_iterations as f64,
+            );
+        }
     }
 }

@@ -141,8 +141,31 @@ async fn secure(Header(key): Header<ApiKey>) -> String {
     }
 }
 
-async fn json_users() -> Json<&'static Vec<BenchUser>> {
-    Json(shared_users())
+#[derive(Deserialize, Serialize, oas_rs::OpenApi)]
+struct ReferenceUser {
+    id: u32,
+    name: String,
+    email: String,
+    active: bool,
+}
+
+static REFERENCE_USERS: OnceLock<Vec<ReferenceUser>> = OnceLock::new();
+
+fn reference_users() -> &'static Vec<ReferenceUser> {
+    REFERENCE_USERS.get_or_init(|| {
+        (1..=100)
+            .map(|id| ReferenceUser {
+                id,
+                name: format!("User {id}"),
+                email: format!("user{id}@example.com"),
+                active: true,
+            })
+            .collect()
+    })
+}
+
+async fn json_users() -> Json<&'static Vec<ReferenceUser>> {
+    Json(reference_users())
 }
 
 async fn users_db(State(state): State<BenchState>) -> Result<Json<Vec<DbUser>>, ApiError> {
@@ -170,15 +193,19 @@ struct BenchPayload {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let implementation = std::env::var("OAS_IMPLEMENTATION").unwrap_or_else(|_| "oas".to_owned());
     let address = std::env::var("OAS_LISTEN").unwrap_or_else(|_| "0.0.0.0:8080".to_owned());
-    let db = match std::env::var("DATABASE_URL") {
-        Ok(url) => Some(Arc::new(DbPool::connect(&url).await?)),
-        Err(_) => None,
+    let db = match std::env::var("DATABASE_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    {
+        Some(url) => Some(Arc::new(DbPool::connect(&url).await?)),
+        None => None,
     };
     if implementation == "raw" {
         return raw_server(&address, db).await;
     }
     let static_json = JsonBytes::new(Bytes::from_static(br#"{"id":1,"name":"Alice"}"#));
     let small_json = static_json.clone();
+    let users_static = JsonBytes::new(users_json().clone());
     let mut app = App::new()
         .with_state(BenchState { db })
         .title("oas-rs benchmark")
@@ -199,6 +226,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     app.get("/secure", secure);
     app.get("/json-small", move || {
         let value = small_json.clone();
+        async move { value }
+    });
+    app.get("/users-static", move || {
+        let value = users_static.clone();
         async move { value }
     });
     app.get("/users", json_users);
@@ -247,6 +278,13 @@ async fn raw_server(
                             .header("content-type", "application/json")
                             .body(Full::new(Bytes::from_static(br#"{"id":1,"name":"Alice"}"#)))
                             .unwrap()
+                    } else if request.uri().path() == "/users-static" {
+                        let body = users_json().clone();
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header("content-type", "application/json")
+                            .body(Full::new(body))
+                            .unwrap()
                     } else if request.uri().path() == "/users-db" {
                         match query_db_bytes(db.clone()).await {
                             Ok(body) => Response::builder()
@@ -260,7 +298,7 @@ async fn raw_server(
                                 .unwrap(),
                         }
                     } else if request.uri().path() == "/users" {
-                        let body = Bytes::from(serde_json::to_vec(shared_users()).unwrap());
+                        let body = Bytes::from(serde_json::to_vec(reference_users()).unwrap());
                         Response::builder()
                             .status(StatusCode::OK)
                             .header("content-type", "application/json")
@@ -400,18 +438,28 @@ async fn query_db_bytes(db: Option<Arc<DbPool>>) -> Result<Bytes, http::StatusCo
         .map_err(|_| http::StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-const USERS_JSON: &[u8] = br#"[{"id":1,"name":"User 1"},{"id":2,"name":"User 2"},{"id":3,"name":"User 3"},{"id":4,"name":"User 4"},{"id":5,"name":"User 5"},{"id":6,"name":"User 6"},{"id":7,"name":"User 7"},{"id":8,"name":"User 8"},{"id":9,"name":"User 9"},{"id":10,"name":"User 10"},{"id":11,"name":"User 11"},{"id":12,"name":"User 12"},{"id":13,"name":"User 13"},{"id":14,"name":"User 14"},{"id":15,"name":"User 15"},{"id":16,"name":"User 16"},{"id":17,"name":"User 17"},{"id":18,"name":"User 18"},{"id":19,"name":"User 19"},{"id":20,"name":"User 20"},{"id":21,"name":"User 21"},{"id":22,"name":"User 22"},{"id":23,"name":"User 23"},{"id":24,"name":"User 24"},{"id":25,"name":"User 25"},{"id":26,"name":"User 26"},{"id":27,"name":"User 27"},{"id":28,"name":"User 28"},{"id":29,"name":"User 29"},{"id":30,"name":"User 30"},{"id":31,"name":"User 31"},{"id":32,"name":"User 32"},{"id":33,"name":"User 33"},{"id":34,"name":"User 34"},{"id":35,"name":"User 35"},{"id":36,"name":"User 36"},{"id":37,"name":"User 37"},{"id":38,"name":"User 38"},{"id":39,"name":"User 39"},{"id":40,"name":"User 40"},{"id":41,"name":"User 41"},{"id":42,"name":"User 42"},{"id":43,"name":"User 43"},{"id":44,"name":"User 44"},{"id":45,"name":"User 45"},{"id":46,"name":"User 46"},{"id":47,"name":"User 47"},{"id":48,"name":"User 48"},{"id":49,"name":"User 49"},{"id":50,"name":"User 50"},{"id":51,"name":"User 51"},{"id":52,"name":"User 52"},{"id":53,"name":"User 53"},{"id":54,"name":"User 54"},{"id":55,"name":"User 55"},{"id":56,"name":"User 56"},{"id":57,"name":"User 57"},{"id":58,"name":"User 58"},{"id":59,"name":"User 59"},{"id":60,"name":"User 60"},{"id":61,"name":"User 61"},{"id":62,"name":"User 62"},{"id":63,"name":"User 63"},{"id":64,"name":"User 64"},{"id":65,"name":"User 65"},{"id":66,"name":"User 66"},{"id":67,"name":"User 67"},{"id":68,"name":"User 68"},{"id":69,"name":"User 69"},{"id":70,"name":"User 70"},{"id":71,"name":"User 71"},{"id":72,"name":"User 72"},{"id":73,"name":"User 73"},{"id":74,"name":"User 74"},{"id":75,"name":"User 75"},{"id":76,"name":"User 76"},{"id":77,"name":"User 77"},{"id":78,"name":"User 78"},{"id":79,"name":"User 79"},{"id":80,"name":"User 80"},{"id":81,"name":"User 81"},{"id":82,"name":"User 82"},{"id":83,"name":"User 83"},{"id":84,"name":"User 84"},{"id":85,"name":"User 85"},{"id":86,"name":"User 86"},{"id":87,"name":"User 87"},{"id":88,"name":"User 88"},{"id":89,"name":"User 89"},{"id":90,"name":"User 90"},{"id":91,"name":"User 91"},{"id":92,"name":"User 92"},{"id":93,"name":"User 93"},{"id":94,"name":"User 94"},{"id":95,"name":"User 95"},{"id":96,"name":"User 96"},{"id":97,"name":"User 97"},{"id":98,"name":"User 98"},{"id":99,"name":"User 99"},{"id":100,"name":"User 100"}]"#;
+#[cfg(test)]
+const USERS_INPUT_JSON: &[u8] = br#"[{"id":1,"name":"User 1"},{"id":2,"name":"User 2"},{"id":3,"name":"User 3"},{"id":4,"name":"User 4"},{"id":5,"name":"User 5"},{"id":6,"name":"User 6"},{"id":7,"name":"User 7"},{"id":8,"name":"User 8"},{"id":9,"name":"User 9"},{"id":10,"name":"User 10"},{"id":11,"name":"User 11"},{"id":12,"name":"User 12"},{"id":13,"name":"User 13"},{"id":14,"name":"User 14"},{"id":15,"name":"User 15"},{"id":16,"name":"User 16"},{"id":17,"name":"User 17"},{"id":18,"name":"User 18"},{"id":19,"name":"User 19"},{"id":20,"name":"User 20"},{"id":21,"name":"User 21"},{"id":22,"name":"User 22"},{"id":23,"name":"User 23"},{"id":24,"name":"User 24"},{"id":25,"name":"User 25"},{"id":26,"name":"User 26"},{"id":27,"name":"User 27"},{"id":28,"name":"User 28"},{"id":29,"name":"User 29"},{"id":30,"name":"User 30"},{"id":31,"name":"User 31"},{"id":32,"name":"User 32"},{"id":33,"name":"User 33"},{"id":34,"name":"User 34"},{"id":35,"name":"User 35"},{"id":36,"name":"User 36"},{"id":37,"name":"User 37"},{"id":38,"name":"User 38"},{"id":39,"name":"User 39"},{"id":40,"name":"User 40"},{"id":41,"name":"User 41"},{"id":42,"name":"User 42"},{"id":43,"name":"User 43"},{"id":44,"name":"User 44"},{"id":45,"name":"User 45"},{"id":46,"name":"User 46"},{"id":47,"name":"User 47"},{"id":48,"name":"User 48"},{"id":49,"name":"User 49"},{"id":50,"name":"User 50"},{"id":51,"name":"User 51"},{"id":52,"name":"User 52"},{"id":53,"name":"User 53"},{"id":54,"name":"User 54"},{"id":55,"name":"User 55"},{"id":56,"name":"User 56"},{"id":57,"name":"User 57"},{"id":58,"name":"User 58"},{"id":59,"name":"User 59"},{"id":60,"name":"User 60"},{"id":61,"name":"User 61"},{"id":62,"name":"User 62"},{"id":63,"name":"User 63"},{"id":64,"name":"User 64"},{"id":65,"name":"User 65"},{"id":66,"name":"User 66"},{"id":67,"name":"User 67"},{"id":68,"name":"User 68"},{"id":69,"name":"User 69"},{"id":70,"name":"User 70"},{"id":71,"name":"User 71"},{"id":72,"name":"User 72"},{"id":73,"name":"User 73"},{"id":74,"name":"User 74"},{"id":75,"name":"User 75"},{"id":76,"name":"User 76"},{"id":77,"name":"User 77"},{"id":78,"name":"User 78"},{"id":79,"name":"User 79"},{"id":80,"name":"User 80"},{"id":81,"name":"User 81"},{"id":82,"name":"User 82"},{"id":83,"name":"User 83"},{"id":84,"name":"User 84"},{"id":85,"name":"User 85"},{"id":86,"name":"User 86"},{"id":87,"name":"User 87"},{"id":88,"name":"User 88"},{"id":89,"name":"User 89"},{"id":90,"name":"User 90"},{"id":91,"name":"User 91"},{"id":92,"name":"User 92"},{"id":93,"name":"User 93"},{"id":94,"name":"User 94"},{"id":95,"name":"User 95"},{"id":96,"name":"User 96"},{"id":97,"name":"User 97"},{"id":98,"name":"User 98"},{"id":99,"name":"User 99"},{"id":100,"name":"User 100"}]"#;
 
+#[cfg(test)]
 #[derive(Deserialize, Serialize, oas_rs::OpenApi)]
 struct BenchUser {
     id: u32,
     name: String,
 }
 
+#[cfg(test)]
 static SHARED_USERS: OnceLock<Vec<BenchUser>> = OnceLock::new();
 
+#[cfg(test)]
 fn shared_users() -> &'static Vec<BenchUser> {
-    SHARED_USERS.get_or_init(|| serde_json::from_slice(USERS_JSON).unwrap())
+    SHARED_USERS.get_or_init(|| serde_json::from_slice(USERS_INPUT_JSON).unwrap())
+}
+
+static USERS_JSON: OnceLock<Bytes> = OnceLock::new();
+
+fn users_json() -> &'static Bytes {
+    USERS_JSON.get_or_init(|| Bytes::from(serde_json::to_vec(reference_users()).unwrap()))
 }
 
 #[cfg(test)]
@@ -430,5 +478,18 @@ mod tests {
         assert_eq!(users.len(), 100);
         assert_eq!(users[0].name, "User 1");
         assert_eq!(users[99].name, "User 100");
+    }
+
+    #[test]
+    fn reference_payload_is_prepared_once_and_has_one_hundred_full_users() {
+        let encoded = users_json();
+        let users: Vec<ReferenceUser> = serde_json::from_slice(encoded).unwrap();
+        assert_eq!(users.len(), 100);
+        assert_eq!(users[0].email, "user1@example.com");
+        assert!(users[99].active);
+        assert_eq!(
+            encoded.as_ref(),
+            serde_json::to_vec(reference_users()).unwrap()
+        );
     }
 }

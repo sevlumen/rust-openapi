@@ -1019,7 +1019,64 @@ struct DynamicRouteTrie {
 struct DynamicRouteNode {
     static_children: HashMap<String, usize>,
     capture_child: Option<usize>,
-    route: Option<usize>,
+    routes: Option<RouteSet>,
+}
+
+#[derive(Default)]
+struct RouteSet {
+    routes: Vec<(Method, usize)>,
+    allowed_methods: String,
+}
+
+impl RouteSet {
+    fn insert(&mut self, method: Method, route: usize) {
+        assert!(
+            self.routes
+                .iter()
+                .all(|(registered_method, _)| registered_method != method),
+            "duplicate route pattern and method"
+        );
+        self.routes.push((method, route));
+        let mut methods: Vec<_> = self
+            .routes
+            .iter()
+            .map(|(method, _)| method.as_str())
+            .collect();
+        methods.sort_unstable();
+        self.allowed_methods = methods.join(", ");
+    }
+
+    fn route(&self, method: &Method) -> Option<usize> {
+        self.routes
+            .iter()
+            .find(|(registered_method, _)| registered_method == method)
+            .map(|(_, route)| *route)
+    }
+
+    fn allowed_methods(&self) -> &str {
+        &self.allowed_methods
+    }
+}
+
+struct DynamicPathMatch<'a> {
+    routes: &'a RouteSet,
+    ranges: [Option<CaptureRange>; MAX_CAPTURE_PARAMS],
+    count: usize,
+}
+
+struct ResolvedRoute {
+    index: usize,
+    params: Params,
+}
+
+#[allow(clippy::large_enum_variant)]
+enum RouteResolution<'a> {
+    // Keep the match on the stack: boxing this variant adds one allocation to
+    // every typed request and breaks the zero-extra-allocation extractor gate.
+    Matched(ResolvedRoute),
+    Options(&'a str),
+    MethodNotAllowed(&'a str),
+    NotFound,
 }
 
 impl Default for DynamicRouteTrie {
@@ -1036,7 +1093,7 @@ impl DynamicRouteTrie {
         self.nodes.len()
     }
 
-    fn insert(&mut self, segments: &[Segment], route: usize) {
+    fn insert(&mut self, segments: &[Segment], method: Method, route: usize) {
         let mut node_index = 0;
         for segment in segments {
             let next_index = match segment {
@@ -1065,17 +1122,20 @@ impl DynamicRouteTrie {
             };
             node_index = next_index;
         }
-        assert!(
-            self.nodes[node_index].route.replace(route).is_none(),
-            "duplicate dynamic route pattern"
-        );
+        self.nodes[node_index]
+            .routes
+            .get_or_insert_with(RouteSet::default)
+            .insert(method, route);
     }
 
-    fn find(
-        &self,
-        path: &str,
-    ) -> Option<(usize, [Option<CaptureRange>; MAX_CAPTURE_PARAMS], usize)> {
-        self.find_node(0, PathParts::new(path), [None; MAX_CAPTURE_PARAMS], 0)
+    fn find(&self, path: &str) -> Option<DynamicPathMatch<'_>> {
+        let (node_index, ranges, count) =
+            self.find_node(0, PathParts::new(path), [None; MAX_CAPTURE_PARAMS], 0)?;
+        Some(DynamicPathMatch {
+            routes: self.nodes[node_index].routes.as_ref()?,
+            ranges,
+            count,
+        })
     }
 
     fn find_node(
@@ -1087,7 +1147,10 @@ impl DynamicRouteTrie {
     ) -> Option<(usize, [Option<CaptureRange>; MAX_CAPTURE_PARAMS], usize)> {
         let node = &self.nodes[node_index];
         let Some(part) = parts.next() else {
-            return node.route.map(|route| (route, ranges, capture_count));
+            return node
+                .routes
+                .as_ref()
+                .map(|_| (node_index, ranges, capture_count));
         };
 
         // Static branches have precedence over captures, but the capture
@@ -1129,8 +1192,8 @@ struct Operation {
 pub struct App<S = ()> {
     state: Arc<S>,
     routes: Vec<Route<S>>,
-    static_routes: HashMap<String, Vec<(Method, usize)>>,
-    dynamic_routes: HashMap<Method, DynamicRouteTrie>,
+    static_routes: HashMap<String, RouteSet>,
+    dynamic_routes: DynamicRouteTrie,
     last_route: Option<usize>,
     openapi_path: Option<String>,
     openapi_bytes: Option<Bytes>,
@@ -1145,7 +1208,7 @@ impl App<()> {
             state: Arc::new(()),
             routes: Vec::new(),
             static_routes: HashMap::new(),
-            dynamic_routes: HashMap::new(),
+            dynamic_routes: DynamicRouteTrie::default(),
             last_route: None,
             openapi_path: None,
             openapi_bytes: None,
@@ -1164,7 +1227,7 @@ impl App<()> {
             state: Arc::new(state),
             routes: Vec::new(),
             static_routes: HashMap::new(),
-            dynamic_routes: HashMap::new(),
+            dynamic_routes: DynamicRouteTrie::default(),
             last_route: None,
             openapi_path: self.openapi_path,
             openapi_bytes: self.openapi_bytes,
@@ -1442,52 +1505,86 @@ impl<S: Send + Sync + 'static> App<S> {
                             let app = Arc::clone(&app);
                             async move {
                                 let path = normalize_request_path(request.uri().path());
-                                let needs_incoming = app.needs_incoming(request.method(), path);
-                                let response = if needs_incoming {
-                                    app.handle_incoming(request).await
+                                let response = if let Some(response) =
+                                    app.special_response(request.method(), path)
+                                {
+                                    response
                                 } else {
-                                    let (parts, body) = request.into_parts();
-                                    let needs_body = app.needs_body(&parts.method, normalize_request_path(parts.uri.path()));
-                                    if !needs_body {
-                                        app.handle(Request::from_parts(parts, Bytes::new())).await
-                                    } else if parts
-                                        .headers
-                                        .get(header::CONTENT_LENGTH)
-                                        .and_then(|value| value.to_str().ok())
-                                        .and_then(|value| value.parse::<usize>().ok())
-                                        .is_some_and(|length| length > DEFAULT_MAX_BODY_SIZE)
-                                    {
-                                        response_json(
-                                            StatusCode::PAYLOAD_TOO_LARGE,
-                                            json!({
-                                                "type": "about:blank",
-                                                "title": "Payload Too Large",
-                                                "status": 413,
-                                                "detail": "request body exceeds the configured limit"
-                                            }),
-                                        )
-                                    } else {
-                                        match Limited::new(body, DEFAULT_MAX_BODY_SIZE).collect().await {
-                                            Ok(body) => app.handle(Request::from_parts(parts, body.to_bytes())).await,
-                                            Err(error) if error.downcast_ref::<LengthLimitError>().is_some() => response_json(
-                                                StatusCode::PAYLOAD_TOO_LARGE,
-                                                json!({
-                                                    "type": "about:blank",
-                                                    "title": "Payload Too Large",
-                                                    "status": 413,
-                                                    "detail": "request body exceeds the configured limit"
-                                                }),
-                                            ),
-                                            Err(_) => response_json(
-                                                StatusCode::BAD_REQUEST,
-                                                json!({
-                                                    "type": "about:blank",
-                                                    "title": "Bad Request",
-                                                    "status": 400,
-                                                    "detail": "request body was interrupted"
-                                                }),
-                                            ),
+                                    match app.resolve_route(request.method(), path) {
+                                        RouteResolution::Matched(resolved) => {
+                                            let is_raw = app.routes[resolved.index].raw_handler.is_some();
+                                            let needs_body = app.routes[resolved.index].needs_body;
+                                            if is_raw {
+                                                app.handle_incoming(request, resolved).await
+                                            } else {
+                                                let (parts, body) = request.into_parts();
+                                                if !needs_body {
+                                                    app.handle_typed(
+                                                        Request::from_parts(parts, Bytes::new()),
+                                                        resolved,
+                                                    )
+                                                    .await
+                                                } else if parts
+                                                    .headers
+                                                    .get(header::CONTENT_LENGTH)
+                                                    .and_then(|value| value.to_str().ok())
+                                                    .and_then(|value| value.parse::<usize>().ok())
+                                                    .is_some_and(|length| length > DEFAULT_MAX_BODY_SIZE)
+                                                {
+                                                    response_json(
+                                                        StatusCode::PAYLOAD_TOO_LARGE,
+                                                        json!({
+                                                            "type": "about:blank",
+                                                            "title": "Payload Too Large",
+                                                            "status": 413,
+                                                            "detail": "request body exceeds the configured limit"
+                                                        }),
+                                                    )
+                                                } else {
+                                                    match Limited::new(body, DEFAULT_MAX_BODY_SIZE)
+                                                        .collect()
+                                                        .await
+                                                    {
+                                                        Ok(body) => {
+                                                            app.handle_typed(
+                                                                Request::from_parts(
+                                                                    parts,
+                                                                    body.to_bytes(),
+                                                                ),
+                                                                resolved,
+                                                            )
+                                                            .await
+                                                        }
+                                                        Err(error)
+                                                            if error
+                                                                .downcast_ref::<LengthLimitError>()
+                                                                .is_some() => response_json(
+                                                            StatusCode::PAYLOAD_TOO_LARGE,
+                                                            json!({
+                                                                "type": "about:blank",
+                                                                "title": "Payload Too Large",
+                                                                "status": 413,
+                                                                "detail": "request body exceeds the configured limit"
+                                                            }),
+                                                        ),
+                                                        Err(_) => response_json(
+                                                            StatusCode::BAD_REQUEST,
+                                                            json!({
+                                                                "type": "about:blank",
+                                                                "title": "Bad Request",
+                                                                "status": 400,
+                                                                "detail": "request body was interrupted"
+                                                            }),
+                                                        ),
+                                                    }
+                                                }
+                                            }
                                         }
+                                        RouteResolution::Options(allow) => options_response(allow),
+                                        RouteResolution::MethodNotAllowed(allow) => {
+                                            method_not_allowed_response(allow)
+                                        }
+                                        RouteResolution::NotFound => not_found(),
                                     }
                                 };
                                 Ok::<_, Infallible>(response)
@@ -1533,12 +1630,9 @@ impl<S: Send + Sync + 'static> App<S> {
             self.static_routes
                 .entry(template.clone())
                 .or_default()
-                .push((method.clone(), index));
+                .insert(method.clone(), index);
         } else {
-            self.dynamic_routes
-                .entry(method.clone())
-                .or_default()
-                .insert(&segments, index);
+            self.dynamic_routes.insert(&segments, method.clone(), index);
         }
         self.routes.push(Route {
             method,
@@ -1591,12 +1685,9 @@ impl<S: Send + Sync + 'static> App<S> {
             self.static_routes
                 .entry(template.clone())
                 .or_default()
-                .push((method.clone(), index));
+                .insert(method.clone(), index);
         } else {
-            self.dynamic_routes
-                .entry(method.clone())
-                .or_default()
-                .insert(&segments, index);
+            self.dynamic_routes.insert(&segments, method.clone(), index);
         }
         self.routes.push(Route {
             method,
@@ -1629,213 +1720,106 @@ impl<S: Send + Sync + 'static> App<S> {
     async fn handle(&self, request: Request<Bytes>) -> HttpResponse {
         let method = request.method().clone();
         let path = normalize_request_path(request.uri().path());
+        if let Some(response) = self.special_response(&method, path) {
+            return response;
+        }
+        match self.resolve_route(&method, path) {
+            RouteResolution::Matched(resolved) => self.handle_typed(request, resolved).await,
+            RouteResolution::Options(allow) => options_response(allow),
+            RouteResolution::MethodNotAllowed(allow) => method_not_allowed_response(allow),
+            RouteResolution::NotFound => not_found(),
+        }
+    }
+
+    fn special_response(&self, method: &Method, path: &str) -> Option<HttpResponse> {
         if self.openapi_path.as_deref() == Some(path) && method == Method::GET {
             let body = self
                 .openapi_bytes
                 .clone()
                 .unwrap_or_else(|| Bytes::from(self.openapi_document().to_string()));
-            return response_json_bytes(StatusCode::OK, body);
+            return Some(response_json_bytes(StatusCode::OK, body));
         }
         if self.swagger_path.as_deref() == Some(path) && method == Method::GET {
-            return response_text(StatusCode::OK, swagger_html(self.openapi_path.as_deref()));
+            return Some(response_text(
+                StatusCode::OK,
+                swagger_html(self.openapi_path.as_deref()),
+            ));
         }
-        if method == Method::OPTIONS {
-            let allow = self.allowed_methods(path);
-            return if allow.is_empty() {
-                not_found()
-            } else {
-                Response::builder()
-                    .status(StatusCode::NO_CONTENT)
-                    .header(header::ALLOW, allow)
-                    .header(header::CONTENT_LENGTH, "0")
-                    .body(ResponseBody::full(Bytes::new()))
-                    .unwrap()
-            };
-        }
-        if let Some(index) = self.static_route(&method, path) {
-            return maybe_head(
-                &method,
-                (self.routes[index]
-                    .handler
-                    .as_ref()
-                    .expect("typed route handler"))(
-                    request,
-                    Params::default(),
-                    Arc::clone(&self.state),
-                )
-                .await,
-            );
-        }
-        if method == Method::HEAD
-            && let Some(index) = self.static_route(&Method::GET, path)
-        {
-            return maybe_head(
-                &method,
-                (self.routes[index]
-                    .handler
-                    .as_ref()
-                    .expect("typed route handler"))(
-                    request,
-                    Params::default(),
-                    Arc::clone(&self.state),
-                )
-                .await,
-            );
-        }
-        if let Some((index, params)) = self.dynamic_match(&method, path) {
-            let route = &self.routes[index];
-            return maybe_head(
-                &method,
-                (route.handler.as_ref().expect("typed route handler"))(
-                    request,
-                    params,
-                    Arc::clone(&self.state),
-                )
-                .await,
-            );
-        }
-        if method == Method::HEAD
-            && let Some((index, params)) = self.dynamic_match(&Method::GET, path)
-        {
-            let route = &self.routes[index];
-            return maybe_head(
-                &method,
-                (route.handler.as_ref().expect("typed route handler"))(
-                    request,
-                    params,
-                    Arc::clone(&self.state),
-                )
-                .await,
-            );
-        }
-        if !self.allowed_methods(path).is_empty() {
-            return Response::builder()
-                .status(StatusCode::METHOD_NOT_ALLOWED)
-                .header(header::ALLOW, self.allowed_methods(path))
-                .header(header::CONTENT_LENGTH, "0")
-                .body(ResponseBody::full(Bytes::new()))
-                .unwrap();
-        }
-        not_found()
+        None
     }
 
-    async fn handle_incoming(&self, request: Request<Incoming>) -> HttpResponse {
-        let method = request.method().clone();
-        let path = normalize_request_path(request.uri().path());
-        if let Some(index) = self.static_route(&method, path)
-            && let Some(handler) = self.routes[index].raw_handler.as_ref()
-        {
-            return maybe_head(&method, handler(request).await);
+    fn resolve_route(&self, method: &Method, path: &str) -> RouteResolution<'_> {
+        if let Some(routes) = self.static_routes.get(path) {
+            return self.resolve_route_set(method, routes, None, path);
         }
-        if method == Method::HEAD
-            && let Some(index) = self.static_route(&Method::GET, path)
-            && let Some(handler) = self.routes[index].raw_handler.as_ref()
-        {
-            return maybe_head(&method, handler(request).await);
-        }
-        if let Some(index) = self.dynamic_route(&method, path)
-            && let Some(handler) = self.routes[index].raw_handler.as_ref()
-        {
-            return maybe_head(&method, handler(request).await);
-        }
-        if method == Method::HEAD
-            && let Some(index) = self.dynamic_route(&Method::GET, path)
-            && let Some(handler) = self.routes[index].raw_handler.as_ref()
-        {
-            return maybe_head(&method, handler(request).await);
-        }
-        unreachable!("raw request was dispatched without a matching raw route")
+        let Some(path_match) = self.dynamic_routes.find(path) else {
+            return RouteResolution::NotFound;
+        };
+        self.resolve_route_set(
+            method,
+            path_match.routes,
+            Some((path_match.ranges, path_match.count)),
+            path,
+        )
     }
 
-    fn static_route(&self, method: &Method, path: &str) -> Option<usize> {
-        self.static_routes
-            .get(path)
-            .and_then(|routes| {
-                routes
-                    .iter()
-                    .find(|(route_method, _)| route_method == method)
-            })
-            .map(|(_, index)| *index)
-    }
-
-    fn dynamic_route(&self, method: &Method, path: &str) -> Option<usize> {
-        self.dynamic_routes
-            .get(method)?
-            .find(path)
-            .map(|(index, _, _)| index)
-    }
-
-    fn dynamic_match(&self, method: &Method, path: &str) -> Option<(usize, Params)> {
-        let (index, ranges, count) = self.dynamic_routes.get(method)?.find(path)?;
+    fn resolve_route_set<'a>(
+        &'a self,
+        method: &Method,
+        routes: &'a RouteSet,
+        captures: Option<([Option<CaptureRange>; MAX_CAPTURE_PARAMS], usize)>,
+        path: &str,
+    ) -> RouteResolution<'a> {
+        if *method == Method::OPTIONS {
+            return RouteResolution::Options(routes.allowed_methods());
+        }
+        let index = routes.route(method).or_else(|| {
+            (method == Method::HEAD)
+                .then(|| routes.route(&Method::GET))
+                .flatten()
+        });
+        let Some(index) = index else {
+            return RouteResolution::MethodNotAllowed(routes.allowed_methods());
+        };
         let route = &self.routes[index];
-        Some((
-            index,
-            Params::from_match(
+        let params = match captures {
+            Some((ranges, count)) => Params::from_match(
                 &route.capture_names,
                 ranges,
                 count,
                 path,
                 route.materialize_params,
             ),
-        ))
+            None => Params::default(),
+        };
+        RouteResolution::Matched(ResolvedRoute { index, params })
     }
 
-    fn needs_body(&self, method: &Method, path: &str) -> bool {
-        if *method == Method::OPTIONS {
-            return false;
-        }
-        if let Some(index) = self.static_route(method, path) {
-            return self.routes[index].needs_body;
-        }
-        if *method == Method::HEAD
-            && let Some(index) = self.static_route(&Method::GET, path)
-        {
-            return self.routes[index].needs_body;
-        }
-        if let Some(index) = self.dynamic_route(method, path) {
-            return self.routes[index].needs_body;
-        }
-        if *method == Method::HEAD
-            && let Some(index) = self.dynamic_route(&Method::GET, path)
-        {
-            return self.routes[index].needs_body;
-        }
-        false
+    async fn handle_typed(&self, request: Request<Bytes>, resolved: ResolvedRoute) -> HttpResponse {
+        let method = request.method().clone();
+        let route = &self.routes[resolved.index];
+        maybe_head(
+            &method,
+            (route.handler.as_ref().expect("typed route handler"))(
+                request,
+                resolved.params,
+                Arc::clone(&self.state),
+            )
+            .await,
+        )
     }
 
-    fn needs_incoming(&self, method: &Method, path: &str) -> bool {
-        if let Some(index) = self.static_route(method, path) {
-            return self.routes[index].raw_handler.is_some();
-        }
-        if *method == Method::HEAD
-            && let Some(index) = self.static_route(&Method::GET, path)
-        {
-            return self.routes[index].raw_handler.is_some();
-        }
-        if let Some(index) = self.dynamic_route(method, path) {
-            return self.routes[index].raw_handler.is_some();
-        }
-        if *method == Method::HEAD
-            && let Some(index) = self.dynamic_route(&Method::GET, path)
-        {
-            return self.routes[index].raw_handler.is_some();
-        }
-        false
-    }
-
-    fn allowed_methods(&self, path: &str) -> String {
-        let mut methods = Vec::new();
-        for route in &self.routes {
-            if match_route(&route.segments, &route.capture_names, false, path).is_some()
-                && !methods
-                    .iter()
-                    .any(|method| *method == route.method.as_str())
-            {
-                methods.push(route.method.as_str());
-            }
-        }
-        methods.sort_unstable();
-        methods.join(", ")
+    async fn handle_incoming(
+        &self,
+        request: Request<Incoming>,
+        resolved: ResolvedRoute,
+    ) -> HttpResponse {
+        let method = request.method().clone();
+        let route = &self.routes[resolved.index];
+        maybe_head(
+            &method,
+            (route.raw_handler.as_ref().expect("raw route handler"))(request).await,
+        )
     }
 }
 
@@ -1887,44 +1871,6 @@ fn parse_template(path: &str) -> Vec<Segment> {
             }
         })
         .collect()
-}
-
-fn match_route(
-    segments: &[Segment],
-    capture_names: &[String],
-    materialize: bool,
-    path: &str,
-) -> Option<Params> {
-    let mut parts = PathParts::new(path);
-    let mut ranges = [None; MAX_CAPTURE_PARAMS];
-    let mut capture_index = 0;
-    for segment in segments {
-        let part = parts.next()?;
-        match segment {
-            Segment::Static(expected) if expected != part.value => return None,
-            Segment::Static(_) => {}
-            Segment::Capture(_) => {
-                if capture_index == MAX_CAPTURE_PARAMS || !valid_percent_encoding(part.value) {
-                    return None;
-                }
-                ranges[capture_index] = Some(CaptureRange {
-                    start: part.start,
-                    end: part.end,
-                });
-                capture_index += 1;
-            }
-        }
-    }
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(Params::from_match(
-        capture_names,
-        ranges,
-        capture_index,
-        path,
-        materialize,
-    ))
 }
 
 fn split_path(path: &str) -> Vec<&str> {
@@ -2030,6 +1976,24 @@ fn response_json_bytes_with_length(
 
 fn not_found() -> HttpResponse {
     response_text(StatusCode::NOT_FOUND, Bytes::from_static(b"Not Found"))
+}
+
+fn options_response(allow: &str) -> HttpResponse {
+    Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .header(header::ALLOW, allow)
+        .header(header::CONTENT_LENGTH, "0")
+        .body(ResponseBody::full(Bytes::new()))
+        .unwrap()
+}
+
+fn method_not_allowed_response(allow: &str) -> HttpResponse {
+    Response::builder()
+        .status(StatusCode::METHOD_NOT_ALLOWED)
+        .header(header::ALLOW, allow)
+        .header(header::CONTENT_LENGTH, "0")
+        .body(ResponseBody::full(Bytes::new()))
+        .unwrap()
 }
 
 fn maybe_head(method: &Method, response: HttpResponse) -> HttpResponse {
@@ -2169,15 +2133,32 @@ mod tests {
             app.get(&path, || async { "OK" });
         }
 
-        let trie = app
+        assert!(app.dynamic_routes.node_count() < 20_010);
+        let matched = app
             .dynamic_routes
-            .get(&Method::GET)
-            .expect("GET dynamic route trie");
-        assert!(trie.node_count() < 20_010);
-        assert_eq!(
-            app.dynamic_route(&Method::GET, "/dynamic/9999/42"),
-            Some(9_999)
-        );
-        assert_eq!(app.dynamic_route(&Method::GET, "/dynamic/missing/42"), None);
+            .find("/dynamic/9999/42")
+            .expect("dynamic route match");
+        assert_eq!(matched.routes.route(&Method::GET), Some(9_999));
+        assert!(app.dynamic_routes.find("/dynamic/missing/42").is_none());
+    }
+
+    #[tokio::test]
+    async fn dynamic_terminal_resolves_methods_without_route_scan() {
+        let mut app = App::new();
+        app.get("/resource/{id}", || async { "GET" });
+        app.post("/resource/{id}", || async { "POST" });
+
+        let response = app.oneshot(Method::PUT, "/resource/42", &[], None).await;
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(response.header("allow"), Some("GET, POST"));
+
+        let response = app
+            .oneshot(Method::OPTIONS, "/resource/42", &[], None)
+            .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.header("allow"), Some("GET, POST"));
+
+        let response = app.oneshot(Method::PUT, "/other/missing", &[], None).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

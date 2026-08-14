@@ -4,7 +4,9 @@ param(
     [int]$WarmupSeconds = 30,
     [int[]]$Vus = @(32, 64, 128, 256, 512),
     [string]$Version = "v0.1.0-local",
-    [string[]]$Cases = @("plaintext", "static-json", "static-route", "path-integer", "path-uuid", "validation-success", "query", "header", "json-small", "json-100-users", "postgres", "problem", "raw-handler", "security", "404", "405"),
+    [string[]]$Cases = @("plaintext", "static-json", "users-static", "static-route", "path-integer", "path-uuid", "validation-success", "query", "header", "json-small", "json-100-users", "postgres", "problem", "raw-handler", "security", "404", "405"),
+    [switch]$ReferenceProfile,
+    [switch]$Official,
     [switch]$AllowUndersizedHost,
     [switch]$ContinueAfterInvalidTiming
 )
@@ -16,6 +18,25 @@ $adapter = Join-Path $PSScriptRoot "oha-adapter.ps1"
 $resultRoot = Join-Path $PSScriptRoot "results\$Version"
 New-Item -ItemType Directory -Force -Path $resultRoot | Out-Null
 $Cases = @($Cases | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ($ReferenceProfile) {
+    # Match D:\Code\demo's A/B shape: one shared-iterations run, no extra
+    # warm-up, the two 100-user endpoints, and the original VU sweep.
+    $Cases = @("json-100-users", "users-static")
+    $Runs = 1
+    $WarmupSeconds = 0
+}
+$officialCases = @("plaintext", "static-json", "users-static", "static-route", "path-integer", "path-uuid", "validation-success", "query", "header", "json-small", "json-100-users", "postgres", "problem", "raw-handler", "security", "404", "405")
+$officialVus = @(32, 64, 128, 256, 512)
+$officialShapeValid =
+    -not $Official -or (
+        $Runs -ge 7 -and
+        $Iterations -ge 1000000 -and
+        (($Vus | Sort-Object) -join ',') -eq (($officialVus | Sort-Object) -join ',') -and
+        (($Cases | Sort-Object) -join ',') -eq (($officialCases | Sort-Object) -join ',')
+    )
+if ($Official -and -not $officialShapeValid) {
+    Write-Warning "Official release matrix is incomplete: require all official cases, VU 32/64/128/256/512, >=7 runs, and >=1,000,000 requests/run. Result will be INCONCLUSIVE."
+}
 $logicalProcessors = [Environment]::ProcessorCount
 if ($logicalProcessors -lt 12 -and -not $AllowUndersizedHost) {
     throw "Official benchmark topology requires at least 12 logical processors; found $logicalProcessors. Use -AllowUndersizedHost only for a non-release smoke."
@@ -32,6 +53,7 @@ function Get-OhaCase([string]$case) {
     }
     switch ($case) {
         "static-json" { $spec.Path = "/json-static" }
+        "users-static" { $spec.Path = "/users-static" }
         "static-route" { $spec.Path = "/fixed/path" }
         "path-integer" { $spec.Path = "/users/123456" }
         "path-uuid" { $spec.Path = "/uuid/550e8400-e29b-41d4-a716-446655440000" }
@@ -82,7 +104,7 @@ function Assert-ContainerTopology([string]$service) {
     $container = (docker compose -f $compose ps -q $service).Trim()
     if (-not $container) { throw "No container found for $service" }
     $expectedCpu = switch ($service) {
-        "postgres" { if ($env:POSTGRES_CPUSET) { $env:POSTGRES_CPUSET } else { "4-7" } }
+        "postgres" { if ($env:POSTGRES_CPUSET) { $env:POSTGRES_CPUSET } else { "0-3" } }
         "raw" { if ($env:API_CPUSET) { $env:API_CPUSET } else { "0-3" } }
         "oas" { if ($env:API_CPUSET) { $env:API_CPUSET } else { "0-3" } }
         default { $null }
@@ -93,9 +115,19 @@ function Assert-ContainerTopology([string]$service) {
             throw "CPU affinity mismatch for ${service}: expected $expectedCpu, actual $actualCpu"
         }
     }
+    $memorySetting = if ($service -eq "postgres") {
+        if ($env:POSTGRES_MEMORY_LIMIT) { $env:POSTGRES_MEMORY_LIMIT } else { "512m" }
+    } else {
+        if ($env:API_MEMORY_LIMIT) { $env:API_MEMORY_LIMIT } else { "512m" }
+    }
+    $expectedMemory = switch -Regex ($memorySetting.ToLowerInvariant()) {
+        '^([0-9]+)m$' { [int64]$matches[1] * 1MB; break }
+        '^([0-9]+)g$' { [int64]$matches[1] * 1GB; break }
+        default { throw "Unsupported memory limit: $memorySetting" }
+    }
     $memoryLimit = [int64](docker inspect --format '{{.HostConfig.Memory}}' $container).Trim()
-    if ($memoryLimit -ne 1GB) {
-        throw "Memory limit mismatch for ${service}: expected 1GiB, actual $memoryLimit bytes"
+    if ($memoryLimit -ne $expectedMemory) {
+        throw "Memory limit mismatch for ${service}: expected $memorySetting, actual $memoryLimit bytes"
     }
 }
 
@@ -185,10 +217,19 @@ $stoppedEarly = $false
             $spec = Get-OhaCase $case
             $targetUrl = "http://{0}:8080" -f $service
             docker compose -f $compose down --remove-orphans | Out-Null
-            docker compose -f $compose up -d $service
+            if ($case -eq "postgres") {
+                $env:DATABASE_URL = "postgres://bench:bench@postgres:5432/bench"
+            } else {
+                Remove-Item Env:DATABASE_URL -ErrorAction SilentlyContinue
+            }
+            $services = @($service)
+            if ($case -eq "postgres") { $services = @("postgres", $service) }
+            docker compose -f $compose up -d @services
             if ($LASTEXITCODE -ne 0) { throw "Failed to start $service" }
             Assert-ContainerTopology $service
-            Assert-ContainerTopology "postgres"
+            if ((docker compose -f $compose ps -q postgres).Trim()) {
+                Assert-ContainerTopology "postgres"
+            }
             if ($WarmupSeconds -gt 0) {
                 $warmupArgs = @("-z", "${WarmupSeconds}s", "-c", "$vu", "--no-tui", "--output-format", "quiet")
                 if ($spec.Method -ne "GET") { $warmupArgs += @("--method", $spec.Method) }
@@ -243,6 +284,13 @@ $stoppedEarly = $false
         }
     }
 }
+}
+
+$expectedRecordCount = $Cases.Count * $Vus.Count * $Runs * 2
+$matrixComplete = $records.Count -eq $expectedRecordCount
+if ($Official -and -not $matrixComplete) {
+    $officialShapeValid = $false
+    Write-Warning "Official release matrix is incomplete: expected $expectedRecordCount measurements, collected $($records.Count). Result will be INCONCLUSIVE."
 }
 
 function Get-Median([double[]]$values) {
@@ -389,7 +437,7 @@ $reportRows = foreach ($case in $Cases) { foreach ($vu in $Vus) {
     $cpuDelta = if ($null -eq $rawCpuNs -or $rawCpuNs -eq 0 -or $null -eq $oasCpuNs) { $null } else { ($oasCpuNs / $rawCpuNs) - 1 }
     $latencyFail = (($oasP50 / $rawP50) - 1) -gt 0.01 -or (($oasP95 / $rawP95) - 1) -gt 0.01 -or (($oasP99 / $rawP99) - 1) -gt 0.01
     $requiredEvidenceMissing = $null -eq $cpuDelta -or $null -eq $rawMemory -or $null -eq $oasMemory -or $null -eq $ciUpper
-    $result = if ($errors -gt 0 -or $invalidTiming -or $invalidRequestCount -or $incompleteRuns -or $Runs -lt 7 -or $Iterations -lt 1000000 -or $rawCv -gt 0.005 -or $requiredEvidenceMissing) { "INCONCLUSIVE" } elseif ($medianOverhead -gt 0.01 -or $ciUpper -gt 0.01 -or $latencyFail -or $cpuDelta -gt 0.01) { "FAIL" } else { "PASS" }
+    $result = if (($Official -and -not $officialShapeValid) -or $errors -gt 0 -or $invalidTiming -or $invalidRequestCount -or $incompleteRuns -or $Runs -lt 7 -or $Iterations -lt 1000000 -or $rawCv -gt 0.005 -or $requiredEvidenceMissing) { "INCONCLUSIVE" } elseif ($medianOverhead -gt 0.01 -or $ciUpper -gt 0.01 -or $latencyFail -or $cpuDelta -gt 0.01) { "FAIL" } else { "PASS" }
     [pscustomobject]@{
         Case = $case
         Vus = $vu
@@ -432,7 +480,7 @@ $table = if ($reportRows) {
     "| no completed cases | pending aggregation | pending aggregation | pending | pending | pending | pending | pending | pending | INCONCLUSIVE |"
 }
 
- $overall = if ($reportRows.Result -contains "FAIL") { "FAIL" } elseif ($reportRows.Count -gt 0 -and @($reportRows.Result | Where-Object { $_ -ne "PASS" }).Count -eq 0) { "PASS" } else { "INCONCLUSIVE" }
+$overall = if ($reportRows.Result -contains "FAIL" -and $officialShapeValid) { "FAIL" } elseif ($officialShapeValid -and $reportRows.Count -gt 0 -and @($reportRows.Result | Where-Object { $_ -ne "PASS" }).Count -eq 0) { "PASS" } else { "INCONCLUSIVE" }
 $invalidRows = @($reportRows | Where-Object { $_.InvalidTiming } | ForEach-Object { "$($_.Case) VU $($_.Vus)" })
 $timingTargets = @($invalidRows + $invalidTimingEvents)
 $timingNote = if ($timingTargets.Count -gt 0) {
@@ -449,6 +497,13 @@ $completionNote = if ($stoppedEarly) {
     "Execution stopped at the first invalid timing sample. Partial results are INCONCLUSIVE by construction."
 } else {
     "Execution completed all requested case/VU/run loops."
+}
+$matrixNote = if ($Official -and -not $officialShapeValid) {
+    "Official matrix guard: INCONCLUSIVE because the required case/VU/run/request tuple set was not complete."
+} elseif ($Official) {
+    "Official matrix guard: complete ($($records.Count) measurements)."
+} else {
+    "Official matrix guard: not requested; use -Official for release acceptance."
 }
 
 @"
@@ -468,6 +523,7 @@ ${table}
 $timingNote
 $eventNote
 $completionNote
+$matrixNote
 
 The statistical gate uses median paired throughput overhead, the upper 95%
 percentile bootstrap CI from 10,000 resamples (seed 8675309), p50/p95/p99
@@ -489,6 +545,8 @@ $gitSha = (git rev-parse HEAD).Trim()
 $rustDetails = rustc -Vv | Out-String
 $dockerDetails = docker version | Out-String
 $composeVersion = docker compose version
+$apiMemorySetting = if ($env:API_MEMORY_LIMIT) { $env:API_MEMORY_LIMIT } else { "512m" }
+$postgresMemorySetting = if ($env:POSTGRES_MEMORY_LIMIT) { $env:POSTGRES_MEMORY_LIMIT } else { "512m" }
 @"
 # Benchmark environment
 
@@ -501,9 +559,9 @@ $composeVersion = docker compose version
 - RAM bytes: $($computer.TotalPhysicalMemory)
 - OS: $($os.Caption) $($os.Version) build $($os.BuildNumber)
 - API CPU affinity: $($env:API_CPUSET) (default 0-3)
-- PostgreSQL CPU affinity: $($env:POSTGRES_CPUSET) (default 4-7)
-- Load-generator CPU affinity: $($env:LOAD_CPUSET) (default 8-11)
-- API/PostgreSQL memory limit: 1g
+- PostgreSQL CPU affinity: $($env:POSTGRES_CPUSET) (default 0-3; matches the reference DB phase)
+- Load-generator CPU affinity: $($env:LOAD_CPUSET) (default 4-7; matches the reference A/B benchmark)
+- API/PostgreSQL memory limit: $apiMemorySetting / $postgresMemorySetting
 - Host logical processors observed: $logicalProcessors
 - Official topology guard: at least 12 logical processors unless -AllowUndersizedHost was explicitly used
 - Rust compiler:
@@ -520,4 +578,17 @@ Docker version details are retained in docker-version.txt.
 "@ | Set-Content (Join-Path $resultRoot "environment.md")
 $dockerDetails | Set-Content (Join-Path $resultRoot "docker-version.txt")
 $rustDetails | Set-Content (Join-Path $resultRoot "rust-version.txt")
+@"
+git_sha=$gitSha
+profile=$(if ($ReferenceProfile) { "reference-compatible" } elseif ($Official) { "official" } else { "diagnostic" })
+cases=$($Cases -join ',')
+vus=$($Vus -join ',')
+runs=$Runs
+iterations=$Iterations
+warmup_seconds=$WarmupSeconds
+records=$($records.Count)
+expected_records=$expectedRecordCount
+official_shape_valid=$officialShapeValid
+matrix_complete=$matrixComplete
+"@ | Set-Content (Join-Path $resultRoot "manifest.txt")
 Write-Host "Benchmark artifacts written to $resultRoot"

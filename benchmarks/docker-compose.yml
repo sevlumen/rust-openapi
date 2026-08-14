@@ -5,8 +5,8 @@ services:
       POSTGRES_USER: bench
       POSTGRES_PASSWORD: bench
       POSTGRES_DB: bench
-    cpuset: "${POSTGRES_CPUSET:-4-7}"
-    mem_limit: 1g
+    cpuset: "${POSTGRES_CPUSET:-0-3}"
+    mem_limit: "${POSTGRES_MEMORY_LIMIT:-512m}"
     volumes:
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
     healthcheck:
@@ -23,12 +23,9 @@ services:
     environment:
       OAS_IMPLEMENTATION: oas
       OAS_LISTEN: 0.0.0.0:8080
-      DATABASE_URL: postgres://bench:bench@postgres:5432/bench
+      DATABASE_URL: "${DATABASE_URL:-}"
     cpuset: "${API_CPUSET:-0-3}"
-    mem_limit: 1g
-    depends_on:
-      postgres:
-        condition: service_healthy
+    mem_limit: "${API_MEMORY_LIMIT:-512m}"
     networks: [bench]
 
   raw:
@@ -38,19 +35,16 @@ services:
     environment:
       OAS_IMPLEMENTATION: raw
       OAS_LISTEN: 0.0.0.0:8080
-      DATABASE_URL: postgres://bench:bench@postgres:5432/bench
+      DATABASE_URL: "${DATABASE_URL:-}"
     cpuset: "${API_CPUSET:-0-3}"
-    mem_limit: 1g
-    depends_on:
-      postgres:
-        condition: service_healthy
+    mem_limit: "${API_MEMORY_LIMIT:-512m}"
     networks: [bench]
 
   oha:
     image: ghcr.io/hatoo/oha:1.15.0@sha256:57c2247792c1466c88ecc83ddb9253aa0b58dcb852b1d7f2026a0acf7744c965
     volumes:
       - ./results:/results
-    cpuset: "${LOAD_CPUSET:-8-11}"
+    cpuset: "${LOAD_CPUSET:-4-7}"
     networks: [bench]
 
 networks:
