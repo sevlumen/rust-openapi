@@ -327,8 +327,9 @@ $table = if ($reportRows) {
 
  $overall = if ($reportRows.Result -contains "FAIL") { "FAIL" } elseif ($reportRows.Count -gt 0 -and @($reportRows.Result | Where-Object { $_ -ne "PASS" }).Count -eq 0) { "PASS" } else { "INCONCLUSIVE" }
 $invalidRows = @($reportRows | Where-Object { $_.InvalidTiming } | ForEach-Object { "$($_.Case) VU $($_.Vus)" })
-$timingNote = if ($invalidRows.Count -gt 0) {
-    "Timing invalidation: negative latency samples detected for $($invalidRows -join ', ')."
+$timingTargets = @($invalidRows + $invalidTimingEvents)
+$timingNote = if ($timingTargets.Count -gt 0) {
+    "Timing invalidation: negative latency samples detected for $($timingTargets -join '; ')."
 } else {
     "Timing invalidation: no negative latency samples detected in completed rows."
 }
