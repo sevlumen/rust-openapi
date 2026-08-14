@@ -35,6 +35,16 @@ affinity, memory limit, and database phase first. Because oha has no
 discard-response-bodies mode, its absolute RPS is tool-specific; use the
 dedicated Linux k6 run for final comparison with `D:\Code\demo`.
 
+For a focused multi-run diagnostic that avoids bind-mounted per-request CSV
+I/O while keeping custom cases and run counts, add `-SummaryOnly`:
+
+```powershell
+./benchmarks/run-benchmark.ps1 -SummaryOnly -Cases json-100-users,users-static,plaintext,raw-handler -Vus 256 -Runs 5 -Iterations 1000000 -WarmupSeconds 0 -AllowUndersizedHost -Version focused-vu256
+```
+
+`-ReferenceProfile` implies `-SummaryOnly` and retains its fixed one-run,
+two-endpoint shape; `-SummaryOnly` alone does not change the requested matrix.
+
 For a quick Docker smoke test (not a release gate):
 
 ```powershell

@@ -6,6 +6,7 @@ param(
     [string]$Version = "v0.1.0-local",
     [string[]]$Cases = @("plaintext", "static-json", "users-static", "static-route", "path-integer", "path-uuid", "validation-success", "query", "header", "json-small", "json-100-users", "postgres", "problem", "raw-handler", "security", "404", "405"),
     [switch]$ReferenceProfile,
+    [switch]$SummaryOnly,
     [switch]$Official,
     [switch]$AllowUndersizedHost,
     [switch]$ContinueAfterInvalidTiming
@@ -18,6 +19,7 @@ $adapter = Join-Path $PSScriptRoot "oha-adapter.ps1"
 $resultRoot = Join-Path $PSScriptRoot "results\$Version"
 New-Item -ItemType Directory -Force -Path $resultRoot | Out-Null
 $Cases = @($Cases | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$summaryOnly = $ReferenceProfile -or $SummaryOnly
 if ($ReferenceProfile) {
     # Match D:\Code\demo's A/B shape: one shared-iterations run, no extra
     # warm-up, the two 100-user endpoints, and the original VU sweep.
@@ -213,7 +215,7 @@ $stoppedEarly = $false
         foreach ($implementation in $order) {
             $service = $implementation
             $file = Join-Path $resultRoot "$case-$implementation-vu$vu-run$run.json"
-            $outputName = if ($ReferenceProfile) { "$case-$implementation-vu$vu-run$run.oha.json" } else { "$case-$implementation-vu$vu-run$run.csv" }
+            $outputName = if ($summaryOnly) { "$case-$implementation-vu$vu-run$run.oha.json" } else { "$case-$implementation-vu$vu-run$run.csv" }
             $outputFile = Join-Path $resultRoot $outputName
             $spec = Get-OhaCase $case
             $targetUrl = "http://{0}:8080" -f $service
@@ -249,7 +251,7 @@ $stoppedEarly = $false
             $cpuStartUsec = Get-CgroupCpuUsageUsec $service
             try {
                 if (Test-Path $outputFile) { Remove-Item -LiteralPath $outputFile -Force }
-                $ohaArgs = Get-OhaArguments $spec $targetUrl $vu $Iterations "/results/$outputName" -SummaryOnly:$ReferenceProfile
+                $ohaArgs = Get-OhaArguments $spec $targetUrl $vu $Iterations "/results/$outputName" -SummaryOnly:$summaryOnly
                 docker compose -f $compose run --rm --no-deps oha @ohaArgs
                 $exitCode = $LASTEXITCODE
             } finally {
@@ -259,7 +261,7 @@ $stoppedEarly = $false
             $sharedOutput = Join-Path $PSScriptRoot "results\$outputName"
             if (-not (Test-Path $sharedOutput)) { throw "oha did not write output for $implementation vu=$vu run=$run" }
             Move-Item -Force $sharedOutput $outputFile
-            $summary = if ($ReferenceProfile) {
+            $summary = if ($summaryOnly) {
                 Convert-OhaJsonToSummary -JsonPath $outputFile -ExpectedStatus $spec.ExpectedStatus -ExpectedRequests $Iterations
             } else {
                 Convert-OhaCsvToSummary -CsvPath $outputFile -ExpectedStatus $spec.ExpectedStatus
