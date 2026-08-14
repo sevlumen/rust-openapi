@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use futures_core::Stream;
-use http::StatusCode;
+use http::{Request, StatusCode};
 use oas_rs::{
     ApiError, App, Header, HeaderSpec, Json, Method, NoContent, NotModified, OpenApiSchema, Params,
     Path, Query, State, StreamResponse,
@@ -20,6 +20,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
+use hyper::body::Incoming;
 
 #[derive(Clone, Default)]
 struct TestState;
@@ -139,6 +140,11 @@ impl Stream for NeverStream {
 
 async fn never_stream() -> StreamResponse<NeverStream> {
     StreamResponse(NeverStream)
+}
+
+async fn raw_incoming(request: Request<Incoming>) -> &'static str {
+    assert_eq!(request.uri().path(), "/raw-incoming");
+    "OK"
 }
 
 struct FailingSerialize;
@@ -326,6 +332,12 @@ fn with_state_rejects_routes_registered_before_state() {
     let mut app = App::new();
     app.get("/hello", hello);
     let _ = app.with_state(TestState);
+}
+
+#[test]
+fn raw_handler_can_receive_hyper_incoming_directly() {
+    let mut app = App::new();
+    app.raw_get("/raw-incoming", raw_incoming);
 }
 
 #[test]
