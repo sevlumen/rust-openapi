@@ -195,7 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     app.get("/trace", header_typed);
     app.get("/validation-success/{id}", validation_success);
     app.get("/problem", problem);
-    app.get("/raw-handler", || async { "OK" });
+    app.raw_get("/raw-handler", |_request| async { "OK" });
     app.get("/secure", secure);
     app.get("/json-small", move || {
         let value = small_json.clone();

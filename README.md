@@ -49,3 +49,8 @@ comparators.
 
 Streaming is opt-in with `StreamResponse<S>`; ordinary text and JSON responses
 continue to use fixed `Bytes` bodies.
+
+Handlers that need an upload or streaming request body can use
+`app.raw_get("/upload", handler)`, where `handler` receives
+`Request<hyper::body::Incoming>` directly. The framework does not collect that
+body; the raw handler owns its limits and cancellation policy.
