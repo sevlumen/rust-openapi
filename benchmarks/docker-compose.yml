@@ -46,18 +46,10 @@ services:
         condition: service_healthy
     networks: [bench]
 
-  k6:
-    image: grafana/k6:0.55.0
-    working_dir: /bench
+  oha:
+    image: ghcr.io/hatoo/oha:1.15.0@sha256:57c2247792c1466c88ecc83ddb9253aa0b58dcb852b1d7f2026a0acf7744c965
     volumes:
-      - ./:/bench:ro
       - ./results:/results
-    environment:
-      TARGET_URL: http://oas:8080
-      VUS: 32
-      ITERATIONS: 1000000
-      WARMUP_SECONDS: 30
-      RESULT_FILE: /results/k6-summary.json
     cpuset: "${LOAD_CPUSET:-8-11}"
     networks: [bench]
 

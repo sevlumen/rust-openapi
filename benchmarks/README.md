@@ -2,8 +2,9 @@
 
 This harness keeps the raw Hyper comparator and `oas-rs` binary in the same
 release image, with identical memory limits and CPU affinity. The measured
-scenario uses k6 `shared-iterations`, a 30-second warm-up, and an explicit
-zero-error threshold.
+scenario uses oha exact-request mode, a 30-second warm-up, and an explicit
+zero-error/status threshold. oha writes one CSV row per request; the adapter
+normalizes those rows into the harness JSON metrics schema.
 
 Run the full release matrix from PowerShell:
 

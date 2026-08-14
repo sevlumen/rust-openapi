@@ -11,12 +11,71 @@ param(
 
 $ErrorActionPreference = "Stop"
 $compose = Join-Path $PSScriptRoot "docker-compose.yml"
+$adapter = Join-Path $PSScriptRoot "oha-adapter.ps1"
+. $adapter
 $resultRoot = Join-Path $PSScriptRoot "results\$Version"
 New-Item -ItemType Directory -Force -Path $resultRoot | Out-Null
 $Cases = @($Cases | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $logicalProcessors = [Environment]::ProcessorCount
 if ($logicalProcessors -lt 12 -and -not $AllowUndersizedHost) {
     throw "Official benchmark topology requires at least 12 logical processors; found $logicalProcessors. Use -AllowUndersizedHost only for a non-release smoke."
+}
+
+function Get-OhaCase([string]$case) {
+    $spec = [ordered]@{
+        Method = "GET"
+        Path = "/plaintext"
+        Headers = @()
+        Body = $null
+        ContentType = $null
+        ExpectedStatus = 200
+    }
+    switch ($case) {
+        "static-json" { $spec.Path = "/json-static" }
+        "static-route" { $spec.Path = "/fixed/path" }
+        "path-integer" { $spec.Path = "/users/123456" }
+        "path-uuid" { $spec.Path = "/uuid/550e8400-e29b-41d4-a716-446655440000" }
+        "validation-success" { $spec.Path = "/validation-success/42" }
+        "query" { $spec.Path = "/search?page=42&active=true" }
+        "header" {
+            $spec.Path = "/trace"
+            $spec.Headers = @("X-Trace-ID: abc123")
+        }
+        "json-small" { $spec.Path = "/json-small" }
+        "json-100-users" { $spec.Path = "/users" }
+        "postgres" { $spec.Path = "/users-db" }
+        "problem" {
+            $spec.Path = "/problem"
+            $spec.ExpectedStatus = 400
+        }
+        "raw-handler" { $spec.Path = "/raw-handler" }
+        "security" {
+            $spec.Path = "/secure"
+            $spec.Headers = @("X-API-Key: abc-secret")
+        }
+        "404" {
+            $spec.Path = "/missing"
+            $spec.ExpectedStatus = 404
+        }
+        "405" {
+            $spec.Method = "POST"
+            $spec.ExpectedStatus = 405
+        }
+        default { }
+    }
+    return [pscustomobject]$spec
+}
+
+function Get-OhaArguments($spec, [string]$targetUrl, [int]$connections, [int]$requestCount, [string]$outputPath) {
+    $arguments = @("-n", "$requestCount", "-c", "$connections", "--no-tui", "--output-format", "csv", "--output", $outputPath)
+    if ($spec.Method -ne "GET") { $arguments += @("--method", $spec.Method) }
+    foreach ($header in $spec.Headers) { $arguments += @("-H", $header) }
+    if ($null -ne $spec.Body) {
+        $arguments += @("-d", $spec.Body)
+        if ($null -ne $spec.ContentType) { $arguments += @("-T", $spec.ContentType) }
+    }
+    $arguments += "$targetUrl$($spec.Path)"
+    return $arguments
 }
 
 function Assert-ContainerTopology([string]$service) {
@@ -121,46 +180,44 @@ $stoppedEarly = $false
         foreach ($implementation in $order) {
             $service = $implementation
             $file = Join-Path $resultRoot "$case-$implementation-vu$vu-run$run.json"
+            $csvName = "$case-$implementation-vu$vu-run$run.csv"
+            $csvFile = Join-Path $resultRoot $csvName
+            $spec = Get-OhaCase $case
             $targetUrl = "http://{0}:8080" -f $service
-            $env:TARGET_URL = $targetUrl
-            $env:VUS = "$vu"
-            $env:ITERATIONS = "$Iterations"
-            $env:WARMUP_SECONDS = "$WarmupSeconds"
-            $env:CASE = $case
-            $env:RESULT_FILE = "/results/$case-$implementation-vu$vu-run$run.json"
             docker compose -f $compose down --remove-orphans | Out-Null
             docker compose -f $compose up -d $service
             if ($LASTEXITCODE -ne 0) { throw "Failed to start $service" }
             Assert-ContainerTopology $service
             Assert-ContainerTopology "postgres"
-            docker compose -f $compose run --rm --no-deps `
-                -e TARGET_URL="$targetUrl" `
-                -e VUS="$vu" `
-                -e ITERATIONS="$Iterations" `
-                -e WARMUP_SECONDS="$WarmupSeconds" `
-                -e CASE="$case" `
-                -e MODE="warmup" `
-                k6 run /bench/k6.js
-            if ($LASTEXITCODE -ne 0) { throw "Warmup failed for $implementation vu=$vu run=$run" }
+            if ($WarmupSeconds -gt 0) {
+                $warmupArgs = @("-z", "${WarmupSeconds}s", "-c", "$vu", "--no-tui", "--output-format", "quiet")
+                if ($spec.Method -ne "GET") { $warmupArgs += @("--method", $spec.Method) }
+                foreach ($header in $spec.Headers) { $warmupArgs += @("-H", $header) }
+                if ($null -ne $spec.Body) {
+                    $warmupArgs += @("-d", $spec.Body)
+                    if ($null -ne $spec.ContentType) { $warmupArgs += @("-T", $spec.ContentType) }
+                }
+                $warmupArgs += "$targetUrl$($spec.Path)"
+                docker compose -f $compose run --rm --no-deps oha @warmupArgs
+                if ($LASTEXITCODE -ne 0) { throw "Warmup failed for $implementation vu=$vu run=$run" }
+            }
             $statsFile = Join-Path $resultRoot "$case-$implementation-vu$vu-run$run.stats.csv"
             $statsJob = Start-StatsCollector $service $statsFile
             $cpuStartUsec = Get-CgroupCpuUsageUsec $service
             try {
-                docker compose -f $compose run --rm --no-deps `
-                    -e TARGET_URL="$targetUrl" `
-                    -e VUS="$vu" `
-                    -e ITERATIONS="$Iterations" `
-                    -e CASE="$case" `
-                    -e MODE="measured" `
-                    -e RESULT_FILE="/results/$case-$implementation-vu$vu-run$run.json" `
-                    k6 run /bench/k6.js --summary-export $env:RESULT_FILE
+                if (Test-Path $csvFile) { Remove-Item -LiteralPath $csvFile -Force }
+                $ohaArgs = Get-OhaArguments $spec $targetUrl $vu $Iterations "/results/$csvName"
+                docker compose -f $compose run --rm --no-deps oha @ohaArgs
                 $exitCode = $LASTEXITCODE
             } finally {
                 Stop-StatsCollector $statsJob
             }
             $cpuEndUsec = Get-CgroupCpuUsageUsec $service
-            $sharedFile = Join-Path $PSScriptRoot "results\$case-$implementation-vu$vu-run$run.json"
-            if (Test-Path $sharedFile) { Move-Item -Force $sharedFile $file }
+            $sharedCsv = Join-Path $PSScriptRoot "results\$csvName"
+            if (-not (Test-Path $sharedCsv)) { throw "oha did not write CSV output for $implementation vu=$vu run=$run" }
+            Move-Item -Force $sharedCsv $csvFile
+            $summary = Convert-OhaCsvToSummary -CsvPath $csvFile -ExpectedStatus $spec.ExpectedStatus
+            $summary | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $file
             docker compose -f $compose down --remove-orphans | Out-Null
             if ($exitCode -ne 0) { throw "Benchmark failed for $implementation vu=$vu run=$run" }
             $records.Add([pscustomobject]@{
@@ -169,6 +226,7 @@ $stoppedEarly = $false
                 vu = $vu
                 run = $run
                 file = $file
+                csv = $csvFile
                 stats = $statsFile
                 cpu_start_usec = $cpuStartUsec
                 cpu_end_usec = $cpuEndUsec
@@ -418,7 +476,7 @@ counts, cgroup CPU usage nanoseconds/request, memory samples, and the requested
 run/request minimums. Any negative timing sample or incomplete request count
 invalidates the row. p999 is retained in the JSON artifacts for warning analysis.
 Authoritative CPU/request values use cgroup usage_usec captured immediately
-before and after each measured k6 run; docker stats remains charting evidence.
+before and after each measured oha run; docker stats remains charting evidence.
 Allocation metrics are reported by the in-process router benchmark.
 
 Raw result files and the exact environment must be retained beside this file.
@@ -454,7 +512,7 @@ $rustDetails
 - Docker Compose: $composeVersion
 - Benchmark build image: rust:1.88.0-bookworm
 - PostgreSQL image: postgres:16.4-bookworm
-- k6 image: grafana/k6:0.55.0
+- oha image: ghcr.io/hatoo/oha:1.15.0 (digest pinned in docker-compose.yml)
 - Release profile: opt-level=3, lto=fat, codegen-units=1, panic=abort, strip=true
 - Dependencies are locked by Cargo.lock.
 

@@ -7,7 +7,7 @@ Source plan: `C:\Users\Q\Downloads\2026-08-13-oas-rust-framework-acceptance-benc
 - As an API developer, I can register static, dynamic, query, JSON-body and typed-header handlers.
 - As an API client, I receive HTTP method semantics, typed success responses and problem details for invalid inputs.
 - As an API developer, I can expose generated OpenAPI JSON and a Swagger smoke page without re-registering route metadata.
-- As a release engineer, I can compare a raw Hyper server with the framework through a reproducible Docker/k6 harness.
+- As a release engineer, I can compare a raw Hyper server with the framework through a reproducible Docker/oha harness.
 
 ## RED/GREEN evidence
 
@@ -25,9 +25,9 @@ Source plan: `C:\Users\Q\Downloads\2026-08-13-oas-rust-framework-acceptance-benc
 | Docker smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10 -Runs 1 -Vus 1 -Version matrix-smoke5` | All 12 P0 cases ran against raw/framework (24 measurements) with zero measured errors; the report remains `INCONCLUSIVE` because it is below the release minimum. |
 | Collector smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10 -Runs 1 -WarmupSeconds 1 -Vus 1 -Cases plaintext -Version smoke-stats` | Expanded p50/p95/p99 report and CPU/RSS artifact paths were generated; the run is correctly `INCONCLUSIVE` because it was too short to produce stable samples. Official runs now stop at the first negative timing sample and retain a partial `INCONCLUSIVE` report. |
 | Extended plaintext | `./benchmarks/run-benchmark.ps1 -Iterations 1000000 -Runs 7 -WarmupSeconds 30 -Vus 32 -Cases plaintext -Version plaintext-official2` | 14 measurements and zero measured errors were collected; raw CV was 8.39%, throughput overhead was 4.55%, CPU delta was 4.04%, and negative timing samples were observed, so the gate is `INCONCLUSIVE`/invalid rather than PASS. |
-| Body-equivalence smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10 -Runs 1 -WarmupSeconds 1 -Vus 1 -Version smoke-body-equivalence` | All 12 cases × raw/framework completed (24 measurements), including PostgreSQL, with status and expected-body checks passing and zero custom measured errors. |
+| Benchmark status smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10 -Runs 1 -WarmupSeconds 1 -Vus 1 -Cases plaintext,problem,404,405,header,security -Version oha-status-smoke` | All 6 cases × raw/framework completed (12 measurements), with per-request expected-status checks passing and zero measured errors; response-body correctness remains covered by the Rust acceptance suite. |
 | HTTP transport | `cargo test --test acceptance` | Keep-alive, connection-close, interrupted request body, and streaming response tests pass. |
-| P1 smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10 -Runs 1 -WarmupSeconds 1 -Vus 1 -Cases validation-success,problem,raw-handler,security -Version smoke-p1` | 8 raw/framework measurements completed with status/body checks passing and zero measured errors; result remains `INCONCLUSIVE` by design. |
+| P1 smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10 -Runs 1 -WarmupSeconds 1 -Vus 1 -Cases validation-success,problem,raw-handler,security -Version smoke-p1` | 8 raw/framework measurements completed with per-request status checks and zero measured errors; response-body correctness remains covered by the Rust acceptance suite and the result remains `INCONCLUSIVE` by design. |
 | CPU/topology smoke | `./benchmarks/run-benchmark.ps1 -Iterations 10000 -Runs 1 -WarmupSeconds 1 -Vus 1 -Cases plaintext -Version smoke-topology-cpu` | Docker affinity/memory assertions passed; cgroup CPU usage and RSS samples were captured, with exact request counts and an `INCONCLUSIVE` report because it was below release minimums. |
 
 ## Guarantees covered by tests
@@ -37,7 +37,7 @@ Source plan: `C:\Users\Q\Downloads\2026-08-13-oas-rust-framework-acceptance-benc
 | 1 | Static, dynamic path and typed query dispatch work | `tests/acceptance.rs::app_registers_static_dynamic_and_query_routes` | PASS |
 | 2 | HEAD, 405/Allow, OPTIONS, 404 and OpenAPI/Swagger endpoints work | `tests/acceptance.rs::http_semantics_and_typed_body_header_are_preserved` | PASS |
 | 3 | JSON body and typed header extractors reject/parse at the boundary | `tests/acceptance.rs::http_semantics_and_typed_body_header_are_preserved` | PASS |
-| 4 | Docker/k6 checks compare expected response bodies as well as status codes for all benchmark cases | `benchmarks/k6.js`, `smoke-body-equivalence` | PASS |
+| 4 | Docker/oha checks compare expected status codes for all benchmark cases; response-body correctness remains covered by the Rust acceptance suite | `benchmarks/oha-adapter.ps1`, `oha-status-smoke` | PASS |
 | 5 | Keep-alive, connection-close, body cancellation, and lazy stream responses conform | `tests/acceptance.rs` | PASS |
 | 6 | Typed path, query, and header fast paths add no measured allocations or bytes versus request-shape-matched raw comparators | `benches/router.rs` | PASS |
 | 7 | Duplicate operation IDs are rejected and emitted in OpenAPI | `tests/acceptance.rs` | PASS |
