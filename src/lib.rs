@@ -1139,7 +1139,7 @@ struct RoutePlan<S> {
 enum CaptureMode {
     None,
     Borrowed,
-    Materialized(Arc<[String]>),
+    Materialized,
 }
 
 #[derive(Clone, Copy)]
@@ -1154,6 +1154,7 @@ struct RouteMetadata {
     method: Method,
     template: String,
     segments: Vec<Segment>,
+    capture_names: Option<Arc<[String]>>,
     operation: Operation,
 }
 
@@ -1859,6 +1860,7 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
             method: Method::GET,
             template,
             segments,
+            capture_names: None,
             operation: Operation {
                 tag: None,
                 summary: None,
@@ -1884,16 +1886,22 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
             "duplicate route"
         );
         let segments = parse_template(&template);
-        let capture_mode = if H::NEEDS_PARAMS {
-            let capture_names: Arc<[String]> = segments
-                .iter()
-                .filter_map(|segment| match segment {
-                    Segment::Capture(name) => Some(name.clone()),
-                    Segment::Static(_) => None,
-                })
-                .collect::<Vec<_>>()
-                .into();
-            CaptureMode::Materialized(capture_names)
+        let capture_names = if H::NEEDS_PARAMS {
+            Some(
+                segments
+                    .iter()
+                    .filter_map(|segment| match segment {
+                        Segment::Capture(name) => Some(name.clone()),
+                        Segment::Static(_) => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            )
+        } else {
+            None
+        };
+        let capture_mode = if capture_names.is_some() {
+            CaptureMode::Materialized
         } else if segments
             .iter()
             .any(|segment| matches!(segment, Segment::Capture(_)))
@@ -1936,6 +1944,7 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
             method,
             template,
             segments,
+            capture_names,
             operation: Operation {
                 tag: None,
                 summary: None,
@@ -1984,6 +1993,7 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
             method,
             template,
             segments,
+            capture_names: None,
             operation: Operation {
                 tag: None,
                 summary: None,
@@ -2042,6 +2052,7 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
             method: Method::GET,
             template: path,
             segments: Vec::new(),
+            capture_names: None,
             operation: Operation {
                 tag: None,
                 summary: None,
@@ -2130,7 +2141,11 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
                 let params = Params::from_match(&[], resolved.captures(), path, false);
                 self.invoke_typed(&mut request, &params, plan).await
             }
-            CaptureMode::Materialized(names) => {
+            CaptureMode::Materialized => {
+                let names = self.metadata[resolved.route_id().index()]
+                    .capture_names
+                    .as_deref()
+                    .expect("materialized captures have names");
                 let params = Params::from_match(names, resolved.captures(), path, true);
                 self.invoke_typed(&mut request, &params, plan).await
             }
@@ -2173,6 +2188,7 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
 struct RuntimeRef<'a, S> {
     state: &'a Arc<S>,
     plans: &'a [RoutePlan<S>],
+    metadata: &'a [RouteMetadata],
     static_routes: &'a HashMap<String, RouteSet>,
     dynamic_routes: &'a DynamicRouteTrie,
     openapi_path: Option<&'a str>,
@@ -2285,7 +2301,11 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
                             let params = Params::from_match(&[], resolved.captures(), path, false);
                             handler(&mut request, &params, router.state)
                         }
-                        CaptureMode::Materialized(names) => {
+                        CaptureMode::Materialized => {
+                            let names = router.metadata[resolved.route_id().index()]
+                                .capture_names
+                                .as_deref()
+                                .expect("materialized captures have names");
                             let params = Params::from_match(names, resolved.captures(), path, true);
                             handler(&mut request, &params, router.state)
                         }
@@ -2354,6 +2374,7 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         RuntimeRef {
             state: &self.state,
             plans: &self.plans,
+            metadata: &self.metadata,
             static_routes: &self.static_routes,
             dynamic_routes: &self.dynamic_routes,
             openapi_path: self.openapi_path.as_deref(),
@@ -2557,7 +2578,11 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
                 let params = Params::from_match(&[], resolved.captures(), path, false);
                 self.invoke_typed(&mut request, &params, plan).await
             }
-            CaptureMode::Materialized(names) => {
+            CaptureMode::Materialized => {
+                let names = self.metadata[resolved.route_id().index()]
+                    .capture_names
+                    .as_deref()
+                    .expect("materialized captures have names");
                 let params = Params::from_match(names, resolved.captures(), path, true);
                 self.invoke_typed(&mut request, &params, plan).await
             }
@@ -3024,7 +3049,7 @@ mod tests {
         assert!(matches!(app.plans[1].capture_mode, CaptureMode::Borrowed));
         assert!(matches!(
             app.plans[2].capture_mode,
-            CaptureMode::Materialized(_)
+            CaptureMode::Materialized
         ));
     }
 
@@ -3084,12 +3109,21 @@ mod tests {
     #[test]
     fn report_hot_path_layout_sizes() {
         println!(
-            "HandlerFuture={} InlineFuture={} Params={} RouteResolution={}",
+            "HandlerFuture={} InlineFuture={} Params={} CaptureMode={} RoutePlan={} RouteMetadata={} RouteResolution={}",
             size_of::<HandlerFuture>(),
             size_of::<InlineFuture>(),
             size_of::<Params>(),
+            size_of::<CaptureMode>(),
+            size_of::<RoutePlan<()>>(),
+            size_of::<RouteMetadata>(),
             size_of::<RouteResolution<'static>>(),
         );
+    }
+
+    #[test]
+    fn capture_names_stay_out_of_hot_route_plans() {
+        assert_eq!(size_of::<CaptureMode>(), 1);
+        assert!(size_of::<RouteResolution<'static>>() <= 80);
     }
 
     #[tokio::test]
