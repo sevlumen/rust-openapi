@@ -628,6 +628,25 @@ async fn response_headers_and_allow_metadata_follow_http_semantics() {
 }
 
 #[tokio::test]
+async fn static_response_routes_return_prebuilt_bytes_and_headers() {
+    let mut app = App::new();
+    app.static_text("/health", "OK");
+    app.static_json("/version", Bytes::from_static(br#"{"version":"0.1.0"}"#));
+
+    let response = app.oneshot(Method::GET, "/health", &[], None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.header("content-type"), Some("text/plain; charset=utf-8"));
+    assert_eq!(response.header("content-length"), Some("2"));
+    assert_eq!(response.body_string().await, "OK");
+
+    let response = app.oneshot(Method::GET, "/version", &[], None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.header("content-type"), Some("application/json"));
+    assert_eq!(response.header("content-length"), None);
+    assert_eq!(response.body_string().await, r#"{"version":"0.1.0"}"#);
+}
+
+#[tokio::test]
 async fn tcp_server_supports_keep_alive_and_connection_close() {
     let mut app = App::new();
     app.get("/text", hello);
