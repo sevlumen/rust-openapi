@@ -896,7 +896,7 @@ where
         _params: &Params,
         _state: &Arc<S>,
     ) -> Result<Self, ApiError> {
-        let body = request.body().clone();
+        let body = request.body().as_ref();
         let content_type = request
             .headers()
             .get(header::CONTENT_TYPE)
@@ -917,7 +917,7 @@ where
                 "expected application/json",
             ));
         }
-        serde_json::from_slice(&body)
+        serde_json::from_slice(body)
             .map(Json)
             .map_err(|error| ApiError::bad_request(error.to_string()))
     }

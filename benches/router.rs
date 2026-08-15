@@ -9,7 +9,7 @@ use bytes::Bytes;
 use http::{Request, Response, StatusCode};
 use http_body_util::Full;
 use oas_rs::{
-    ApiError, App, AppRuntime, Header, HeaderSpec, JsonBytes, Method, Params, Path, Query,
+    ApiError, App, AppRuntime, Header, HeaderSpec, Json, JsonBytes, Method, Params, Path, Query,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -67,6 +67,16 @@ async fn typed_query(Query(query): Query<BenchQuery>) -> &'static str {
     "OK"
 }
 
+#[derive(Deserialize, oas_rs::OpenApi)]
+struct BenchJsonRequest {
+    name: String,
+}
+
+async fn typed_json_request(Json(payload): Json<BenchJsonRequest>) -> &'static str {
+    let _ = payload.name;
+    "OK"
+}
+
 struct BenchTrace;
 
 impl HeaderSpec for BenchTrace {
@@ -113,6 +123,30 @@ async fn measure_app(
     let start = Instant::now();
     for _ in 0..iterations {
         let response = app.oneshot(method.clone(), uri, headers, None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    (
+        start.elapsed().as_nanos(),
+        ALLOCATIONS.load(Ordering::Relaxed),
+        ALLOCATED_BYTES.load(Ordering::Relaxed),
+    )
+}
+
+async fn measure_app_with_body(
+    app: &AppRuntime,
+    method: Method,
+    uri: &str,
+    headers: &[(&str, &str)],
+    body: Bytes,
+    iterations: u64,
+) -> (u128, usize, usize) {
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+    let start = Instant::now();
+    for _ in 0..iterations {
+        let response = app
+            .oneshot(method.clone(), uri, headers, Some(body.clone()))
+            .await;
         assert_eq!(response.status(), StatusCode::OK);
     }
     (
@@ -428,6 +462,26 @@ async fn main() {
         raw_query_bytes as f64 / iterations as f64,
         query_allocations.saturating_sub(raw_query_allocations) as f64 / iterations as f64,
         query_bytes.saturating_sub(raw_query_bytes) as f64 / iterations as f64,
+    );
+
+    let mut json_request_app = App::new();
+    json_request_app.post("/json-request", typed_json_request);
+    let json_request_app = json_request_app.build();
+    let (json_request_elapsed, json_request_allocations, json_request_bytes) =
+        measure_app_with_body(
+            &json_request_app,
+            Method::POST,
+            "/json-request",
+            &[("content-type", "application/json")],
+            Bytes::from_static(br#"{"name":"Ada"}"#),
+            iterations,
+        )
+        .await;
+    println!(
+        "case=json-request iterations={iterations} ns_per_op={:.2} allocations_per_op={:.4} bytes_per_op={:.2}",
+        json_request_elapsed as f64 / iterations as f64,
+        json_request_allocations as f64 / iterations as f64,
+        json_request_bytes as f64 / iterations as f64,
     );
 
     let mut header_app = App::new();
