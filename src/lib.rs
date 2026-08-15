@@ -1074,7 +1074,10 @@ enum HandlerKind<S> {
     Zero(ErasedZeroHandler),
     Typed(ErasedHandler<S>),
     Raw(ErasedRawHandler),
-    Static(StaticResponse),
+    // Static payloads are cold registration data; keep them out of every
+    // route plan's inline layout while retaining a zero-allocation request
+    // path for the static response itself.
+    Static(Box<StaticResponse>),
     Builtin(BuiltinHandler),
 }
 
@@ -1848,7 +1851,7 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
         self.plans.push(RoutePlan {
             capture_mode: CaptureMode::None,
             body_mode: BodyMode::None,
-            handler: HandlerKind::Static(response),
+            handler: HandlerKind::Static(Box::new(response)),
         });
         self.metadata.push(RouteMetadata {
             builtin: false,
@@ -3133,6 +3136,7 @@ mod tests {
     #[test]
     fn capture_names_stay_out_of_hot_route_plans() {
         assert_eq!(size_of::<CaptureMode>(), 1);
+        assert!(size_of::<RoutePlan<()>>() <= 48);
         assert!(size_of::<RouteResolution>() <= 80);
     }
 
