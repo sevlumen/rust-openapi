@@ -1,0 +1,23 @@
+{
+  "summary": {
+    "successRate": 0.6666666666666666,
+    "total": 0.003,
+    "slowest": 0.001,
+    "fastest": 0.0001,
+    "average": 0.0003,
+    "requestsPerSec": 1000.0,
+    "totalData": 6,
+    "sizePerRequest": 2,
+    "sizePerSec": 2000.0
+  },
+  "latencyPercentiles": {
+    "p50": 0.0002,
+    "p95": 0.0008,
+    "p99": 0.0009,
+    "p99.9": 0.001
+  },
+  "statusCodeDistribution": {
+    "200": 2,
+    "500": 1
+  }
+}

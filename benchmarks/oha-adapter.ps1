@@ -135,7 +135,7 @@ function Convert-OhaJsonToSummary {
         summary = [pscustomobject]@{
             requests = $requestCount
             duration_seconds = $totalSeconds
-            success_rate = [double]$summary.successRate
+            success_rate = $expectedCount / $requestCount
             status_codes = $statusCodes
             bytes = [int64]$summary.totalData
         }
