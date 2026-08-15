@@ -1556,15 +1556,24 @@ impl<S: Send + Sync + 'static> App<S> {
         self
     }
 
+    /// Register a handler that receives Hyper's streaming `Incoming` body
+    /// directly. The framework does not collect or size-limit this body; the
+    /// handler owns cancellation and any upload limits.
+    pub fn raw<H>(&mut self, method: Method, path: &str, handler: H) -> &mut Self
+    where
+        H: RawHandler<S>,
+    {
+        self.add_raw_route(method, path, handler);
+        self
+    }
+
     /// Register a GET handler that receives Hyper's streaming `Incoming`
-    /// body directly. The framework does not collect or size-limit this body;
-    /// the handler owns cancellation and any upload limits.
+    /// body directly.
     pub fn raw_get<H>(&mut self, path: &str, handler: H) -> &mut Self
     where
         H: RawHandler<S>,
     {
-        self.add_raw_route(Method::GET, path, handler);
-        self
+        self.raw(Method::GET, path, handler)
     }
 
     pub fn tag(&mut self, tag: impl Into<String>) -> &mut Self {
