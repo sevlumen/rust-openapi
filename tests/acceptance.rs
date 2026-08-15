@@ -3,7 +3,7 @@ use futures_core::Stream;
 use http::{Request, StatusCode};
 use hyper::body::Incoming;
 use oas_rs::{
-    ApiError, ApiSchema, App, FromRequest, Header, HeaderSpec, Json, Method, NoContent,
+    ApiError, ApiSchema, App, BuildError, FromRequest, Header, HeaderSpec, Json, Method, NoContent,
     NotModified, Params, Path, Query, State, StreamResponse,
 };
 use serde::{Deserialize, Serialize, Serializer};
@@ -321,6 +321,7 @@ async fn http_semantics_and_typed_body_header_are_preserved() {
     let mut app = App::new();
     app.get("/plaintext", hello);
     app.post("/echo", echo);
+    app.post("/echo-suffix", echo);
     app.get("/trace", trace);
     app.get("/optional-trace", optional_trace);
     app.get("/optional-strict-trace", optional_strict_trace);
@@ -389,6 +390,16 @@ async fn http_semantics_and_typed_body_header_are_preserved() {
         )
         .await;
     assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let response = app
+        .oneshot(
+            Method::POST,
+            "/echo-suffix",
+            &[("content-type", "application/problem+json; charset=utf-8")],
+            Some(Bytes::from_static(br#"{"name":"Ada"}"#)),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.body_string().await, r#"{"name":"Ada"}"#);
     let response = app
         .oneshot(
             Method::POST,
@@ -613,6 +624,28 @@ fn duplicate_operation_ids_are_rejected_at_registration() {
 fn malformed_route_templates_are_rejected_at_registration() {
     let mut app = App::new();
     app.get("/users/{id", hello);
+}
+
+#[test]
+fn routes_over_capture_limit_fail_during_build() {
+    let mut app = App::new();
+    app.get(
+        "/a/{a}/b/{b}/c/{c}/d/{d}/e/{e}/f/{f}/g/{g}/h/{h}/i/{i}",
+        hello,
+    );
+
+    let error = match app.build() {
+        Ok(_) => panic!("routes over the capture limit must not build"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        BuildError::TooManyCaptures {
+            path: "/a/{a}/b/{b}/c/{c}/d/{d}/e/{e}/f/{f}/g/{g}/h/{h}/i/{i}".to_owned(),
+            captures: 9,
+            max: 8,
+        }
+    );
 }
 
 #[tokio::test]

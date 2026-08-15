@@ -122,17 +122,29 @@ where
             .next()
             .map(str::trim)
             .unwrap_or_default();
-        if !media_type.eq_ignore_ascii_case("application/json") {
+        if !is_json_media_type(media_type) {
             return Err(ApiError::new(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "Unsupported Media Type",
-                "expected application/json",
+                "expected application/json or application/*+json",
             ));
         }
         serde_json::from_slice(body)
             .map(Json)
             .map_err(|error| ApiError::bad_request(error.to_string()))
     }
+}
+
+fn is_json_media_type(media_type: &str) -> bool {
+    if media_type.eq_ignore_ascii_case("application/json") {
+        return true;
+    }
+    let Some((media_type, subtype)) = media_type.split_once('/') else {
+        return false;
+    };
+    media_type.eq_ignore_ascii_case("application")
+        && subtype.len() > b"+json".len()
+        && subtype.as_bytes().ends_with(b"+json")
 }
 
 impl<S: Send + Sync + 'static, T: HeaderSpec> FromRequest<S> for Header<T> {

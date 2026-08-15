@@ -42,12 +42,10 @@ use openapi::SwaggerConfig;
 pub use openapi::SwaggerOptions;
 pub use openapi::{BuildError, OpenApiOptions};
 pub use response::ResponseBody;
-#[doc(hidden)]
-pub use router::ErasedZeroHandler;
 use router::{
     BodyMode, CaptureMode, CaptureProvider, CaptureSet, DynamicCaptures, DynamicRouteTrie,
-    HandlerKind, RouteFailure, RouteId, RouteMetadata, RoutePlan, RouteSet, Segment,
-    StaticCaptures, StaticResponse, resolve_route_set,
+    ErasedZeroHandler, HandlerKind, RouteFailure, RouteId, RouteMetadata, RoutePlan, RouteSet,
+    Segment, StaticCaptures, StaticResponse, resolve_route_set,
 };
 #[cfg(test)]
 use router::{DynamicRouteNode, NodeId};

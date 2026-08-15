@@ -19,8 +19,18 @@ pub(crate) struct SwaggerConfig {
 /// An error raised while compiling the application builder into a runtime.
 #[derive(Debug, PartialEq, Eq)]
 pub enum BuildError {
-    RouteConflict { path: String, method: Method },
-    InvalidGeneratedPath { path: String },
+    RouteConflict {
+        path: String,
+        method: Method,
+    },
+    InvalidGeneratedPath {
+        path: String,
+    },
+    TooManyCaptures {
+        path: String,
+        captures: usize,
+        max: usize,
+    },
 }
 
 impl Display for BuildError {
@@ -32,6 +42,14 @@ impl Display for BuildError {
             Self::InvalidGeneratedPath { path } => {
                 write!(formatter, "generated route must be static: {path}")
             }
+            Self::TooManyCaptures {
+                path,
+                captures,
+                max,
+            } => write!(
+                formatter,
+                "route {path} has {captures} path captures; the maximum is {max}"
+            ),
         }
     }
 }

@@ -11,6 +11,7 @@ pub struct App<S = ()> {
     pub(crate) last_route: Option<usize>,
     pub(crate) openapi_config: Option<OpenApiConfig>,
     pub(crate) openapi_bytes: Option<Bytes>,
+    pub(crate) route_error: Option<BuildError>,
     #[cfg(any(test, feature = "swagger"))]
     pub(crate) swagger_config: Option<SwaggerConfig>,
     #[cfg(any(test, feature = "swagger"))]
@@ -29,6 +30,7 @@ impl App<()> {
             last_route: None,
             openapi_config: None,
             openapi_bytes: None,
+            route_error: None,
             #[cfg(any(test, feature = "swagger"))]
             swagger_config: None,
             #[cfg(any(test, feature = "swagger"))]
@@ -51,6 +53,7 @@ impl App<()> {
             last_route: None,
             openapi_config: self.openapi_config,
             openapi_bytes: self.openapi_bytes,
+            route_error: self.route_error,
             #[cfg(any(test, feature = "swagger"))]
             swagger_config: self.swagger_config,
             #[cfg(any(test, feature = "swagger"))]
@@ -127,6 +130,9 @@ impl<S: Send + Sync + 'static> App<S> {
     /// The returned runtime exposes serving and request execution only; route
     /// registration methods remain available on the builder type.
     pub fn build(mut self) -> Result<AppRuntime<S>, BuildError> {
+        if let Some(error) = self.route_error.take() {
+            return Err(error);
+        }
         self.prepare_openapi();
         #[cfg(any(test, feature = "swagger"))]
         self.prepare_swagger();
@@ -494,6 +500,9 @@ impl<S: Send + Sync + 'static> App<S> {
             "duplicate route"
         );
         let segments = parse_template(&template);
+        if self.record_capture_limit_error(&template, &segments) {
+            return;
+        }
         let capture_names = if H::NEEDS_PARAMS {
             Some(
                 segments
@@ -582,6 +591,9 @@ impl<S: Send + Sync + 'static> App<S> {
             "duplicate route"
         );
         let segments = parse_template(&template);
+        if self.record_capture_limit_error(&template, &segments) {
+            return;
+        }
         let handler = HandlerKind::Raw(Box::new(move |request| handler.call(request)));
         let index = self.plans.len();
         if segments
@@ -618,6 +630,24 @@ impl<S: Send + Sync + 'static> App<S> {
         });
         self.openapi_bytes = None;
         self.last_route = Some(index);
+    }
+
+    fn record_capture_limit_error(&mut self, path: &str, segments: &[Segment]) -> bool {
+        let captures = segments
+            .iter()
+            .filter(|segment| matches!(segment, Segment::Capture(_)))
+            .count();
+        if captures <= MAX_CAPTURE_PARAMS {
+            return false;
+        }
+        if self.route_error.is_none() {
+            self.route_error = Some(BuildError::TooManyCaptures {
+                path: path.to_owned(),
+                captures,
+                max: MAX_CAPTURE_PARAMS,
+            });
+        }
+        true
     }
 
     fn prepare_openapi(&mut self) {
