@@ -2582,6 +2582,23 @@ mod tests {
     }
 
     #[test]
+    fn route_plans_precompute_body_modes() {
+        let mut app = App::new();
+        app.get("/plain", || async { "OK" });
+        app.post("/json", |Json(body): Json<String>| async move { body });
+        app.raw_get("/upload", |_request| async { "OK" });
+
+        assert!(matches!(app.plans[0].body_mode, BodyMode::None));
+        assert!(matches!(
+            app.plans[1].body_mode,
+            BodyMode::Buffered {
+                limit: DEFAULT_MAX_BODY_SIZE
+            }
+        ));
+        assert!(matches!(app.plans[2].body_mode, BodyMode::Incoming));
+    }
+
+    #[test]
     fn dynamic_routes_use_a_compiled_method_trie() {
         let mut app = App::new();
         for index in 0..10_000 {
