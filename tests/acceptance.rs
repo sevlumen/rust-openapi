@@ -635,7 +635,10 @@ async fn static_response_routes_return_prebuilt_bytes_and_headers() {
 
     let response = app.oneshot(Method::GET, "/health", &[], None).await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.header("content-type"), Some("text/plain; charset=utf-8"));
+    assert_eq!(
+        response.header("content-type"),
+        Some("text/plain; charset=utf-8")
+    );
     assert_eq!(response.header("content-length"), Some("2"));
     assert_eq!(response.body_string().await, "OK");
 
