@@ -48,3 +48,17 @@ jobs:
 
       - name: Build benchmark images
         run: docker compose -f benchmarks/docker-compose.yml build
+
+  miri-inline-future:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust and Miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Check pinned inline future with Miri
+        run: cargo miri test --lib inline_future_preserves_pinned_application_future -- --exact
