@@ -199,12 +199,14 @@ struct CaptureRange {
 /// URI, while the explicit `Params` extractor opts into owned decoded values.
 #[derive(Clone, Debug)]
 pub struct Params {
-    ranges: [Option<CaptureRange>; MAX_CAPTURE_PARAMS],
+    packed: [u64; MAX_CAPTURE_PARAMS],
+    count: u8,
     owned: Option<Vec<(String, String)>>,
 }
 
 static EMPTY_PARAMS: Params = Params {
-    ranges: [None; MAX_CAPTURE_PARAMS],
+    packed: [0; MAX_CAPTURE_PARAMS],
+    count: 0,
     owned: None,
 };
 
@@ -222,34 +224,43 @@ impl Params {
     }
 
     fn first_raw<'a>(&self, path: &'a str) -> Option<&'a str> {
-        self.ranges[0].map(|range| &path[range.start..range.end])
+        self.range(0).map(|range| &path[range.start..range.end])
     }
 
-    fn from_match(
-        names: &[String],
-        ranges: [Option<CaptureRange>; MAX_CAPTURE_PARAMS],
-        count: usize,
-        path: &str,
-        materialize: bool,
-    ) -> Self {
+    fn range(&self, index: usize) -> Option<CaptureRange> {
+        (index < self.count as usize).then(|| {
+            let packed = self.packed[index];
+            CaptureRange {
+                start: (packed >> 32) as usize,
+                end: packed as u32 as usize,
+            }
+        })
+    }
+
+    fn from_match(names: &[String], captures: CaptureSet, path: &str, materialize: bool) -> Self {
         let owned = materialize.then(|| {
-            let mut values = Vec::with_capacity(count);
+            let mut values = Vec::with_capacity(captures.count as usize);
             for (index, name) in names.iter().enumerate() {
-                let range = ranges[index].expect("capture range exists");
+                let range = captures.range(index).expect("capture range exists");
                 let value = percent_decode(&path[range.start..range.end])
                     .expect("route matching validates percent encoding");
                 values.push((name.clone(), value));
             }
             values
         });
-        Self { ranges, owned }
+        Self {
+            packed: captures.packed,
+            count: captures.count,
+            owned,
+        }
     }
 }
 
 impl Default for Params {
     fn default() -> Self {
         Self {
-            ranges: [None; MAX_CAPTURE_PARAMS],
+            packed: [0; MAX_CAPTURE_PARAMS],
+            count: 0,
             owned: None,
         }
     }
@@ -1280,20 +1291,14 @@ impl CaptureSet {
         }
     }
 
-    fn ranges(self) -> [Option<CaptureRange>; MAX_CAPTURE_PARAMS] {
-        let mut ranges = [None; MAX_CAPTURE_PARAMS];
-        for (index, packed) in self
-            .packed
-            .into_iter()
-            .take(self.count as usize)
-            .enumerate()
-        {
-            ranges[index] = Some(CaptureRange {
+    fn range(self, index: usize) -> Option<CaptureRange> {
+        (index < self.count as usize).then(|| {
+            let packed = self.packed[index];
+            CaptureRange {
                 start: (packed >> 32) as usize,
                 end: packed as u32 as usize,
-            });
-        }
-        ranges
+            }
+        })
     }
 }
 
@@ -2234,23 +2239,11 @@ impl<S: Send + Sync + 'static> App<S> {
         let response = match &plan.capture_mode {
             CaptureMode::None => self.invoke_typed(&mut request, Params::empty(), plan).await,
             CaptureMode::Borrowed => {
-                let params = Params::from_match(
-                    &[],
-                    resolved.captures.ranges(),
-                    resolved.captures.count as usize,
-                    path,
-                    false,
-                );
+                let params = Params::from_match(&[], resolved.captures, path, false);
                 self.invoke_typed(&mut request, &params, plan).await
             }
             CaptureMode::Materialized(names) => {
-                let params = Params::from_match(
-                    names,
-                    resolved.captures.ranges(),
-                    resolved.captures.count as usize,
-                    path,
-                    true,
-                );
+                let params = Params::from_match(names, resolved.captures, path, true);
                 self.invoke_typed(&mut request, &params, plan).await
             }
         };
@@ -2436,23 +2429,13 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
                                 handler(&mut request, Params::empty(), router.state)
                             }
                             CaptureMode::Borrowed => {
-                                let params = Params::from_match(
-                                    &[],
-                                    resolved.captures.ranges(),
-                                    resolved.captures.count as usize,
-                                    path,
-                                    false,
-                                );
+                                let params =
+                                    Params::from_match(&[], resolved.captures, path, false);
                                 handler(&mut request, &params, router.state)
                             }
                             CaptureMode::Materialized(names) => {
-                                let params = Params::from_match(
-                                    names,
-                                    resolved.captures.ranges(),
-                                    resolved.captures.count as usize,
-                                    path,
-                                    true,
-                                );
+                                let params =
+                                    Params::from_match(names, resolved.captures, path, true);
                                 handler(&mut request, &params, router.state)
                             }
                         };
@@ -2724,23 +2707,11 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
         let response = match &plan.capture_mode {
             CaptureMode::None => self.invoke_typed(&mut request, Params::empty(), plan).await,
             CaptureMode::Borrowed => {
-                let params = Params::from_match(
-                    &[],
-                    resolved.captures.ranges(),
-                    resolved.captures.count as usize,
-                    path,
-                    false,
-                );
+                let params = Params::from_match(&[], resolved.captures, path, false);
                 self.invoke_typed(&mut request, &params, plan).await
             }
             CaptureMode::Materialized(names) => {
-                let params = Params::from_match(
-                    names,
-                    resolved.captures.ranges(),
-                    resolved.captures.count as usize,
-                    path,
-                    true,
-                );
+                let params = Params::from_match(names, resolved.captures, path, true);
                 self.invoke_typed(&mut request, &params, plan).await
             }
         };
