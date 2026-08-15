@@ -1,0 +1,12 @@
+commit=fd6648f
+timestamp=20260815-123921
+os=Microsoft Windows NT 10.0.26200.0
+processor=AMD Ryzen 7 5700X 8-Core Processor             
+logical_processors=16
+oha=oha 1.15.0
+requests=1000000
+connections=256
+warmup_requests=10000
+runs=3
+cases=users,users-static
+implementations=raw,oas
