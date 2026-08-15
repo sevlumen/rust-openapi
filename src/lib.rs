@@ -1153,10 +1153,11 @@ enum CaptureMode {
     Materialized,
 }
 
+#[repr(u8)]
 #[derive(Clone, Copy)]
 enum BodyMode {
     None,
-    Buffered { limit: usize },
+    Buffered,
     Incoming,
 }
 
@@ -1944,9 +1945,7 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
         self.plans.push(RoutePlan {
             capture_mode,
             body_mode: if H::NEEDS_BODY {
-                BodyMode::Buffered {
-                    limit: DEFAULT_MAX_BODY_SIZE,
-                }
+                BodyMode::Buffered
             } else {
                 BodyMode::None
             },
@@ -2327,7 +2326,8 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
                 }
                 HandlerKind::Raw(_) => unreachable!("raw handler requires Incoming"),
             },
-            BodyMode::Buffered { limit } => {
+            BodyMode::Buffered => {
+                let limit = DEFAULT_MAX_BODY_SIZE;
                 let runtime = Arc::clone(&self.runtime);
                 let (parts, body) = request.into_parts();
                 let too_large = parts
@@ -3094,12 +3094,7 @@ mod tests {
         app.raw_get("/upload", |_request| async { "OK" });
 
         assert!(matches!(app.plans[0].body_mode, BodyMode::None));
-        assert!(matches!(
-            app.plans[1].body_mode,
-            BodyMode::Buffered {
-                limit: DEFAULT_MAX_BODY_SIZE
-            }
-        ));
+        assert!(matches!(app.plans[1].body_mode, BodyMode::Buffered));
         assert!(matches!(app.plans[2].body_mode, BodyMode::Incoming));
     }
 
@@ -3142,11 +3137,13 @@ mod tests {
     #[test]
     fn report_hot_path_layout_sizes() {
         println!(
-            "HandlerFuture={} InlineFuture={} Params={} CaptureMode={} RoutePlan={} RouteMetadata={} RouteSet={} RouteResolution={}",
+            "HandlerFuture={} InlineFuture={} Params={} CaptureMode={} BodyMode={} HandlerKind={} RoutePlan={} RouteMetadata={} RouteSet={} RouteResolution={}",
             size_of::<HandlerFuture>(),
             size_of::<InlineFuture>(),
             size_of::<Params>(),
             size_of::<CaptureMode>(),
+            size_of::<BodyMode>(),
+            size_of::<HandlerKind<()>>(),
             size_of::<RoutePlan<()>>(),
             size_of::<RouteMetadata>(),
             size_of::<RouteSet>(),
@@ -3157,7 +3154,7 @@ mod tests {
     #[test]
     fn capture_names_stay_out_of_hot_route_plans() {
         assert_eq!(size_of::<CaptureMode>(), 1);
-        assert!(size_of::<RoutePlan<()>>() <= 48);
+        assert!(size_of::<RoutePlan<()>>() <= 32);
         assert!(size_of::<RouteResolution>() <= 80);
     }
 
