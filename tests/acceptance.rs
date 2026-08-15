@@ -263,6 +263,17 @@ async fn handler_supports_eight_extractors() {
 }
 
 #[tokio::test]
+async fn build_freezes_routes_into_an_immutable_runtime() {
+    let mut app = App::new();
+    app.get("/frozen", hello);
+    let runtime = app.build();
+
+    let response = runtime.oneshot(Method::GET, "/frozen", &[], None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.body_string().await, "OK");
+}
+
+#[tokio::test]
 async fn http_semantics_and_typed_body_header_are_preserved() {
     let mut app = App::new();
     app.get("/plaintext", hello);
