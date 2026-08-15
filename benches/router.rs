@@ -56,7 +56,7 @@ async fn typed_uuid(Path(_id): Path<Uuid>) -> &'static str {
     "OK"
 }
 
-#[derive(Deserialize, oas_rs::OpenApi)]
+#[derive(Deserialize, oas_rs::ApiSchema)]
 struct BenchQuery {
     page: u32,
     active: bool,
@@ -67,7 +67,7 @@ async fn typed_query(Query(query): Query<BenchQuery>) -> &'static str {
     "OK"
 }
 
-#[derive(Deserialize, oas_rs::OpenApi)]
+#[derive(Deserialize, oas_rs::ApiSchema)]
 struct BenchJsonRequest {
     name: String,
 }
@@ -170,13 +170,14 @@ async fn main() {
     let app = {
         let mut app = App::new();
         app.get("/plaintext", plaintext);
-        app.build()
+        app.build().expect("benchmark app builds")
     };
     let openapi_app = {
         let mut app = App::new();
         app.get("/plaintext", plaintext);
-        app.openapi("/openapi.json").swagger("/swagger");
-        app.build()
+        app.openapi();
+        app.swagger().path("/swagger");
+        app.build().expect("benchmark app builds")
     };
     let iterations = std::env::var("OAS_BENCH_ITERATIONS")
         .ok()
@@ -185,7 +186,7 @@ async fn main() {
     if std::env::var("OAS_BENCH_CASE").ok().as_deref() == Some("static-text") {
         let mut app = App::new();
         app.static_text("/health", "OK");
-        let app = app.build();
+        let app = app.build().expect("benchmark app builds");
         let (elapsed, allocations, bytes) =
             measure_app(&app, Method::GET, "/health", &[], iterations).await;
         println!(
@@ -199,7 +200,7 @@ async fn main() {
     if std::env::var("OAS_BENCH_CASE").ok().as_deref() == Some("static-json") {
         let mut app = App::new();
         app.static_json("/version", Bytes::from_static(br#"{"version":"0.1.0"}"#));
-        let app = app.build();
+        let app = app.build().expect("benchmark app builds");
         let (elapsed, allocations, bytes) =
             measure_app(&app, Method::GET, "/version", &[], iterations).await;
         println!(
@@ -215,7 +216,7 @@ async fn main() {
         app.get("/json", || async {
             JsonBytes::new(Bytes::from_static(br#"{"status":"ok"}"#))
         });
-        let app = app.build();
+        let app = app.build().expect("benchmark app builds");
         let (elapsed, allocations, bytes) =
             measure_app(&app, Method::GET, "/json", &[], iterations).await;
         println!(
@@ -229,7 +230,7 @@ async fn main() {
     if std::env::var("OAS_BENCH_CASE").ok().as_deref() == Some("dynamic-header") {
         let mut app = App::new();
         app.get("/trace/{id}", typed_header);
-        let app = app.build();
+        let app = app.build().expect("benchmark app builds");
         let (elapsed, allocations, bytes) = measure_app(
             &app,
             Method::GET,
@@ -249,7 +250,7 @@ async fn main() {
     if std::env::var("OAS_BENCH_CASE").ok().as_deref() == Some("multi-extractor") {
         let mut app = App::new();
         app.get("/multi/{id}", typed_multi);
-        let app = app.build();
+        let app = app.build().expect("benchmark app builds");
         let (elapsed, allocations, bytes) = measure_app(
             &app,
             Method::GET,
@@ -324,7 +325,7 @@ async fn main() {
     if std::env::var("OAS_BENCH_CASE").ok().as_deref() == Some("query") {
         let mut app = App::new();
         app.get("/search", typed_query);
-        let app = app.build();
+        let app = app.build().expect("benchmark app builds");
         let (elapsed, allocations, bytes) = measure_app(
             &app,
             Method::GET,
@@ -344,7 +345,7 @@ async fn main() {
     if std::env::var("OAS_BENCH_CASE").ok().as_deref() == Some("path") {
         let mut app = App::new();
         app.get("/users/{id}", typed_path);
-        let app = app.build();
+        let app = app.build().expect("benchmark app builds");
         let (elapsed, allocations, bytes) =
             measure_app(&app, Method::GET, "/users/123456", &[], iterations).await;
         println!(
@@ -358,7 +359,7 @@ async fn main() {
     if std::env::var("OAS_BENCH_CASE").ok().as_deref() == Some("params") {
         let mut app = App::new();
         app.get("/params/{org}/{user}", typed_params);
-        let app = app.build();
+        let app = app.build().expect("benchmark app builds");
         let (elapsed, allocations, bytes) =
             measure_app(&app, Method::GET, "/params/acme/alice", &[], iterations).await;
         println!(
@@ -432,7 +433,7 @@ async fn main() {
 
     let mut static_text_app = App::new();
     static_text_app.static_text("/health", "OK");
-    let static_text_app = static_text_app.build();
+    let static_text_app = static_text_app.build().expect("benchmark app builds");
     let (static_text_elapsed, static_text_allocations, static_text_bytes) =
         measure_app(&static_text_app, Method::GET, "/health", &[], iterations).await;
     println!(
@@ -444,7 +445,7 @@ async fn main() {
 
     let mut static_json_app = App::new();
     static_json_app.static_json("/version", Bytes::from_static(br#"{"version":"0.1.0"}"#));
-    let static_json_app = static_json_app.build();
+    let static_json_app = static_json_app.build().expect("benchmark app builds");
     let (static_json_elapsed, static_json_allocations, static_json_bytes) =
         measure_app(&static_json_app, Method::GET, "/version", &[], iterations).await;
     println!(
@@ -458,7 +459,7 @@ async fn main() {
     json_bytes_app.get("/json", || async {
         JsonBytes::new(Bytes::from_static(br#"{"status":"ok"}"#))
     });
-    let json_bytes_app = json_bytes_app.build();
+    let json_bytes_app = json_bytes_app.build().expect("benchmark app builds");
     let (json_bytes_elapsed, json_bytes_allocations, json_bytes_bytes) =
         measure_app(&json_bytes_app, Method::GET, "/json", &[], iterations).await;
     println!(
@@ -470,7 +471,7 @@ async fn main() {
 
     let mut path_app = App::new();
     path_app.get("/users/{id}", typed_path);
-    let path_app = path_app.build();
+    let path_app = path_app.build().expect("benchmark app builds");
     let (path_elapsed, path_allocations, path_bytes) =
         measure_app(&path_app, Method::GET, "/users/123456", &[], iterations).await;
     ALLOCATIONS.store(0, Ordering::Relaxed);
@@ -515,7 +516,7 @@ async fn main() {
 
     let mut params_app = App::new();
     params_app.get("/params/{org}/{user}", typed_params);
-    let params_app = params_app.build();
+    let params_app = params_app.build().expect("benchmark app builds");
     let params_path = "/params/acme/alice";
     let (params_elapsed, params_allocations, params_bytes) =
         measure_app(&params_app, Method::GET, params_path, &[], iterations).await;
@@ -559,7 +560,7 @@ async fn main() {
 
     let mut uuid_app = App::new();
     uuid_app.get("/users/{id}", typed_uuid);
-    let uuid_app = uuid_app.build();
+    let uuid_app = uuid_app.build().expect("benchmark app builds");
     let uuid_path = "/users/550e8400-e29b-41d4-a716-446655440000";
     let (uuid_elapsed, uuid_allocations, uuid_bytes) =
         measure_app(&uuid_app, Method::GET, uuid_path, &[], iterations).await;
@@ -605,7 +606,7 @@ async fn main() {
 
     let mut query_app = App::new();
     query_app.get("/search", typed_query);
-    let query_app = query_app.build();
+    let query_app = query_app.build().expect("benchmark app builds");
     let (query_elapsed, query_allocations, query_bytes) = measure_app(
         &query_app,
         Method::GET,
@@ -662,7 +663,7 @@ async fn main() {
 
     let mut json_request_app = App::new();
     json_request_app.post("/json-request", typed_json_request);
-    let json_request_app = json_request_app.build();
+    let json_request_app = json_request_app.build().expect("benchmark app builds");
     let (json_request_elapsed, json_request_allocations, json_request_bytes) =
         measure_app_with_body(
             &json_request_app,
@@ -682,7 +683,7 @@ async fn main() {
 
     let mut header_app = App::new();
     header_app.get("/trace", typed_header);
-    let header_app = header_app.build();
+    let header_app = header_app.build().expect("benchmark app builds");
     let (header_elapsed, header_allocations, header_bytes) = measure_app(
         &header_app,
         Method::GET,
@@ -732,7 +733,7 @@ async fn main() {
 
     let mut dynamic_header_app = App::new();
     dynamic_header_app.get("/trace/{id}", typed_header);
-    let dynamic_header_app = dynamic_header_app.build();
+    let dynamic_header_app = dynamic_header_app.build().expect("benchmark app builds");
     let (dynamic_header_elapsed, dynamic_header_allocations, dynamic_header_bytes) = measure_app(
         &dynamic_header_app,
         Method::GET,
@@ -758,7 +759,7 @@ async fn main() {
             route_app.get(&path, plaintext);
             raw_routes.insert(path, vec![Method::GET]);
         }
-        let route_app = route_app.build();
+        let route_app = route_app.build().expect("benchmark app builds");
 
         ALLOCATIONS.store(0, Ordering::Relaxed);
         ALLOCATED_BYTES.store(0, Ordering::Relaxed);
@@ -808,7 +809,7 @@ async fn main() {
             let path = format!("/dynamic/{index}/{{id}}");
             dynamic_app.get(&path, typed_path);
         }
-        let dynamic_app = dynamic_app.build();
+        let dynamic_app = dynamic_app.build().expect("benchmark app builds");
         for (position, target) in [
             ("first", "/dynamic/0/42".to_owned()),
             ("middle", format!("/dynamic/{}/42", route_count / 2)),

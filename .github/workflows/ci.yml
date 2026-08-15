@@ -26,28 +26,16 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run tests
-        run: cargo test --workspace --all-targets
+        run: cargo test --workspace --all-targets --features "uuid test-util swagger"
 
       - name: Run doctests
         run: cargo test --doc --workspace
 
       - name: Build examples
-        run: cargo build --workspace --examples
+        run: cargo build --workspace --examples --features "uuid swagger"
 
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-
-      - name: Test benchmark harness guards
-        shell: pwsh
-        run: |
-          pwsh -File ./benchmarks/tests/test-oha-adapter.ps1
-          pwsh -File ./benchmarks/tests/test-matrix-guard.ps1
-
-      - name: Validate benchmark topology
-        run: docker compose -f benchmarks/docker-compose.yml config --quiet
-
-      - name: Build benchmark images
-        run: docker compose -f benchmarks/docker-compose.yml build
 
   miri-inline-future:
     runs-on: ubuntu-latest

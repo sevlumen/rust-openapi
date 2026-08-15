@@ -1,5 +1,0 @@
-REPORT.md
-environment.md
-src/lib.rs: HeaderSpec::HEADER_NAME and is_head dispatch changes
-command: cargo bench --bench router
-env: OAS_BENCH_ITERATIONS=1000000 OAS_DYNAMIC_ITERATIONS=100

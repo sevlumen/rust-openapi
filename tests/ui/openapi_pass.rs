@@ -1,6 +1,6 @@
-use oas_rs::OpenApi;
+use oas_rs::ApiSchema;
 
-#[derive(OpenApi)]
+#[derive(ApiSchema)]
 struct UserQuery {
     page: u32,
     active: bool,
@@ -9,5 +9,5 @@ struct UserQuery {
 
 fn main() {
     let _ = <UserQuery as oas_rs::OpenApiQuery>::parameters();
-    let _ = <UserQuery as oas_rs::OpenApiSchema>::schema();
+    let _ = <UserQuery as oas_rs::ApiSchema>::schema();
 }

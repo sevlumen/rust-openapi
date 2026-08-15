@@ -8,13 +8,15 @@ license = "MIT"
 [workspace]
 members = [".", "oas-rs-macros"]
 
+[features]
+default = []
+uuid = ["dep:uuid"]
+test-util = []
+swagger = []
+
 [lib]
 name = "oas_rs"
 path = "src/lib.rs"
-
-[[bin]]
-name = "oas-bench-server"
-path = "src/bin/oas-bench-server.rs"
 
 [dependencies]
 bytes = "1.10"
@@ -26,10 +28,9 @@ hyper = { version = "1.6", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.45", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-postgres = "0.7"
+tokio = { version = "1.45", features = ["macros", "net", "rt-multi-thread"] }
 oas-rs-macros = { path = "oas-rs-macros" }
-uuid = { version = "1.17", features = ["serde", "v4"] }
+uuid = { version = "1.17", optional = true, features = ["serde", "v4"] }
 
 [profile.release]
 opt-level = 3
@@ -40,7 +41,26 @@ strip = true
 
 [dev-dependencies]
 trybuild = "1.0"
+uuid = { version = "1.17", features = ["serde", "v4"] }
+tokio = { version = "1.45", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 
 [[bench]]
 name = "router"
 harness = false
+required-features = ["uuid", "test-util", "swagger"]
+
+[[test]]
+name = "acceptance"
+required-features = ["uuid", "test-util", "swagger"]
+
+[[test]]
+name = "fuzz_smoke"
+required-features = ["test-util"]
+
+[[example]]
+name = "hello"
+required-features = ["swagger"]
+
+[[example]]
+name = "users-api"
+required-features = ["uuid", "swagger"]

@@ -3,8 +3,8 @@ use futures_core::Stream;
 use http::{Request, StatusCode};
 use hyper::body::Incoming;
 use oas_rs::{
-    ApiError, App, FromRequest, Header, HeaderSpec, Json, Method, NoContent, NotModified,
-    OpenApiSchema, Params, Path, Query, State, StreamResponse,
+    ApiError, ApiSchema, App, FromRequest, Header, HeaderSpec, Json, Method, NoContent,
+    NotModified, Params, Path, Query, State, StreamResponse,
 };
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::json;
@@ -25,13 +25,13 @@ use uuid::Uuid;
 #[derive(Clone, Default)]
 struct TestState;
 
-#[derive(Deserialize, oas_rs::OpenApi)]
+#[derive(Deserialize, oas_rs::ApiSchema)]
 struct Search {
     page: u32,
     active: bool,
 }
 
-#[derive(Deserialize, Serialize, PartialEq, Debug, oas_rs::OpenApi)]
+#[derive(Deserialize, Serialize, PartialEq, Debug, oas_rs::ApiSchema)]
 struct Payload {
     name: String,
 }
@@ -208,7 +208,7 @@ impl Serialize for FailingSerialize {
     }
 }
 
-impl OpenApiSchema for FailingSerialize {
+impl ApiSchema for FailingSerialize {
     fn schema() -> serde_json::Value {
         json!({"type": "object"})
     }
@@ -309,7 +309,7 @@ async fn handler_supports_eight_extractors() {
 async fn build_freezes_routes_into_an_immutable_runtime() {
     let mut app = App::new();
     app.get("/frozen", hello);
-    let runtime = app.build();
+    let runtime = app.build().expect("test app builds");
 
     let response = runtime.oneshot(Method::GET, "/frozen", &[], None).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -327,7 +327,8 @@ async fn http_semantics_and_typed_body_header_are_preserved() {
     app.post("/optional-json", optional_json);
     app.get("/never-stream", never_stream);
     app.get("/failing-created", failing_created);
-    app.openapi("/openapi.json").swagger("/swagger");
+    app.openapi();
+    app.swagger().path("/swagger");
 
     let response = app.oneshot(Method::HEAD, "/plaintext", &[], None).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -517,7 +518,8 @@ fn openapi_describes_registered_operations() {
 async fn swagger_uses_configured_openapi_path() {
     let mut app = App::new();
     app.get("/plaintext", hello);
-    app.openapi("/spec.json").swagger("/swagger");
+    app.openapi().path("/spec.json");
+    app.swagger().path("/swagger");
     let response = app.oneshot(Method::GET, "/swagger", &[], None).await;
     let body = response.body_string().await;
     assert!(body.contains("SwaggerUIBundle"));
@@ -812,9 +814,12 @@ async fn tcp_server_supports_keep_alive_and_connection_close() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let server = tokio::spawn(app.serve_listener(listener, async move {
-        let _ = shutdown_rx.await;
-    }));
+    let server = tokio::spawn(app.build().expect("test app builds").serve_listener(
+        listener,
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
 
     let mut stream = TcpStream::connect(address).await.unwrap();
     stream
@@ -861,9 +866,12 @@ async fn interrupted_request_body_does_not_dispatch_handler() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let server = tokio::spawn(app.serve_listener(listener, async move {
-        let _ = shutdown_rx.await;
-    }));
+    let server = tokio::spawn(app.build().expect("test app builds").serve_listener(
+        listener,
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
 
     let mut stream = TcpStream::connect(address).await.unwrap();
     stream
@@ -888,9 +896,12 @@ async fn bodyless_route_does_not_wait_for_request_body() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let server = tokio::spawn(app.serve_listener(listener, async move {
-        let _ = shutdown_rx.await;
-    }));
+    let server = tokio::spawn(app.build().expect("test app builds").serve_listener(
+        listener,
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
 
     let mut stream = TcpStream::connect(address).await.unwrap();
     stream
@@ -928,9 +939,12 @@ async fn raw_route_receives_incoming_without_collecting_request_body() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let server = tokio::spawn(app.serve_listener(listener, async move {
-        let _ = shutdown_rx.await;
-    }));
+    let server = tokio::spawn(app.build().expect("test app builds").serve_listener(
+        listener,
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
 
     let mut stream = TcpStream::connect(address).await.unwrap();
     stream

@@ -2,11 +2,13 @@
 
 Typed HTTP routing on Hyper + Tokio with startup-generated OpenAPI 3.1 metadata.
 
+UUID schema support is available through the optional `uuid` feature.
+
 ```rust
-use oas_rs::{App, Json, OpenApi, Path};
+use oas_rs::{ApiSchema, App, Json, Path};
 use uuid::Uuid;
 
-#[derive(serde::Serialize, OpenApi)]
+#[derive(serde::Serialize, ApiSchema)]
 struct User { id: Uuid }
 
 async fn get_user(Path(id): Path<Uuid>) -> Json<User> {
@@ -15,10 +17,11 @@ async fn get_user(Path(id): Path<Uuid>) -> Json<User> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut app = App::new().title("Users API").version("1.0.0");
+    let mut app = App::new();
+    app.openapi().title("Users API").version("1.0.0");
     app.get("/users/{id}", get_user).tag("Users").summary("Get user");
-    app.openapi("/openapi.json").swagger("/swagger");
-    app.listen("0.0.0.0:8080").await
+    app.swagger().path("/swagger");
+    app.build()?.listen("0.0.0.0:8080").await
 }
 ```
 
@@ -32,15 +35,12 @@ cargo test --doc --workspace
 cargo build --workspace --examples
 ```
 
-Docker benchmark smoke:
+The framework repository keeps correctness checks and the router microbenchmark;
+the HTTP load-test laboratory is maintained separately.
 
 ```powershell
-./benchmarks/run-benchmark.ps1 -Iterations 10000 -Runs 1 -Vus 32 -Version smoke
+cargo bench --bench router
 ```
-
-Use the default arguments for the release matrix. Reports remain `INCONCLUSIVE`
-until the acceptance plan's seven paired runs, baseline CV and confidence bounds
-are available.
 
 The release-profile router microbench also checks static route counts at
 1/10/100/1,000/10,000 routes and asserts zero extra allocations/bytes for

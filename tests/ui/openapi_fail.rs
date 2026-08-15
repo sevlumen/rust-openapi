@@ -1,6 +1,6 @@
-use oas_rs::OpenApi;
+use oas_rs::ApiSchema;
 
-#[derive(OpenApi)]
+#[derive(ApiSchema)]
 struct TupleShape(u64);
 
 fn main() {}

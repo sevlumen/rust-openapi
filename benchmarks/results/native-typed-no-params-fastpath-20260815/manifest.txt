@@ -1,7 +1,0 @@
-REPORT.md
-environment.md
-source: src/lib.rs
-benchmark: benches/router.rs
-command: cargo bench --bench router
-environment: OAS_BENCH_CASE=dynamic-header OAS_BENCH_ITERATIONS=2000000
-variants: baseline Typed; candidate TypedNoParams

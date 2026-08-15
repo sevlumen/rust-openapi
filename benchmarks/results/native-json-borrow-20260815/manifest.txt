@@ -1,6 +1,0 @@
-REPORT.md
-environment.md
-src/lib.rs: Json<T>::from_request borrowed body
-benches/router.rs: case=json-request and measure_app_with_body
-command: cargo bench --bench router
-env: OAS_BENCH_ITERATIONS=1000000 OAS_DYNAMIC_ITERATIONS=10
