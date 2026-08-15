@@ -2613,6 +2613,21 @@ mod tests {
     }
 
     #[test]
+    fn raw_routes_support_explicit_methods() {
+        let mut app = App::new();
+        app.raw(Method::POST, "/upload", |_request| async { "OK" });
+
+        let resolved = match app.resolve_route(&Method::POST, "/upload") {
+            RouteResolution::Matched(resolved) => resolved,
+            _ => panic!("raw POST route did not resolve"),
+        };
+        assert!(matches!(
+            app.plans[resolved.index].handler,
+            HandlerKind::Raw(_)
+        ));
+    }
+
+    #[test]
     fn dynamic_routes_use_a_compiled_method_trie() {
         let mut app = App::new();
         for index in 0..10_000 {
