@@ -2259,43 +2259,37 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
                     unreachable!("only raw handlers may receive Incoming")
                 }
             },
-            BodyMode::None => {
-                let (parts, _) = request.into_parts();
-                let mut request = Request::from_parts(parts, Bytes::new());
-                match &plan.handler {
-                    HandlerKind::Zero(handler) => PreparedDispatch::Handler {
-                        method,
-                        future: handler(),
-                    },
-                    HandlerKind::Static(response) => {
-                        PreparedDispatch::Ready(Some(maybe_head(&method, response.to_response())))
-                    }
-                    HandlerKind::Builtin(builtin) => PreparedDispatch::Ready(Some(maybe_head(
-                        &method,
-                        router.builtin_response(*builtin),
-                    ))),
-                    HandlerKind::Typed(handler) => {
-                        let path = normalize_request_path(request.uri().path());
-                        let future = match &plan.capture_mode {
-                            CaptureMode::None => {
-                                handler(&mut request, Params::empty(), router.state)
-                            }
-                            CaptureMode::Borrowed => {
-                                let params =
-                                    Params::from_match(&[], resolved.captures(), path, false);
-                                handler(&mut request, &params, router.state)
-                            }
-                            CaptureMode::Materialized(names) => {
-                                let params =
-                                    Params::from_match(names, resolved.captures(), path, true);
-                                handler(&mut request, &params, router.state)
-                            }
-                        };
-                        PreparedDispatch::Handler { method, future }
-                    }
-                    HandlerKind::Raw(_) => unreachable!("raw handler requires Incoming"),
+            BodyMode::None => match &plan.handler {
+                HandlerKind::Zero(handler) => PreparedDispatch::Handler {
+                    method,
+                    future: handler(),
+                },
+                HandlerKind::Static(response) => {
+                    PreparedDispatch::Ready(Some(maybe_head(&method, response.to_response())))
                 }
-            }
+                HandlerKind::Builtin(builtin) => PreparedDispatch::Ready(Some(maybe_head(
+                    &method,
+                    router.builtin_response(*builtin),
+                ))),
+                HandlerKind::Typed(handler) => {
+                    let (parts, _) = request.into_parts();
+                    let mut request = Request::from_parts(parts, Bytes::new());
+                    let path = normalize_request_path(request.uri().path());
+                    let future = match &plan.capture_mode {
+                        CaptureMode::None => handler(&mut request, Params::empty(), router.state),
+                        CaptureMode::Borrowed => {
+                            let params = Params::from_match(&[], resolved.captures(), path, false);
+                            handler(&mut request, &params, router.state)
+                        }
+                        CaptureMode::Materialized(names) => {
+                            let params = Params::from_match(names, resolved.captures(), path, true);
+                            handler(&mut request, &params, router.state)
+                        }
+                    };
+                    PreparedDispatch::Handler { method, future }
+                }
+                HandlerKind::Raw(_) => unreachable!("raw handler requires Incoming"),
+            },
             BodyMode::Buffered { limit } => {
                 let runtime = Arc::clone(&self.runtime);
                 let (parts, body) = request.into_parts();
