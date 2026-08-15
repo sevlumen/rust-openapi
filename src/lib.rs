@@ -1708,7 +1708,7 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
 
     pub fn get<H, A>(&mut self, path: &str, handler: H) -> &mut Self
     where
-        H: Clone + Handler<S, A>,
+        H: Handler<S, A>,
     {
         self.add_route(Method::GET, path, handler);
         self
@@ -1735,7 +1735,7 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
 
     pub fn head<H, A>(&mut self, path: &str, handler: H) -> &mut Self
     where
-        H: Clone + Handler<S, A>,
+        H: Handler<S, A>,
     {
         self.add_route(Method::HEAD, path, handler);
         self
@@ -1743,7 +1743,7 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
 
     pub fn post<H, A>(&mut self, path: &str, handler: H) -> &mut Self
     where
-        H: Clone + Handler<S, A>,
+        H: Handler<S, A>,
     {
         self.add_route(Method::POST, path, handler);
         self
@@ -1751,7 +1751,7 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
 
     pub fn put<H, A>(&mut self, path: &str, handler: H) -> &mut Self
     where
-        H: Clone + Handler<S, A>,
+        H: Handler<S, A>,
     {
         self.add_route(Method::PUT, path, handler);
         self
@@ -1759,7 +1759,7 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
 
     pub fn patch<H, A>(&mut self, path: &str, handler: H) -> &mut Self
     where
-        H: Clone + Handler<S, A>,
+        H: Handler<S, A>,
     {
         self.add_route(Method::PATCH, path, handler);
         self
@@ -1767,7 +1767,7 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
 
     pub fn delete<H, A>(&mut self, path: &str, handler: H) -> &mut Self
     where
-        H: Clone + Handler<S, A>,
+        H: Handler<S, A>,
     {
         self.add_route(Method::DELETE, path, handler);
         self
@@ -1775,7 +1775,7 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
 
     pub fn options<H, A>(&mut self, path: &str, handler: H) -> &mut Self
     where
-        H: Clone + Handler<S, A>,
+        H: Handler<S, A>,
     {
         self.add_route(Method::OPTIONS, path, handler);
         self
@@ -2033,7 +2033,7 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
 
     fn add_route<H, A>(&mut self, method: Method, path: &str, handler: H)
     where
-        H: Clone + Handler<S, A>,
+        H: Handler<S, A>,
     {
         let template = normalize_path(path);
         assert!(
@@ -2070,7 +2070,6 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
         let handler = match handler.zero_handler() {
             Some(zero_handler) => HandlerKind::Zero(zero_handler),
             None if !H::NEEDS_CAPTURE => {
-                let handler = handler.clone();
                 HandlerKind::TypedNoParams(Box::new(move |request, state| {
                     handler.call(request, Params::empty(), state)
                 }))
@@ -3092,6 +3091,9 @@ fn swagger_html(openapi_path: Option<&str>) -> Bytes {
 mod tests {
     use super::*;
 
+    type BoxedPathHandler =
+        Box<dyn Fn(Path<u64>) -> Pin<Box<dyn Future<Output = &'static str> + Send>> + Send + Sync>;
+
     #[tokio::test]
     async fn openapi_document_is_prepared_once_for_server_dispatch() {
         let mut app = App::new();
@@ -3132,6 +3134,18 @@ mod tests {
         let response = app.oneshot(Method::GET, "/zero", &[], None).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.body_string().await, "OK");
+    }
+
+    #[tokio::test]
+    async fn typed_registration_does_not_require_a_cloneable_handler() {
+        let handler: BoxedPathHandler = Box::new(|Path(_id)| {
+            Box::pin(async { "OK" }) as Pin<Box<dyn Future<Output = &'static str> + Send>>
+        });
+        let mut app = App::new();
+        app.get("/non-clone/{id}", handler);
+
+        let response = app.oneshot(Method::GET, "/non-clone/42", &[], None).await;
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[test]
