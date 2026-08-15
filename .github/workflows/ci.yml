@@ -61,4 +61,4 @@ jobs:
           components: miri
 
       - name: Check pinned inline future with Miri
-        run: cargo miri test --lib inline_future_preserves_pinned_application_future -- --exact
+        run: cargo miri test --lib tests::inline_future_preserves_pinned_application_future -- --exact
