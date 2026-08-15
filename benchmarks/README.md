@@ -51,6 +51,24 @@ For a quick Docker smoke test (not a release gate):
 ./benchmarks/run-benchmark.ps1 -Iterations 10000 -Runs 1 -Vus 32
 ```
 
+For a Windows-host diagnostic without Docker Desktop, use the native harness
+with a local `oha.exe` on `PATH`:
+
+```powershell
+./benchmarks/run-native-benchmark.ps1 `
+  -Cases users,users-static `
+  -Runs 3 `
+  -Requests 1000000 `
+  -Connections 256
+```
+
+It builds and starts `target/release/oas-bench-server.exe` directly, alternates
+raw/OAS order per case and run, performs a per-process warm-up, verifies the
+exact response count and 100% success rate, and archives summary JSON plus
+`REPORT.md`, `environment.md`, and `manifest.txt` under `benchmarks/results/`.
+This native Windows profile has no cgroup CPU/RSS authority and is diagnostic
+only; the dedicated Linux matrix remains the release acceptance gate.
+
 Use `-WarmupSeconds 1` only for a functional smoke of the matrix. Official
 runs keep the default 30-second warm-up.
 
