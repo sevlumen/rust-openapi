@@ -63,6 +63,7 @@ async fn echo(Json(payload): Json<Payload>) -> Json<Payload> {
     Json(payload)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn eight_extractors(
     Path(id): Path<u64>,
     Query(query): Query<Search>,

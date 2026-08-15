@@ -972,49 +972,78 @@ where
     }
 
     fn call(&self, request: &mut Request<Bytes>, params: &Params, state: &Arc<S>) -> HandlerFuture {
-        match E1::from_request(request, params, state) {
-            Ok(value) => {
-                let future = (self)(value);
-                HandlerFuture::from_response_future(future)
-            }
-            Err(error) => HandlerFuture::from_response_future(future::ready(error)),
-        }
+        let value = match E1::from_request(request, params, state) {
+            Ok(value) => value,
+            Err(error) => return HandlerFuture::from_response_future(future::ready(error)),
+        };
+        HandlerFuture::from_response_future((self)(value))
     }
 }
 
-impl<S, F, Fut, R, E1, E2> Handler<S, (E1, E2)> for F
-where
-    S: Send + Sync + 'static,
-    F: Fn(E1, E2) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = R> + Send + 'static,
-    R: IntoResponse + ResponseMetadata,
-    E1: FromRequest<S>,
-    E2: FromRequest<S>,
-{
-    type Response = R;
-    const NEEDS_PARAMS: bool = E1::NEEDS_PARAMS || E2::NEEDS_PARAMS;
-    const NEEDS_BODY: bool = E1::NEEDS_BODY || E2::NEEDS_BODY;
+macro_rules! impl_extractor_handler {
+    (
+        $first:ident : $first_arg:ident
+        $(, $rest:ident : $rest_arg:ident)+ $(,)?
+    ) => {
+        impl<S, F, Fut, R, $first $(, $rest)*> Handler<S, ($first $(, $rest)*,)> for F
+        where
+            S: Send + Sync + 'static,
+            F: Fn($first $(, $rest)*) -> Fut + Send + Sync + 'static,
+            Fut: Future<Output = R> + Send + 'static,
+            R: IntoResponse + ResponseMetadata,
+            $first: FromRequest<S>,
+            $($rest: FromRequest<S>,)*
+        {
+            type Response = R;
+            const NEEDS_PARAMS: bool =
+                <$first as FromRequest<S>>::NEEDS_PARAMS
+                $(|| <$rest as FromRequest<S>>::NEEDS_PARAMS)*;
+            const NEEDS_BODY: bool =
+                <$first as FromRequest<S>>::NEEDS_BODY
+                $(|| <$rest as FromRequest<S>>::NEEDS_BODY)*;
 
-    fn openapi_request() -> OpenApiRequest {
-        let mut metadata = E1::openapi_request();
-        metadata.merge(E2::openapi_request());
-        metadata
-    }
+            fn openapi_request() -> OpenApiRequest {
+                let mut metadata = <$first as FromRequest<S>>::openapi_request();
+                $(metadata.merge(<$rest as FromRequest<S>>::openapi_request());)*
+                metadata
+            }
 
-    fn call(&self, request: &mut Request<Bytes>, params: &Params, state: &Arc<S>) -> HandlerFuture {
-        let first = E1::from_request(request, params, state);
-        let second = E2::from_request(request, params, state);
-        match (first, second) {
-            (Ok(first), Ok(second)) => {
-                let future = (self)(first, second);
+            fn call(
+                &self,
+                request: &mut Request<Bytes>,
+                params: &Params,
+                state: &Arc<S>,
+            ) -> HandlerFuture {
+                let $first_arg = match <$first as FromRequest<S>>::from_request(
+                    request, params, state,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => return HandlerFuture::from_response_future(future::ready(error)),
+                };
+                $(
+                    let $rest_arg = match <$rest as FromRequest<S>>::from_request(
+                        request, params, state,
+                    ) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            return HandlerFuture::from_response_future(future::ready(error));
+                        }
+                    };
+                )*
+                let future = (self)($first_arg $(, $rest_arg)*);
                 HandlerFuture::from_response_future(future)
             }
-            (Err(error), _) | (_, Err(error)) => {
-                HandlerFuture::from_response_future(future::ready(error))
-            }
         }
-    }
+    };
 }
+
+impl_extractor_handler!(E1: first, E2: second);
+impl_extractor_handler!(E1: first, E2: second, E3: third);
+impl_extractor_handler!(E1: first, E2: second, E3: third, E4: fourth);
+impl_extractor_handler!(E1: first, E2: second, E3: third, E4: fourth, E5: fifth);
+impl_extractor_handler!(E1: first, E2: second, E3: third, E4: fourth, E5: fifth, E6: sixth);
+impl_extractor_handler!(E1: first, E2: second, E3: third, E4: fourth, E5: fifth, E6: sixth, E7: seventh);
+impl_extractor_handler!(E1: first, E2: second, E3: third, E4: fourth, E5: fifth, E6: sixth, E7: seventh, E8: eighth);
 
 pub type ErasedZeroHandler = Box<dyn Fn() -> HandlerFuture + Send + Sync>;
 type ErasedHandler<S> =
