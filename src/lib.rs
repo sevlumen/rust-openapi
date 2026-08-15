@@ -2224,10 +2224,13 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
 
     fn prepare(&self, request: Request<Incoming>) -> PreparedDispatch {
         let method = request.method().clone();
-        let path = normalize_request_path(request.uri().path());
+        let path_end = normalize_request_path(request.uri().path()).len();
         let router = self.runtime_ref();
+        let path = &request.uri().path()[..path_end];
         match router.resolve_route(&method, path) {
-            RouteResolution::Matched(resolved) => self.prepare_matched(router, request, resolved),
+            RouteResolution::Matched(resolved) => {
+                self.prepare_matched(router, request, resolved, path_end)
+            }
             RouteResolution::Options(allow) => {
                 PreparedDispatch::Ready(Some(options_response(allow)))
             }
@@ -2243,6 +2246,7 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
         router: RuntimeRef<'_, S>,
         request: Request<Incoming>,
         resolved: ResolvedRoute,
+        path_end: usize,
     ) -> PreparedDispatch {
         let method = request.method().clone();
         let plan = &router.plans[resolved.route_id().index()];
@@ -2274,7 +2278,7 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
                 HandlerKind::Typed(handler) => {
                     let (parts, _) = request.into_parts();
                     let mut request = Request::from_parts(parts, Bytes::new());
-                    let path = normalize_request_path(request.uri().path());
+                    let path = &request.uri().path()[..path_end];
                     let future = match &plan.capture_mode {
                         CaptureMode::None => handler(&mut request, Params::empty(), router.state),
                         CaptureMode::Borrowed => {
