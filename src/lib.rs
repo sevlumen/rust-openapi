@@ -2214,7 +2214,7 @@ struct ConnectionRuntime<S> {
 enum PreparedDispatch {
     Ready(Option<HttpResponse>),
     Handler {
-        method: Method,
+        is_head: bool,
         future: HandlerFuture,
     },
     Buffered(BoxFuture<HttpResponse>),
@@ -2229,9 +2229,9 @@ impl Future for PreparedDispatch {
                 Self::Ready(response) => {
                     Poll::Ready(response.take().expect("prepared response polled twice"))
                 }
-                Self::Handler { method, future } => {
+                Self::Handler { is_head, future } => {
                     match Pin::new_unchecked(future).poll(context) {
-                        Poll::Ready(response) => Poll::Ready(maybe_head(method, response)),
+                        Poll::Ready(response) => Poll::Ready(maybe_head_flag(*is_head, response)),
                         Poll::Pending => Poll::Pending,
                     }
                 }
@@ -2251,13 +2251,14 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
     }
 
     fn prepare(&self, request: Request<Incoming>) -> PreparedDispatch {
-        let method = request.method().clone();
+        let method = request.method();
+        let is_head = *method == Method::HEAD;
         let path_end = normalize_request_path(request.uri().path()).len();
         let router = self.runtime_ref();
         let path = &request.uri().path()[..path_end];
-        match router.resolve_route(&method, path) {
+        match router.resolve_route(method, path) {
             RouteResolution::Matched(resolved) => {
-                self.prepare_matched(router, request, resolved, path_end)
+                self.prepare_matched(router, request, resolved, path_end, is_head)
             }
             RouteResolution::Options(allow) => {
                 PreparedDispatch::Ready(Some(options_response(&allow)))
@@ -2275,13 +2276,13 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
         request: Request<Incoming>,
         resolved: ResolvedRoute,
         path_end: usize,
+        is_head: bool,
     ) -> PreparedDispatch {
-        let method = request.method().clone();
         let plan = &router.plans[resolved.route_id().index()];
         match plan.body_mode {
             BodyMode::Incoming => match &plan.handler {
                 HandlerKind::Raw(handler) => PreparedDispatch::Handler {
-                    method,
+                    is_head,
                     future: handler(request),
                 },
                 HandlerKind::Zero(_)
@@ -2293,14 +2294,14 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
             },
             BodyMode::None => match &plan.handler {
                 HandlerKind::Zero(handler) => PreparedDispatch::Handler {
-                    method,
+                    is_head,
                     future: handler(),
                 },
                 HandlerKind::Static(response) => {
-                    PreparedDispatch::Ready(Some(maybe_head(&method, response.to_response())))
+                    PreparedDispatch::Ready(Some(maybe_head_flag(is_head, response.to_response())))
                 }
-                HandlerKind::Builtin(builtin) => PreparedDispatch::Ready(Some(maybe_head(
-                    &method,
+                HandlerKind::Builtin(builtin) => PreparedDispatch::Ready(Some(maybe_head_flag(
+                    is_head,
                     router.builtin_response(*builtin),
                 ))),
                 HandlerKind::Typed(handler) => {
@@ -2322,7 +2323,7 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
                             handler(&mut request, &params, router.state)
                         }
                     };
-                    PreparedDispatch::Handler { method, future }
+                    PreparedDispatch::Handler { is_head, future }
                 }
                 HandlerKind::Raw(_) => unreachable!("raw handler requires Incoming"),
             },
@@ -2851,7 +2852,11 @@ fn method_not_allowed_response(allow: &str) -> HttpResponse {
 }
 
 fn maybe_head(method: &Method, response: HttpResponse) -> HttpResponse {
-    if method != Method::HEAD {
+    maybe_head_flag(method == Method::HEAD, response)
+}
+
+fn maybe_head_flag(is_head: bool, response: HttpResponse) -> HttpResponse {
+    if !is_head {
         return response;
     }
     let (mut parts, body) = response.into_parts();
