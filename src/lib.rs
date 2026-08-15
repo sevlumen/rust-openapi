@@ -18,8 +18,7 @@ use std::{
     convert::Infallible,
     future::{self, Future},
     marker::PhantomPinned,
-    mem::{MaybeUninit, align_of, replace, size_of},
-    ops::{Deref, DerefMut, Index, IndexMut},
+    mem::{MaybeUninit, align_of, size_of},
     pin::Pin,
     str::FromStr,
     sync::Arc,
@@ -1142,66 +1141,6 @@ struct RouteMetadata {
     operation: Operation,
 }
 
-enum RouteStorage<T> {
-    Building(Vec<T>),
-    Frozen(Box<[T]>),
-}
-
-impl<T> RouteStorage<T> {
-    fn new() -> Self {
-        Self::Building(Vec::new())
-    }
-
-    fn push(&mut self, value: T) {
-        match self {
-            Self::Building(values) => values.push(value),
-            Self::Frozen(_) => panic!("route storage is already frozen"),
-        }
-    }
-
-    fn freeze(&mut self) {
-        let storage = replace(self, Self::Building(Vec::new()));
-        *self = match storage {
-            Self::Building(values) => Self::Frozen(values.into_boxed_slice()),
-            Self::Frozen(values) => Self::Frozen(values),
-        };
-    }
-}
-
-impl<T> Deref for RouteStorage<T> {
-    type Target = [T];
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Building(values) => values,
-            Self::Frozen(values) => values,
-        }
-    }
-}
-
-impl<T> DerefMut for RouteStorage<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        match self {
-            Self::Building(values) => values,
-            Self::Frozen(_) => panic!("route storage is already frozen"),
-        }
-    }
-}
-
-impl<T> Index<usize> for RouteStorage<T> {
-    type Output = T;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.deref()[index]
-    }
-}
-
-impl<T> IndexMut<usize> for RouteStorage<T> {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        &mut self.deref_mut()[index]
-    }
-}
-
 #[derive(Clone)]
 enum Segment {
     Static(String),
@@ -1462,8 +1401,8 @@ struct Operation {
 /// The application router and runtime.
 pub struct App<S = ()> {
     state: Arc<S>,
-    plans: RouteStorage<RoutePlan<S>>,
-    metadata: RouteStorage<RouteMetadata>,
+    plans: Vec<RoutePlan<S>>,
+    metadata: Vec<RouteMetadata>,
     static_routes: HashMap<String, RouteSet>,
     dynamic_routes: DynamicRouteTrie,
     last_route: Option<usize>,
@@ -1478,15 +1417,23 @@ pub struct App<S = ()> {
 
 /// An immutable application runtime produced by [`App::build`].
 pub struct AppRuntime<S = ()> {
-    app: App<S>,
+    state: Arc<S>,
+    plans: Box<[RoutePlan<S>]>,
+    metadata: Box<[RouteMetadata]>,
+    static_routes: HashMap<String, RouteSet>,
+    dynamic_routes: DynamicRouteTrie,
+    openapi_path: Option<String>,
+    openapi_bytes: Option<Bytes>,
+    title: String,
+    version: String,
 }
 
 impl App<()> {
     pub fn new() -> Self {
         Self {
             state: Arc::new(()),
-            plans: RouteStorage::new(),
-            metadata: RouteStorage::new(),
+            plans: Vec::new(),
+            metadata: Vec::new(),
             static_routes: HashMap::new(),
             dynamic_routes: DynamicRouteTrie::default(),
             last_route: None,
@@ -1507,8 +1454,8 @@ impl App<()> {
         );
         App {
             state: Arc::new(state),
-            plans: RouteStorage::new(),
-            metadata: RouteStorage::new(),
+            plans: Vec::new(),
+            metadata: Vec::new(),
             static_routes: HashMap::new(),
             dynamic_routes: DynamicRouteTrie::default(),
             last_route: None,
@@ -1548,9 +1495,17 @@ impl<S: Send + Sync + 'static> App<S> {
     /// registration methods remain available on the builder type.
     pub fn build(mut self) -> AppRuntime<S> {
         self.prepare_openapi();
-        self.plans.freeze();
-        self.metadata.freeze();
-        AppRuntime { app: self }
+        AppRuntime {
+            state: self.state,
+            plans: self.plans.into_boxed_slice(),
+            metadata: self.metadata.into_boxed_slice(),
+            static_routes: self.static_routes,
+            dynamic_routes: self.dynamic_routes,
+            openapi_path: self.openapi_path,
+            openapi_bytes: self.openapi_bytes,
+            title: self.title,
+            version: self.version,
+        }
     }
 
     pub fn get<H, A>(&mut self, path: &str, handler: H) -> &mut Self
@@ -1832,6 +1787,7 @@ impl<S: Send + Sync + 'static> App<S> {
         self.build().serve_listener(listener, shutdown).await
     }
 
+    #[allow(dead_code)]
     async fn serve_listener_inner<F>(
         self,
         listener: tokio::net::TcpListener,
@@ -2285,6 +2241,7 @@ impl<S: Send + Sync + 'static> App<S> {
         }
     }
 
+    #[allow(dead_code)]
     async fn handle_zero(&self, method: &Method, resolved: ResolvedRoute) -> HttpResponse {
         let plan = &self.plans[resolved.index];
         maybe_head(
@@ -2314,6 +2271,7 @@ impl<S: Send + Sync + 'static> App<S> {
         }
     }
 
+    #[allow(dead_code)]
     async fn handle_incoming(
         &self,
         request: Request<Incoming>,
@@ -2334,7 +2292,115 @@ impl<S: Send + Sync + 'static> App<S> {
     }
 }
 
+struct RuntimeRef<'a, S> {
+    state: &'a Arc<S>,
+    plans: &'a [RoutePlan<S>],
+    static_routes: &'a HashMap<String, RouteSet>,
+    dynamic_routes: &'a DynamicRouteTrie,
+    openapi_path: Option<&'a str>,
+    openapi_bytes: Option<&'a Bytes>,
+}
+
 impl<S: Send + Sync + 'static> AppRuntime<S> {
+    fn runtime_ref(&self) -> RuntimeRef<'_, S> {
+        RuntimeRef {
+            state: &self.state,
+            plans: &self.plans,
+            static_routes: &self.static_routes,
+            dynamic_routes: &self.dynamic_routes,
+            openapi_path: self.openapi_path.as_deref(),
+            openapi_bytes: self.openapi_bytes.as_ref(),
+        }
+    }
+
+    /// Return the frozen OpenAPI document built from the cold metadata array.
+    pub fn openapi_document(&self) -> Value {
+        let mut paths = Map::new();
+        for metadata in self.metadata.iter() {
+            if metadata.builtin {
+                continue;
+            }
+            let method = metadata.method.as_str().to_ascii_lowercase();
+            let mut operation = Map::new();
+            if let Some(tag) = &metadata.operation.tag {
+                operation.insert("tags".to_owned(), json!([tag]));
+            }
+            if let Some(summary) = &metadata.operation.summary {
+                operation.insert("summary".to_owned(), json!(summary));
+            }
+            if let Some(operation_id) = &metadata.operation.operation_id {
+                operation.insert("operationId".to_owned(), json!(operation_id));
+            }
+            let mut parameters = metadata.operation.request.parameters.clone();
+            let mut path_schema_index = 0;
+            parameters.extend(
+                metadata
+                    .segments
+                    .iter()
+                    .filter_map(|segment| match segment {
+                        Segment::Capture(name) => {
+                            let schema = metadata
+                                .operation
+                                .request
+                                .path_schemas
+                                .get(path_schema_index)
+                                .cloned()
+                                .unwrap_or_else(|| json!({ "type": "string" }));
+                            path_schema_index += 1;
+                            Some(json!({
+                                "in": "path",
+                                "name": name,
+                                "required": true,
+                                "schema": schema
+                            }))
+                        }
+                        Segment::Static(_) => None,
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            if !parameters.is_empty() {
+                operation.insert("parameters".to_owned(), Value::Array(parameters));
+            }
+            if let Some(request_body) = &metadata.operation.request.request_body {
+                operation.insert("requestBody".to_owned(), request_body.clone());
+            }
+            let status = metadata.operation.response_status.as_u16().to_string();
+            let mut response = Map::new();
+            response.insert(
+                "description".to_owned(),
+                Value::String(
+                    match metadata.operation.response_status {
+                        StatusCode::NO_CONTENT => "No Content",
+                        StatusCode::NOT_MODIFIED => "Not Modified",
+                        StatusCode::CREATED => "Created",
+                        _ => "Success",
+                    }
+                    .to_owned(),
+                ),
+            );
+            if let Some(schema) = &metadata.operation.response_schema {
+                response.insert(
+                    "content".to_owned(),
+                    json!({ "application/json": { "schema": schema } }),
+                );
+            }
+            operation.insert("responses".to_owned(), json!({ status: response }));
+            paths
+                .entry(metadata.template.clone())
+                .or_insert_with(|| Value::Object(Map::new()));
+            paths
+                .get_mut(&metadata.template)
+                .and_then(Value::as_object_mut)
+                .unwrap()
+                .insert(method, Value::Object(operation));
+        }
+        json!({
+            "openapi": "3.1.0",
+            "info": { "title": self.title, "version": self.version },
+            "paths": paths,
+        })
+    }
+
     pub async fn oneshot(
         &self,
         method: Method,
@@ -2342,7 +2408,18 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         headers: &[(&str, &str)],
         body: Option<Bytes>,
     ) -> TestResponse {
-        self.app.oneshot_inner(method, uri, headers, body).await
+        let mut builder = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            if !name.is_empty() {
+                builder = builder.header(*name, *value);
+            }
+        }
+        let request = builder
+            .body(body.unwrap_or_default())
+            .expect("valid test request");
+        TestResponse {
+            response: Some(self.runtime_ref().handle(request).await),
+        }
     }
 
     pub async fn listen(
@@ -2361,8 +2438,277 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        self.app.serve_listener_inner(listener, shutdown).await
+        serve_runtime(self, listener, shutdown).await
     }
+}
+
+impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
+    async fn handle(&self, request: Request<Bytes>) -> HttpResponse {
+        let method = request.method().clone();
+        let path = normalize_request_path(request.uri().path());
+        match self.resolve_route(&method, path) {
+            RouteResolution::Matched(resolved) => self.handle_typed(request, resolved).await,
+            RouteResolution::Options(allow) => options_response(allow),
+            RouteResolution::MethodNotAllowed(allow) => method_not_allowed_response(allow),
+            RouteResolution::NotFound => not_found(),
+        }
+    }
+
+    fn resolve_route(&self, method: &Method, path: &str) -> RouteResolution<'_> {
+        if let Some(routes) = self.static_routes.get(path) {
+            return self.resolve_route_set(method, routes, None);
+        }
+        let Some(path_match) = self.dynamic_routes.find(path) else {
+            return RouteResolution::NotFound;
+        };
+        self.resolve_route_set(
+            method,
+            path_match.routes,
+            Some((path_match.ranges, path_match.count)),
+        )
+    }
+
+    fn resolve_route_set<'b>(
+        &'b self,
+        method: &Method,
+        routes: &'b RouteSet,
+        captures: Option<([Option<CaptureRange>; MAX_CAPTURE_PARAMS], usize)>,
+    ) -> RouteResolution<'b> {
+        let index = routes.route(method).or_else(|| {
+            (method == Method::HEAD)
+                .then(|| routes.route(&Method::GET))
+                .flatten()
+        });
+        if index.is_none() && *method == Method::OPTIONS {
+            return RouteResolution::Options(routes.allowed_methods());
+        }
+        let Some(index) = index else {
+            return RouteResolution::MethodNotAllowed(routes.allowed_methods());
+        };
+        let captures = captures.map_or_else(CaptureSet::default, |(ranges, count)| {
+            CaptureSet::from_ranges(ranges, count)
+        });
+        RouteResolution::Matched(ResolvedRoute { index, captures })
+    }
+
+    async fn handle_typed(&self, request: Request<Bytes>, resolved: ResolvedRoute) -> HttpResponse {
+        let method = request.method().clone();
+        let plan = &self.plans[resolved.index];
+        match &plan.handler {
+            HandlerKind::Zero(handler) => return maybe_head(&method, handler().await),
+            HandlerKind::Static(response) => {
+                return maybe_head(&method, response.to_response());
+            }
+            HandlerKind::Builtin(builtin) => {
+                return maybe_head(&method, self.builtin_response(*builtin));
+            }
+            HandlerKind::Typed(_) | HandlerKind::Raw(_) => {}
+        }
+        let mut request = request;
+        let path = normalize_request_path(request.uri().path());
+        let response = if resolved.captures.count == 0 && !plan.materialize_params {
+            self.invoke_typed(&mut request, Params::empty(), plan).await
+        } else {
+            let params = Params::from_match(
+                &plan.capture_names,
+                resolved.captures.ranges(),
+                resolved.captures.count as usize,
+                path,
+                plan.materialize_params,
+            );
+            self.invoke_typed(&mut request, &params, plan).await
+        };
+        maybe_head(&method, response)
+    }
+
+    async fn invoke_typed(
+        &self,
+        request: &mut Request<Bytes>,
+        params: &Params,
+        plan: &RoutePlan<S>,
+    ) -> HttpResponse {
+        match &plan.handler {
+            HandlerKind::Typed(handler) => handler(request, params, self.state).await,
+            HandlerKind::Zero(_) => unreachable!("zero route handled above"),
+            HandlerKind::Raw(_) => unreachable!("raw route handled separately"),
+            HandlerKind::Static(_) | HandlerKind::Builtin(_) => {
+                unreachable!("non-typed route handled above")
+            }
+        }
+    }
+
+    async fn handle_zero(&self, method: &Method, resolved: ResolvedRoute) -> HttpResponse {
+        let plan = &self.plans[resolved.index];
+        maybe_head(
+            method,
+            match &plan.handler {
+                HandlerKind::Zero(handler) => handler().await,
+                HandlerKind::Typed(_) => unreachable!("typed route handled separately"),
+                HandlerKind::Raw(_) => unreachable!("raw route handled separately"),
+                HandlerKind::Static(response) => response.to_response(),
+                HandlerKind::Builtin(builtin) => self.builtin_response(*builtin),
+            },
+        )
+    }
+
+    fn builtin_response(&self, builtin: BuiltinHandler) -> HttpResponse {
+        match builtin {
+            BuiltinHandler::OpenApi => {
+                let body = self
+                    .openapi_bytes
+                    .expect("OpenAPI bytes are prepared before runtime serving")
+                    .clone();
+                response_json_bytes(StatusCode::OK, body)
+            }
+            BuiltinHandler::Swagger => {
+                response_text(StatusCode::OK, swagger_html(self.openapi_path))
+            }
+        }
+    }
+
+    async fn handle_incoming(
+        &self,
+        request: Request<Incoming>,
+        resolved: ResolvedRoute,
+    ) -> HttpResponse {
+        let method = request.method().clone();
+        let plan = &self.plans[resolved.index];
+        maybe_head(
+            &method,
+            match &plan.handler {
+                HandlerKind::Raw(handler) => handler(request).await,
+                HandlerKind::Zero(_) => unreachable!("zero route handled separately"),
+                HandlerKind::Typed(_) => unreachable!("typed route handled separately"),
+                HandlerKind::Static(_) => unreachable!("static route handled separately"),
+                HandlerKind::Builtin(_) => unreachable!("builtin route handled separately"),
+            },
+        )
+    }
+}
+
+async fn serve_runtime<S, F>(
+    runtime: AppRuntime<S>,
+    listener: tokio::net::TcpListener,
+    shutdown: F,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: Send + Sync + 'static,
+    F: Future<Output = ()> + Send + 'static,
+{
+    let runtime = Arc::new(runtime);
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let runtime = Arc::clone(&runtime);
+                tokio::spawn(async move {
+                    let io = hyper_util::rt::TokioIo::new(stream);
+                    let service = hyper::service::service_fn(move |request: Request<Incoming>| {
+                        let runtime = Arc::clone(&runtime);
+                        async move {
+                            let router = runtime.runtime_ref();
+                            let path = normalize_request_path(request.uri().path());
+                            let response = match router.resolve_route(request.method(), path) {
+                                RouteResolution::Matched(resolved) => {
+                                    let plan = &router.plans[resolved.index];
+                                    let is_zero = matches!(
+                                        plan.handler,
+                                        HandlerKind::Zero(_)
+                                            | HandlerKind::Static(_)
+                                            | HandlerKind::Builtin(_)
+                                    );
+                                    match plan.body_mode {
+                                        BodyMode::Incoming => {
+                                            router.handle_incoming(request, resolved).await
+                                        }
+                                        BodyMode::None if is_zero => {
+                                            router.handle_zero(request.method(), resolved).await
+                                        }
+                                        BodyMode::None => {
+                                            let (parts, _) = request.into_parts();
+                                            router
+                                                .handle_typed(
+                                                    Request::from_parts(parts, Bytes::new()),
+                                                    resolved,
+                                                )
+                                                .await
+                                        }
+                                        BodyMode::Buffered { limit } => {
+                                            let (parts, body) = request.into_parts();
+                                            let too_large = parts
+                                                .headers
+                                                .get(header::CONTENT_LENGTH)
+                                                .and_then(|value| value.to_str().ok())
+                                                .and_then(|value| value.parse::<usize>().ok())
+                                                .is_some_and(|length| length > limit);
+                                            if too_large {
+                                                response_json(
+                                                    StatusCode::PAYLOAD_TOO_LARGE,
+                                                    json!({
+                                                        "type": "about:blank",
+                                                        "title": "Payload Too Large",
+                                                        "status": 413,
+                                                        "detail": "request body exceeds the configured limit"
+                                                    }),
+                                                )
+                                            } else {
+                                                match Limited::new(body, limit).collect().await {
+                                                    Ok(body) => {
+                                                        router
+                                                            .handle_typed(
+                                                                Request::from_parts(
+                                                                    parts,
+                                                                    body.to_bytes(),
+                                                                ),
+                                                                resolved,
+                                                            )
+                                                            .await
+                                                    }
+                                                    Err(error)
+                                                        if error
+                                                            .downcast_ref::<LengthLimitError>()
+                                                            .is_some() => response_json(
+                                                        StatusCode::PAYLOAD_TOO_LARGE,
+                                                        json!({
+                                                            "type": "about:blank",
+                                                            "title": "Payload Too Large",
+                                                            "status": 413,
+                                                            "detail": "request body exceeds the configured limit"
+                                                        }),
+                                                    ),
+                                                    Err(_) => response_json(
+                                                        StatusCode::BAD_REQUEST,
+                                                        json!({
+                                                            "type": "about:blank",
+                                                            "title": "Bad Request",
+                                                            "status": 400,
+                                                            "detail": "request body was interrupted"
+                                                        }),
+                                                    ),
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                RouteResolution::Options(allow) => options_response(allow),
+                                RouteResolution::MethodNotAllowed(allow) => {
+                                    method_not_allowed_response(allow)
+                                }
+                                RouteResolution::NotFound => not_found(),
+                            };
+                            Ok::<_, Infallible>(response)
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, service)
+                        .await;
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A response returned by [`App::oneshot`] for concise integration tests.
@@ -2694,8 +3040,8 @@ mod tests {
 
         let runtime = app.build();
 
-        assert!(matches!(runtime.app.plans, RouteStorage::Frozen(_)));
-        assert!(matches!(runtime.app.metadata, RouteStorage::Frozen(_)));
+        assert_eq!(runtime.plans.len(), 1);
+        assert_eq!(runtime.metadata.len(), 1);
     }
 
     #[test]

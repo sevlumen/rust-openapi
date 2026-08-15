@@ -8,7 +8,7 @@ use std::{
 use bytes::Bytes;
 use http::{Request, Response, StatusCode};
 use http_body_util::Full;
-use oas_rs::{ApiError, App, Header, HeaderSpec, Method, Path, Query};
+use oas_rs::{ApiError, App, AppRuntime, Header, HeaderSpec, Method, Path, Query};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -96,7 +96,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 async fn measure_app(
-    app: &App,
+    app: &AppRuntime,
     method: Method,
     uri: &str,
     headers: &[(&str, &str)],
@@ -118,11 +118,17 @@ async fn measure_app(
 
 #[tokio::main]
 async fn main() {
-    let mut app = App::new();
-    app.get("/plaintext", plaintext);
-    let mut openapi_app = App::new();
-    openapi_app.get("/plaintext", plaintext);
-    openapi_app.openapi("/openapi.json").swagger("/swagger");
+    let app = {
+        let mut app = App::new();
+        app.get("/plaintext", plaintext);
+        app.build()
+    };
+    let openapi_app = {
+        let mut app = App::new();
+        app.get("/plaintext", plaintext);
+        app.openapi("/openapi.json").swagger("/swagger");
+        app.build()
+    };
     let iterations = std::env::var("OAS_BENCH_ITERATIONS")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -190,6 +196,7 @@ async fn main() {
 
     let mut static_text_app = App::new();
     static_text_app.static_text("/health", "OK");
+    let static_text_app = static_text_app.build();
     let (static_text_elapsed, static_text_allocations, static_text_bytes) =
         measure_app(&static_text_app, Method::GET, "/health", &[], iterations).await;
     println!(
@@ -201,6 +208,7 @@ async fn main() {
 
     let mut static_json_app = App::new();
     static_json_app.static_json("/version", Bytes::from_static(br#"{"version":"0.1.0"}"#));
+    let static_json_app = static_json_app.build();
     let (static_json_elapsed, static_json_allocations, static_json_bytes) =
         measure_app(&static_json_app, Method::GET, "/version", &[], iterations).await;
     println!(
@@ -212,6 +220,7 @@ async fn main() {
 
     let mut path_app = App::new();
     path_app.get("/users/{id}", typed_path);
+    let path_app = path_app.build();
     let (path_elapsed, path_allocations, path_bytes) =
         measure_app(&path_app, Method::GET, "/users/123456", &[], iterations).await;
     ALLOCATIONS.store(0, Ordering::Relaxed);
@@ -256,6 +265,7 @@ async fn main() {
 
     let mut uuid_app = App::new();
     uuid_app.get("/users/{id}", typed_uuid);
+    let uuid_app = uuid_app.build();
     let uuid_path = "/users/550e8400-e29b-41d4-a716-446655440000";
     let (uuid_elapsed, uuid_allocations, uuid_bytes) =
         measure_app(&uuid_app, Method::GET, uuid_path, &[], iterations).await;
@@ -301,6 +311,7 @@ async fn main() {
 
     let mut query_app = App::new();
     query_app.get("/search", typed_query);
+    let query_app = query_app.build();
     let (query_elapsed, query_allocations, query_bytes) = measure_app(
         &query_app,
         Method::GET,
@@ -357,6 +368,7 @@ async fn main() {
 
     let mut header_app = App::new();
     header_app.get("/trace", typed_header);
+    let header_app = header_app.build();
     let (header_elapsed, header_allocations, header_bytes) = measure_app(
         &header_app,
         Method::GET,
@@ -414,6 +426,7 @@ async fn main() {
             route_app.get(&path, plaintext);
             raw_routes.insert(path, vec![Method::GET]);
         }
+        let route_app = route_app.build();
 
         ALLOCATIONS.store(0, Ordering::Relaxed);
         ALLOCATED_BYTES.store(0, Ordering::Relaxed);
@@ -463,6 +476,7 @@ async fn main() {
             let path = format!("/dynamic/{index}/{{id}}");
             dynamic_app.get(&path, typed_path);
         }
+        let dynamic_app = dynamic_app.build();
         for (position, target) in [
             ("first", "/dynamic/0/42".to_owned()),
             ("middle", format!("/dynamic/{}/42", route_count / 2)),
