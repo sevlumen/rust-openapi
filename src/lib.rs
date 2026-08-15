@@ -201,7 +201,7 @@ struct CaptureRange {
 pub struct Params {
     packed: [u64; MAX_CAPTURE_PARAMS],
     count: u8,
-    owned: Option<Vec<(String, String)>>,
+    owned: Option<Arc<[(String, String)]>>,
 }
 
 static EMPTY_PARAMS: Params = Params {
@@ -246,7 +246,7 @@ impl Params {
                     .expect("route matching validates percent encoding");
                 values.push((name.clone(), value));
             }
-            values
+            Arc::from(values.into_boxed_slice())
         });
         Self {
             packed: captures.packed,
@@ -3065,8 +3065,23 @@ mod tests {
     }
 
     #[test]
+    fn materialized_params_clone_shares_owned_values() {
+        let names = vec!["id".to_owned()];
+        let captures = CaptureSet::default().with_capture(0, CaptureRange { start: 1, end: 6 });
+        let params = Params::from_match(&names, captures, "/alice", true);
+        let cloned = params.clone();
+
+        assert_eq!(params.get("id"), Some("alice"));
+        assert_eq!(cloned.get("id"), Some("alice"));
+        assert!(Arc::ptr_eq(
+            params.owned.as_ref().expect("materialized values"),
+            cloned.owned.as_ref().expect("materialized values"),
+        ));
+    }
+
+    #[test]
     fn params_keep_capture_ranges_in_compact_storage() {
-        assert!(size_of::<Params>() <= 128);
+        assert!(size_of::<Params>() <= 88);
     }
 
     #[test]

@@ -8,7 +8,9 @@ use std::{
 use bytes::Bytes;
 use http::{Request, Response, StatusCode};
 use http_body_util::Full;
-use oas_rs::{ApiError, App, AppRuntime, Header, HeaderSpec, JsonBytes, Method, Path, Query};
+use oas_rs::{
+    ApiError, App, AppRuntime, Header, HeaderSpec, JsonBytes, Method, Params, Path, Query,
+};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -43,6 +45,10 @@ fn raw_ok_response() -> Response<Full<Bytes>> {
 }
 
 async fn typed_path(Path(_id): Path<u64>) -> &'static str {
+    "OK"
+}
+
+async fn typed_params(_params: Params) -> &'static str {
     "OK"
 }
 
@@ -275,6 +281,42 @@ async fn main() {
         raw_path_bytes as f64 / iterations as f64,
         path_allocations.saturating_sub(raw_path_allocations) as f64 / iterations as f64,
         path_bytes.saturating_sub(raw_path_bytes) as f64 / iterations as f64,
+    );
+
+    let mut params_app = App::new();
+    params_app.get("/params/{org}/{user}", typed_params);
+    let params_app = params_app.build();
+    let params_path = "/params/acme/alice";
+    let (params_elapsed, params_allocations, params_bytes) =
+        measure_app(&params_app, Method::GET, params_path, &[], iterations).await;
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+    let raw_params_start = Instant::now();
+    for _ in 0..iterations {
+        let request = raw_request(params_path, &[]);
+        let mut parts = request
+            .uri()
+            .path()
+            .split('/')
+            .filter(|part| !part.is_empty());
+        assert_eq!(parts.next(), Some("params"));
+        assert_eq!(parts.next(), Some("acme"));
+        assert_eq!(parts.next(), Some("alice"));
+        assert_eq!(raw_ok_response().status(), StatusCode::OK);
+    }
+    let raw_params_elapsed = raw_params_start.elapsed().as_nanos();
+    let raw_params_allocations = ALLOCATIONS.load(Ordering::Relaxed);
+    let raw_params_bytes = ALLOCATED_BYTES.load(Ordering::Relaxed);
+    println!(
+        "case=params iterations={iterations} ns_per_op={:.2} raw_ns_per_op={:.2} allocations_per_op={:.4} raw_allocations_per_op={:.4} bytes_per_op={:.2} raw_bytes_per_op={:.2} extra_allocations_per_op={:.4} extra_bytes_per_op={:.2}",
+        params_elapsed as f64 / iterations as f64,
+        raw_params_elapsed as f64 / iterations as f64,
+        params_allocations as f64 / iterations as f64,
+        raw_params_allocations as f64 / iterations as f64,
+        params_bytes as f64 / iterations as f64,
+        raw_params_bytes as f64 / iterations as f64,
+        params_allocations.saturating_sub(raw_params_allocations) as f64 / iterations as f64,
+        params_bytes.saturating_sub(raw_params_bytes) as f64 / iterations as f64,
     );
 
     let mut uuid_app = App::new();
