@@ -1184,7 +1184,7 @@ struct DynamicRouteTrie {
 struct DynamicRouteNode {
     static_children: HashMap<String, NodeId>,
     capture_child: Option<NodeId>,
-    routes: Option<RouteSet>,
+    routes: RouteSet,
 }
 
 #[repr(transparent)]
@@ -1406,19 +1406,14 @@ impl DynamicRouteTrie {
             };
             node_index = next.index();
         }
-        self.nodes[node_index]
-            .routes
-            .get_or_insert_with(RouteSet::default)
-            .insert(method, route);
+        self.nodes[node_index].routes.insert(method, route);
     }
 
     fn find(&self, path: &str) -> Option<DynamicPathMatch<'_>> {
         let (node_index, captures) =
             self.find_node(0, PathParts::new(path), CaptureSet::default())?;
-        Some(DynamicPathMatch {
-            routes: self.nodes[node_index].routes.as_ref()?,
-            captures,
-        })
+        let routes = &self.nodes[node_index].routes;
+        Some(DynamicPathMatch { routes, captures })
     }
 
     fn find_node(
@@ -1429,7 +1424,7 @@ impl DynamicRouteTrie {
     ) -> Option<(usize, CaptureSet)> {
         let node = &self.nodes[node_index];
         let Some(part) = parts.next() else {
-            return node.routes.as_ref().map(|_| (node_index, captures));
+            return (!node.routes.is_empty()).then_some((node_index, captures));
         };
 
         // Static branches have precedence over captures, but the capture
@@ -3079,6 +3074,7 @@ mod tests {
         assert_eq!(size_of::<RouteId>(), size_of::<u32>());
         assert_eq!(size_of::<NodeId>(), size_of::<u32>());
         assert!(size_of::<Option<NodeId>>() <= size_of::<Option<usize>>());
+        assert!(size_of::<DynamicRouteNode>() <= 88);
         assert!(size_of::<RouteSet>() <= 32);
     }
 
@@ -3162,7 +3158,7 @@ mod tests {
     #[test]
     fn report_hot_path_layout_sizes() {
         println!(
-            "HandlerFuture={} InlineFuture={} Params={} CaptureMode={} BodyMode={} HandlerKind={} RoutePlan={} RouteMetadata={} RouteSet={} RouteResolution={}",
+            "HandlerFuture={} InlineFuture={} Params={} CaptureMode={} BodyMode={} HandlerKind={} RoutePlan={} RouteMetadata={} RouteSet={} DynamicRouteNode={} RouteResolution={}",
             size_of::<HandlerFuture>(),
             size_of::<InlineFuture>(),
             size_of::<Params>(),
@@ -3172,6 +3168,7 @@ mod tests {
             size_of::<RoutePlan<()>>(),
             size_of::<RouteMetadata>(),
             size_of::<RouteSet>(),
+            size_of::<DynamicRouteNode>(),
             size_of::<RouteResolution>(),
         );
     }
