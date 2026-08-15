@@ -37,6 +37,12 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - name: Test benchmark harness guards
+        shell: pwsh
+        run: |
+          pwsh -File ./benchmarks/tests/test-oha-adapter.ps1
+          pwsh -File ./benchmarks/tests/test-matrix-guard.ps1
+
       - name: Validate benchmark topology
         run: docker compose -f benchmarks/docker-compose.yml config --quiet
 
