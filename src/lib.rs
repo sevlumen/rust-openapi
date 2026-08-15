@@ -3223,6 +3223,7 @@ mod tests {
             matched.routes.route(&Method::GET).map(RouteId::index),
             Some(9_999)
         );
+        assert_eq!(matched.captures.count, 1);
         assert!(app.dynamic_routes.find("/dynamic/missing/42").is_none());
     }
 
