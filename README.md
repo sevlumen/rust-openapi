@@ -55,3 +55,15 @@ Handlers that need an upload or streaming request body can use
 where `handler` receives `Request<hyper::body::Incoming>` directly. The
 framework does not collect that body; the raw handler owns its limits and
 cancellation policy.
+
+Typed body extractors such as `Json<T>` are buffered with a default 1 MiB
+limit. Configure the limit during route registration when needed:
+
+```rust
+let mut app = App::new();
+app.max_body_size(2 * 1024 * 1024);
+app.post("/users", create_user);
+```
+
+The limit is compiled into buffered route plans; raw `Incoming` handlers are
+not affected.
