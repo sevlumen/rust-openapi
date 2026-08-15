@@ -27,6 +27,7 @@ pub fn derive_openapi(input: TokenStream) -> TokenStream {
     let mut parameters = Vec::new();
     let mut query_variables = Vec::new();
     let mut query_arms = Vec::new();
+    let mut raw_query_arms = Vec::new();
     let mut query_fields = Vec::new();
     let mut direct_query_parser = true;
     for field in fields {
@@ -58,6 +59,12 @@ pub fn derive_openapi(input: TokenStream) -> TokenStream {
                 #field_name = Some(::oas_rs::parse_query_value::<#schema_type>(&value)?);
             }
         });
+        raw_query_arms.push(quote! {
+            #field_name_string => {
+                let value = ::oas_rs::decode_query_component(raw_value)?;
+                #field_name = Some(::oas_rs::parse_query_value::<#schema_type>(&value)?);
+            }
+        });
         let query_value = if is_optional {
             quote! { #field_name }
         } else {
@@ -82,11 +89,16 @@ pub fn derive_openapi(input: TokenStream) -> TokenStream {
                 #(#query_variables)*
                 for pair in query.split('&').filter(|pair| !pair.is_empty()) {
                     let (key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
-                    let key = ::oas_rs::decode_query_component(key)?;
-                    let value = ::oas_rs::decode_query_component(raw_value)?;
-                    match key.as_ref() {
-                        #(#query_arms,)*
-                        _ => {}
+                    match key {
+                        #(#raw_query_arms,)*
+                        _ => {
+                            let key = ::oas_rs::decode_query_component(key)?;
+                            let value = ::oas_rs::decode_query_component(raw_value)?;
+                            match key.as_ref() {
+                                #(#query_arms,)*
+                                _ => {}
+                            }
+                        }
                     }
                 }
                 Ok(Self {

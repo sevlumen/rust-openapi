@@ -240,6 +240,22 @@ async fn app_registers_static_dynamic_and_query_routes() {
         .await;
     assert_eq!(response.status(), 200);
     assert_eq!(response.body_string().await, "42:true");
+
+    let response = app
+        .oneshot(Method::GET, "/search?%70age=42&active=true", &[], None)
+        .await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.body_string().await, "42:true");
+
+    let response = app
+        .oneshot(
+            Method::GET,
+            "/search?unknown=%ZZ&page=42&active=true",
+            &[],
+            None,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
