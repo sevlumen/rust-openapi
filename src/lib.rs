@@ -204,7 +204,16 @@ pub struct Params {
     owned: Option<Vec<(String, String)>>,
 }
 
+static EMPTY_PARAMS: Params = Params {
+    ranges: [None; MAX_CAPTURE_PARAMS],
+    owned: None,
+};
+
 impl Params {
+    fn empty() -> &'static Self {
+        &EMPTY_PARAMS
+    }
+
     pub fn get(&self, name: &str) -> Option<&str> {
         self.owned
             .as_ref()?
@@ -2245,24 +2254,35 @@ impl<S: Send + Sync + 'static> App<S> {
         }
         let mut request = request;
         let path = normalize_request_path(request.uri().path());
-        let params = Params::from_match(
-            &plan.capture_names,
-            resolved.captures.ranges(),
-            resolved.captures.count as usize,
-            path,
-            plan.materialize_params,
-        );
-        maybe_head(
-            &method,
-            match &plan.handler {
-                HandlerKind::Typed(handler) => handler(&mut request, &params, &self.state).await,
-                HandlerKind::Zero(_) => unreachable!("zero route handled above"),
-                HandlerKind::Raw(_) => unreachable!("raw route handled separately"),
-                HandlerKind::Static(_) | HandlerKind::Builtin(_) => {
-                    unreachable!("non-typed route handled above")
-                }
-            },
-        )
+        let response = if resolved.captures.count == 0 && !plan.materialize_params {
+            self.invoke_typed(&mut request, Params::empty(), plan).await
+        } else {
+            let params = Params::from_match(
+                &plan.capture_names,
+                resolved.captures.ranges(),
+                resolved.captures.count as usize,
+                path,
+                plan.materialize_params,
+            );
+            self.invoke_typed(&mut request, &params, plan).await
+        };
+        maybe_head(&method, response)
+    }
+
+    async fn invoke_typed(
+        &self,
+        request: &mut Request<Bytes>,
+        params: &Params,
+        plan: &RoutePlan<S>,
+    ) -> HttpResponse {
+        match &plan.handler {
+            HandlerKind::Typed(handler) => handler(request, params, &self.state).await,
+            HandlerKind::Zero(_) => unreachable!("zero route handled above"),
+            HandlerKind::Raw(_) => unreachable!("raw route handled separately"),
+            HandlerKind::Static(_) | HandlerKind::Builtin(_) => {
+                unreachable!("non-typed route handled above")
+            }
+        }
     }
 
     async fn handle_zero(&self, method: &Method, resolved: ResolvedRoute) -> HttpResponse {
