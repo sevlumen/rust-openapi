@@ -2498,6 +2498,16 @@ mod tests {
     }
 
     #[test]
+    fn runtime_keeps_hot_plans_separate_from_cold_metadata() {
+        let mut app = App::new();
+        app.get("/zero", || async { "OK" });
+        app.openapi("/openapi.json");
+
+        assert_eq!(app.plans.len(), 2);
+        assert_eq!(app.metadata.len(), 2);
+    }
+
+    #[test]
     fn dynamic_routes_use_a_compiled_method_trie() {
         let mut app = App::new();
         for index in 0..10_000 {
