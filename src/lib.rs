@@ -1113,8 +1113,15 @@ enum BuiltinHandler {
 struct RoutePlan<S> {
     capture_names: Arc<[String]>,
     materialize_params: bool,
-    needs_body: bool,
+    body_mode: BodyMode,
     handler: HandlerKind<S>,
+}
+
+#[derive(Clone, Copy)]
+enum BodyMode {
+    None,
+    Buffered { limit: usize },
+    Incoming,
 }
 
 struct RouteMetadata {
@@ -1769,61 +1776,37 @@ impl<S: Send + Sync + 'static> App<S> {
                                 let response = match app.resolve_route(request.method(), path) {
                                         RouteResolution::Matched(resolved) => {
                                             let plan = &app.plans[resolved.index];
-                                            let is_raw = matches!(plan.handler, HandlerKind::Raw(_));
                                             let is_zero = matches!(
                                                 plan.handler,
                                                 HandlerKind::Zero(_)
                                                     | HandlerKind::Static(_)
                                                     | HandlerKind::Builtin(_)
                                             );
-                                            let needs_body = plan.needs_body;
-                                            if is_raw {
-                                                app.handle_incoming(request, resolved).await
-                                            } else if is_zero && !needs_body {
-                                                app.handle_zero(request.method(), resolved).await
-                                            } else {
-                                                let (parts, body) = request.into_parts();
-                                                if !needs_body {
+                                            match plan.body_mode {
+                                                BodyMode::Incoming => {
+                                                    app.handle_incoming(request, resolved).await
+                                                }
+                                                BodyMode::None if is_zero => {
+                                                    app.handle_zero(request.method(), resolved).await
+                                                }
+                                                BodyMode::None => {
+                                                    let (parts, _) = request.into_parts();
                                                     app.handle_typed(
                                                         Request::from_parts(parts, Bytes::new()),
                                                         resolved,
                                                     )
                                                     .await
-                                                } else if parts
-                                                    .headers
-                                                    .get(header::CONTENT_LENGTH)
-                                                    .and_then(|value| value.to_str().ok())
-                                                    .and_then(|value| value.parse::<usize>().ok())
-                                                    .is_some_and(|length| length > DEFAULT_MAX_BODY_SIZE)
-                                                {
-                                                    response_json(
-                                                        StatusCode::PAYLOAD_TOO_LARGE,
-                                                        json!({
-                                                            "type": "about:blank",
-                                                            "title": "Payload Too Large",
-                                                            "status": 413,
-                                                            "detail": "request body exceeds the configured limit"
-                                                        }),
-                                                    )
-                                                } else {
-                                                    match Limited::new(body, DEFAULT_MAX_BODY_SIZE)
-                                                        .collect()
-                                                        .await
-                                                    {
-                                                        Ok(body) => {
-                                                            app.handle_typed(
-                                                                Request::from_parts(
-                                                                    parts,
-                                                                    body.to_bytes(),
-                                                                ),
-                                                                resolved,
-                                                            )
-                                                            .await
-                                                        }
-                                                        Err(error)
-                                                            if error
-                                                                .downcast_ref::<LengthLimitError>()
-                                                                .is_some() => response_json(
+                                                }
+                                                BodyMode::Buffered { limit } => {
+                                                    let (parts, body) = request.into_parts();
+                                                    let too_large = parts
+                                                        .headers
+                                                        .get(header::CONTENT_LENGTH)
+                                                        .and_then(|value| value.to_str().ok())
+                                                        .and_then(|value| value.parse::<usize>().ok())
+                                                        .is_some_and(|length| length > limit);
+                                                    if too_large {
+                                                        response_json(
                                                             StatusCode::PAYLOAD_TOO_LARGE,
                                                             json!({
                                                                 "type": "about:blank",
@@ -1831,16 +1814,41 @@ impl<S: Send + Sync + 'static> App<S> {
                                                                 "status": 413,
                                                                 "detail": "request body exceeds the configured limit"
                                                             }),
-                                                        ),
-                                                        Err(_) => response_json(
-                                                            StatusCode::BAD_REQUEST,
-                                                            json!({
-                                                                "type": "about:blank",
-                                                                "title": "Bad Request",
-                                                                "status": 400,
-                                                                "detail": "request body was interrupted"
-                                                            }),
-                                                        ),
+                                                        )
+                                                    } else {
+                                                        match Limited::new(body, limit).collect().await {
+                                                            Ok(body) => {
+                                                                app.handle_typed(
+                                                                    Request::from_parts(
+                                                                        parts,
+                                                                        body.to_bytes(),
+                                                                    ),
+                                                                    resolved,
+                                                                )
+                                                                .await
+                                                            }
+                                                            Err(error)
+                                                                if error
+                                                                    .downcast_ref::<LengthLimitError>()
+                                                                    .is_some() => response_json(
+                                                                StatusCode::PAYLOAD_TOO_LARGE,
+                                                                json!({
+                                                                    "type": "about:blank",
+                                                                    "title": "Payload Too Large",
+                                                                    "status": 413,
+                                                                    "detail": "request body exceeds the configured limit"
+                                                                }),
+                                                            ),
+                                                            Err(_) => response_json(
+                                                                StatusCode::BAD_REQUEST,
+                                                                json!({
+                                                                    "type": "about:blank",
+                                                                    "title": "Bad Request",
+                                                                    "status": 400,
+                                                                    "detail": "request body was interrupted"
+                                                                }),
+                                                            ),
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1888,7 +1896,7 @@ impl<S: Send + Sync + 'static> App<S> {
         self.plans.push(RoutePlan {
             capture_names: Vec::new().into(),
             materialize_params: false,
-            needs_body: false,
+            body_mode: BodyMode::None,
             handler: HandlerKind::Static(response),
         });
         self.metadata.push(RouteMetadata {
@@ -1950,7 +1958,13 @@ impl<S: Send + Sync + 'static> App<S> {
         self.plans.push(RoutePlan {
             capture_names,
             materialize_params: H::NEEDS_PARAMS,
-            needs_body: H::NEEDS_BODY,
+            body_mode: if H::NEEDS_BODY {
+                BodyMode::Buffered {
+                    limit: DEFAULT_MAX_BODY_SIZE,
+                }
+            } else {
+                BodyMode::None
+            },
             handler,
         });
         self.metadata.push(RouteMetadata {
@@ -2007,7 +2021,7 @@ impl<S: Send + Sync + 'static> App<S> {
         self.plans.push(RoutePlan {
             capture_names,
             materialize_params: false,
-            needs_body: false,
+            body_mode: BodyMode::Incoming,
             handler,
         });
         self.metadata.push(RouteMetadata {
@@ -2066,7 +2080,7 @@ impl<S: Send + Sync + 'static> App<S> {
         self.plans.push(RoutePlan {
             capture_names: Vec::new().into(),
             materialize_params: false,
-            needs_body: false,
+            body_mode: BodyMode::None,
             handler: HandlerKind::Builtin(builtin),
         });
         self.metadata.push(RouteMetadata {
