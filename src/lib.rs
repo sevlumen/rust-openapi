@@ -1081,11 +1081,6 @@ enum BuiltinHandler {
     Swagger,
 }
 
-struct Route<S> {
-    plan: RoutePlan<S>,
-    metadata: RouteMetadata,
-}
-
 struct RoutePlan<S> {
     capture_names: Arc<[String]>,
     materialize_params: bool,
@@ -1361,7 +1356,8 @@ struct Operation {
 /// The application router and runtime.
 pub struct App<S = ()> {
     state: Arc<S>,
-    routes: Vec<Route<S>>,
+    plans: Vec<RoutePlan<S>>,
+    metadata: Vec<RouteMetadata>,
     static_routes: HashMap<String, RouteSet>,
     dynamic_routes: DynamicRouteTrie,
     last_route: Option<usize>,
@@ -1378,7 +1374,8 @@ impl App<()> {
     pub fn new() -> Self {
         Self {
             state: Arc::new(()),
-            routes: Vec::new(),
+            plans: Vec::new(),
+            metadata: Vec::new(),
             static_routes: HashMap::new(),
             dynamic_routes: DynamicRouteTrie::default(),
             last_route: None,
@@ -1394,12 +1391,13 @@ impl App<()> {
 
     pub fn with_state<T: Send + Sync + 'static>(self, state: T) -> App<T> {
         assert!(
-            self.routes.is_empty(),
+            self.plans.is_empty(),
             "with_state must be configured before routes"
         );
         App {
             state: Arc::new(state),
-            routes: Vec::new(),
+            plans: Vec::new(),
+            metadata: Vec::new(),
             static_routes: HashMap::new(),
             dynamic_routes: DynamicRouteTrie::default(),
             last_route: None,
@@ -1521,7 +1519,7 @@ impl<S: Send + Sync + 'static> App<S> {
 
     pub fn tag(&mut self, tag: impl Into<String>) -> &mut Self {
         if let Some(index) = self.last_route {
-            self.routes[index].metadata.operation.tag = Some(tag.into());
+            self.metadata[index].operation.tag = Some(tag.into());
             self.openapi_bytes = None;
         }
         self
@@ -1529,7 +1527,7 @@ impl<S: Send + Sync + 'static> App<S> {
 
     pub fn summary(&mut self, summary: impl Into<String>) -> &mut Self {
         if let Some(index) = self.last_route {
-            self.routes[index].metadata.operation.summary = Some(summary.into());
+            self.metadata[index].operation.summary = Some(summary.into());
             self.openapi_bytes = None;
         }
         self
@@ -1538,13 +1536,13 @@ impl<S: Send + Sync + 'static> App<S> {
     pub fn operation_id(&mut self, operation_id: impl Into<String>) -> &mut Self {
         let operation_id = operation_id.into();
         assert!(
-            self.routes.iter().all(|route| {
-                route.metadata.operation.operation_id.as_deref() != Some(operation_id.as_str())
+            self.metadata.iter().all(|metadata| {
+                metadata.operation.operation_id.as_deref() != Some(operation_id.as_str())
             }),
             "duplicate operation id"
         );
         if let Some(index) = self.last_route {
-            self.routes[index].metadata.operation.operation_id = Some(operation_id);
+            self.metadata[index].operation.operation_id = Some(operation_id);
             self.openapi_bytes = None;
         }
         self
@@ -1567,32 +1565,30 @@ impl<S: Send + Sync + 'static> App<S> {
 
     pub fn openapi_document(&self) -> Value {
         let mut paths = Map::new();
-        for route in &self.routes {
-            if route.metadata.builtin {
+        for metadata in &self.metadata {
+            if metadata.builtin {
                 continue;
             }
-            let method = route.metadata.method.as_str().to_ascii_lowercase();
+            let method = metadata.method.as_str().to_ascii_lowercase();
             let mut operation = Map::new();
-            if let Some(tag) = &route.metadata.operation.tag {
+            if let Some(tag) = &metadata.operation.tag {
                 operation.insert("tags".to_owned(), json!([tag]));
             }
-            if let Some(summary) = &route.metadata.operation.summary {
+            if let Some(summary) = &metadata.operation.summary {
                 operation.insert("summary".to_owned(), json!(summary));
             }
-            if let Some(operation_id) = &route.metadata.operation.operation_id {
+            if let Some(operation_id) = &metadata.operation.operation_id {
                 operation.insert("operationId".to_owned(), json!(operation_id));
             }
-            let mut parameters = route.metadata.operation.request.parameters.clone();
+            let mut parameters = metadata.operation.request.parameters.clone();
             let mut path_schema_index = 0;
             parameters.extend(
-                route
-                    .metadata
+                metadata
                     .segments
                     .iter()
                     .filter_map(|segment| match segment {
                         Segment::Capture(name) => {
-                            let schema = route
-                                .metadata
+                            let schema = metadata
                                 .operation
                                 .request
                                 .path_schemas
@@ -1614,20 +1610,15 @@ impl<S: Send + Sync + 'static> App<S> {
             if !parameters.is_empty() {
                 operation.insert("parameters".to_owned(), Value::Array(parameters));
             }
-            if let Some(request_body) = &route.metadata.operation.request.request_body {
+            if let Some(request_body) = &metadata.operation.request.request_body {
                 operation.insert("requestBody".to_owned(), request_body.clone());
             }
-            let status = route
-                .metadata
-                .operation
-                .response_status
-                .as_u16()
-                .to_string();
+            let status = metadata.operation.response_status.as_u16().to_string();
             let mut response = Map::new();
             response.insert(
                 "description".to_owned(),
                 Value::String(
-                    match route.metadata.operation.response_status {
+                    match metadata.operation.response_status {
                         StatusCode::NO_CONTENT => "No Content",
                         StatusCode::NOT_MODIFIED => "Not Modified",
                         StatusCode::CREATED => "Created",
@@ -1636,7 +1627,7 @@ impl<S: Send + Sync + 'static> App<S> {
                     .to_owned(),
                 ),
             );
-            if let Some(schema) = &route.metadata.operation.response_schema {
+            if let Some(schema) = &metadata.operation.response_schema {
                 response.insert(
                     "content".to_owned(),
                     json!({ "application/json": { "schema": schema } }),
@@ -1644,10 +1635,10 @@ impl<S: Send + Sync + 'static> App<S> {
             }
             operation.insert("responses".to_owned(), json!({ status: response }));
             paths
-                .entry(route.metadata.template.clone())
+                .entry(metadata.template.clone())
                 .or_insert_with(|| Value::Object(Map::new()));
             paths
-                .get_mut(&route.metadata.template)
+                .get_mut(&metadata.template)
                 .and_then(Value::as_object_mut)
                 .unwrap()
                 .insert(method, Value::Object(operation));
@@ -1716,15 +1707,15 @@ impl<S: Send + Sync + 'static> App<S> {
                                 let path = normalize_request_path(request.uri().path());
                                 let response = match app.resolve_route(request.method(), path) {
                                         RouteResolution::Matched(resolved) => {
-                                            let route = &app.routes[resolved.index];
-                                            let is_raw = matches!(route.plan.handler, HandlerKind::Raw(_));
+                                            let plan = &app.plans[resolved.index];
+                                            let is_raw = matches!(plan.handler, HandlerKind::Raw(_));
                                             let is_zero = matches!(
-                                                route.plan.handler,
+                                                plan.handler,
                                                 HandlerKind::Zero(_)
                                                     | HandlerKind::Static(_)
                                                     | HandlerKind::Builtin(_)
                                             );
-                                            let needs_body = route.plan.needs_body;
+                                            let needs_body = plan.needs_body;
                                             if is_raw {
                                                 app.handle_incoming(request, resolved).await
                                             } else if is_zero && !needs_body {
@@ -1822,38 +1813,35 @@ impl<S: Send + Sync + 'static> App<S> {
             "static response routes cannot contain captures"
         );
         assert!(
-            self.routes
+            self.metadata
                 .iter()
-                .all(|route| route.metadata.method != Method::GET
-                    || route.metadata.template != template),
+                .all(|metadata| metadata.method != Method::GET || metadata.template != template),
             "duplicate route"
         );
 
-        let index = self.routes.len();
+        let index = self.plans.len();
         self.static_routes
             .entry(template.clone())
             .or_default()
             .insert(Method::GET, index);
-        self.routes.push(Route {
-            plan: RoutePlan {
-                capture_names: Vec::new().into(),
-                materialize_params: false,
-                needs_body: false,
-                handler: HandlerKind::Static(response),
-            },
-            metadata: RouteMetadata {
-                builtin: false,
-                method: Method::GET,
-                template,
-                segments,
-                operation: Operation {
-                    tag: None,
-                    summary: None,
-                    operation_id: None,
-                    response_status: StatusCode::OK,
-                    response_schema: None,
-                    request: OpenApiRequest::default(),
-                },
+        self.plans.push(RoutePlan {
+            capture_names: Vec::new().into(),
+            materialize_params: false,
+            needs_body: false,
+            handler: HandlerKind::Static(response),
+        });
+        self.metadata.push(RouteMetadata {
+            builtin: false,
+            method: Method::GET,
+            template,
+            segments,
+            operation: Operation {
+                tag: None,
+                summary: None,
+                operation_id: None,
+                response_status: StatusCode::OK,
+                response_schema: None,
+                request: OpenApiRequest::default(),
             },
         });
         self.openapi_bytes = None;
@@ -1866,9 +1854,9 @@ impl<S: Send + Sync + 'static> App<S> {
     {
         let template = normalize_path(path);
         assert!(
-            self.routes
+            self.metadata
                 .iter()
-                .all(|route| route.metadata.method != method || route.metadata.template != template),
+                .all(|metadata| metadata.method != method || metadata.template != template),
             "duplicate route"
         );
         let segments = parse_template(&template);
@@ -1886,7 +1874,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 handler.call(request, params, state)
             })),
         };
-        let index = self.routes.len();
+        let index = self.plans.len();
         if segments
             .iter()
             .all(|segment| matches!(segment, Segment::Static(_)))
@@ -1898,26 +1886,24 @@ impl<S: Send + Sync + 'static> App<S> {
         } else {
             self.dynamic_routes.insert(&segments, method.clone(), index);
         }
-        self.routes.push(Route {
-            plan: RoutePlan {
-                capture_names,
-                materialize_params: H::NEEDS_PARAMS,
-                needs_body: H::NEEDS_BODY,
-                handler,
-            },
-            metadata: RouteMetadata {
-                builtin: false,
-                method,
-                template,
-                segments,
-                operation: Operation {
-                    tag: None,
-                    summary: None,
-                    operation_id: None,
-                    response_status: <H::Response as ResponseMetadata>::status_code(),
-                    response_schema: <H::Response as ResponseMetadata>::response_schema(),
-                    request: H::openapi_request(),
-                },
+        self.plans.push(RoutePlan {
+            capture_names,
+            materialize_params: H::NEEDS_PARAMS,
+            needs_body: H::NEEDS_BODY,
+            handler,
+        });
+        self.metadata.push(RouteMetadata {
+            builtin: false,
+            method,
+            template,
+            segments,
+            operation: Operation {
+                tag: None,
+                summary: None,
+                operation_id: None,
+                response_status: <H::Response as ResponseMetadata>::status_code(),
+                response_schema: <H::Response as ResponseMetadata>::response_schema(),
+                request: H::openapi_request(),
             },
         });
         self.openapi_bytes = None;
@@ -1930,9 +1916,9 @@ impl<S: Send + Sync + 'static> App<S> {
     {
         let template = normalize_path(path);
         assert!(
-            self.routes
+            self.metadata
                 .iter()
-                .all(|route| route.metadata.method != method || route.metadata.template != template),
+                .all(|metadata| metadata.method != method || metadata.template != template),
             "duplicate route"
         );
         let segments = parse_template(&template);
@@ -1945,7 +1931,7 @@ impl<S: Send + Sync + 'static> App<S> {
             .collect::<Vec<_>>()
             .into();
         let handler = HandlerKind::Raw(Box::new(move |request| handler.call(request)));
-        let index = self.routes.len();
+        let index = self.plans.len();
         if segments
             .iter()
             .all(|segment| matches!(segment, Segment::Static(_)))
@@ -1957,26 +1943,24 @@ impl<S: Send + Sync + 'static> App<S> {
         } else {
             self.dynamic_routes.insert(&segments, method.clone(), index);
         }
-        self.routes.push(Route {
-            plan: RoutePlan {
-                capture_names,
-                materialize_params: false,
-                needs_body: false,
-                handler,
-            },
-            metadata: RouteMetadata {
-                builtin: false,
-                method,
-                template,
-                segments,
-                operation: Operation {
-                    tag: None,
-                    summary: None,
-                    operation_id: None,
-                    response_status: <H::Response as ResponseMetadata>::status_code(),
-                    response_schema: <H::Response as ResponseMetadata>::response_schema(),
-                    request: OpenApiRequest::default(),
-                },
+        self.plans.push(RoutePlan {
+            capture_names,
+            materialize_params: false,
+            needs_body: false,
+            handler,
+        });
+        self.metadata.push(RouteMetadata {
+            builtin: false,
+            method,
+            template,
+            segments,
+            operation: Operation {
+                tag: None,
+                summary: None,
+                operation_id: None,
+                response_status: <H::Response as ResponseMetadata>::status_code(),
+                response_schema: <H::Response as ResponseMetadata>::response_schema(),
+                request: OpenApiRequest::default(),
             },
         });
         self.openapi_bytes = None;
@@ -1990,7 +1974,7 @@ impl<S: Send + Sync + 'static> App<S> {
             self.swagger_route
         };
         if let Some(index) = existing {
-            let old_path = self.routes[index].metadata.template.clone();
+            let old_path = self.metadata[index].template.clone();
             if old_path != path {
                 if let Some(routes) = self.static_routes.get_mut(&old_path) {
                     routes.remove(&Method::GET);
@@ -2002,42 +1986,40 @@ impl<S: Send + Sync + 'static> App<S> {
                 {
                     self.static_routes.remove(&old_path);
                 }
-                self.routes[index].metadata.template = path.clone();
-                self.routes[index].metadata.segments = parse_template(&path);
+                self.metadata[index].template = path.clone();
+                self.metadata[index].segments = parse_template(&path);
                 self.static_routes
                     .entry(path)
                     .or_default()
                     .insert(Method::GET, index);
             }
-            self.routes[index].plan.handler = HandlerKind::Builtin(builtin);
+            self.plans[index].handler = HandlerKind::Builtin(builtin);
             return;
         }
 
-        let index = self.routes.len();
+        let index = self.plans.len();
         self.static_routes
             .entry(path.clone())
             .or_default()
             .insert(Method::GET, index);
-        self.routes.push(Route {
-            plan: RoutePlan {
-                capture_names: Vec::new().into(),
-                materialize_params: false,
-                needs_body: false,
-                handler: HandlerKind::Builtin(builtin),
-            },
-            metadata: RouteMetadata {
-                builtin: true,
-                method: Method::GET,
-                template: path,
-                segments: Vec::new(),
-                operation: Operation {
-                    tag: None,
-                    summary: None,
-                    operation_id: None,
-                    response_status: StatusCode::OK,
-                    response_schema: None,
-                    request: OpenApiRequest::default(),
-                },
+        self.plans.push(RoutePlan {
+            capture_names: Vec::new().into(),
+            materialize_params: false,
+            needs_body: false,
+            handler: HandlerKind::Builtin(builtin),
+        });
+        self.metadata.push(RouteMetadata {
+            builtin: true,
+            method: Method::GET,
+            template: path,
+            segments: Vec::new(),
+            operation: Operation {
+                tag: None,
+                summary: None,
+                operation_id: None,
+                response_status: StatusCode::OK,
+                response_schema: None,
+                request: OpenApiRequest::default(),
             },
         });
         if is_openapi {
@@ -2103,8 +2085,8 @@ impl<S: Send + Sync + 'static> App<S> {
 
     async fn handle_typed(&self, request: Request<Bytes>, resolved: ResolvedRoute) -> HttpResponse {
         let method = request.method().clone();
-        let route = &self.routes[resolved.index];
-        match &route.plan.handler {
+        let plan = &self.plans[resolved.index];
+        match &plan.handler {
             HandlerKind::Zero(handler) => return maybe_head(&method, handler().await),
             HandlerKind::Static(response) => {
                 return maybe_head(&method, response.into_response());
@@ -2117,15 +2099,15 @@ impl<S: Send + Sync + 'static> App<S> {
         let mut request = request;
         let path = normalize_request_path(request.uri().path());
         let params = Params::from_match(
-            &route.plan.capture_names,
+            &plan.capture_names,
             resolved.captures.ranges(),
             resolved.captures.count as usize,
             path,
-            route.plan.materialize_params,
+            plan.materialize_params,
         );
         maybe_head(
             &method,
-            match &route.plan.handler {
+            match &plan.handler {
                 HandlerKind::Typed(handler) => handler(&mut request, &params, &self.state).await,
                 HandlerKind::Zero(_) => unreachable!("zero route handled above"),
                 HandlerKind::Raw(_) => unreachable!("raw route handled separately"),
@@ -2137,10 +2119,10 @@ impl<S: Send + Sync + 'static> App<S> {
     }
 
     async fn handle_zero(&self, method: &Method, resolved: ResolvedRoute) -> HttpResponse {
-        let route = &self.routes[resolved.index];
+        let plan = &self.plans[resolved.index];
         maybe_head(
             method,
-            match &route.plan.handler {
+            match &plan.handler {
                 HandlerKind::Zero(handler) => handler().await,
                 HandlerKind::Typed(_) => unreachable!("typed route handled separately"),
                 HandlerKind::Raw(_) => unreachable!("raw route handled separately"),
@@ -2171,10 +2153,10 @@ impl<S: Send + Sync + 'static> App<S> {
         resolved: ResolvedRoute,
     ) -> HttpResponse {
         let method = request.method().clone();
-        let route = &self.routes[resolved.index];
+        let plan = &self.plans[resolved.index];
         maybe_head(
             &method,
-            match &route.plan.handler {
+            match &plan.handler {
                 HandlerKind::Raw(handler) => handler(request).await,
                 HandlerKind::Zero(_) => unreachable!("zero route handled separately"),
                 HandlerKind::Typed(_) => unreachable!("typed route handled separately"),
@@ -2487,7 +2469,7 @@ mod tests {
             _ => panic!("zero route did not resolve"),
         };
         assert!(matches!(
-            app.routes[resolved.index].plan.handler,
+            app.plans[resolved.index].handler,
             HandlerKind::Zero(_)
         ));
         assert_eq!(resolved.captures.count, 0);
