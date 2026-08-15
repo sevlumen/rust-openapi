@@ -1120,10 +1120,15 @@ enum BuiltinHandler {
 }
 
 struct RoutePlan<S> {
-    capture_names: Arc<[String]>,
-    materialize_params: bool,
+    capture_mode: CaptureMode,
     body_mode: BodyMode,
     handler: HandlerKind<S>,
+}
+
+enum CaptureMode {
+    None,
+    Borrowed,
+    Materialized(Arc<[String]>),
 }
 
 #[derive(Clone, Copy)]
@@ -1949,8 +1954,7 @@ impl<S: Send + Sync + 'static> App<S> {
             .or_default()
             .insert(Method::GET, index);
         self.plans.push(RoutePlan {
-            capture_names: Vec::new().into(),
-            materialize_params: false,
+            capture_mode: CaptureMode::None,
             body_mode: BodyMode::None,
             handler: HandlerKind::Static(response),
         });
@@ -1984,14 +1988,24 @@ impl<S: Send + Sync + 'static> App<S> {
             "duplicate route"
         );
         let segments = parse_template(&template);
-        let capture_names: Arc<[String]> = segments
+        let capture_mode = if H::NEEDS_PARAMS {
+            let capture_names: Arc<[String]> = segments
+                .iter()
+                .filter_map(|segment| match segment {
+                    Segment::Capture(name) => Some(name.clone()),
+                    Segment::Static(_) => None,
+                })
+                .collect::<Vec<_>>()
+                .into();
+            CaptureMode::Materialized(capture_names)
+        } else if segments
             .iter()
-            .filter_map(|segment| match segment {
-                Segment::Capture(name) => Some(name.clone()),
-                Segment::Static(_) => None,
-            })
-            .collect::<Vec<_>>()
-            .into();
+            .any(|segment| matches!(segment, Segment::Capture(_)))
+        {
+            CaptureMode::Borrowed
+        } else {
+            CaptureMode::None
+        };
         let handler = match handler.zero_handler() {
             Some(zero_handler) => HandlerKind::Zero(zero_handler),
             None => HandlerKind::Typed(Box::new(move |request, params, state| {
@@ -2011,8 +2025,7 @@ impl<S: Send + Sync + 'static> App<S> {
             self.dynamic_routes.insert(&segments, method.clone(), index);
         }
         self.plans.push(RoutePlan {
-            capture_names,
-            materialize_params: H::NEEDS_PARAMS,
+            capture_mode,
             body_mode: if H::NEEDS_BODY {
                 BodyMode::Buffered {
                     limit: DEFAULT_MAX_BODY_SIZE,
@@ -2052,14 +2065,6 @@ impl<S: Send + Sync + 'static> App<S> {
             "duplicate route"
         );
         let segments = parse_template(&template);
-        let capture_names: Arc<[String]> = segments
-            .iter()
-            .filter_map(|segment| match segment {
-                Segment::Capture(name) => Some(name.clone()),
-                Segment::Static(_) => None,
-            })
-            .collect::<Vec<_>>()
-            .into();
         let handler = HandlerKind::Raw(Box::new(move |request| handler.call(request)));
         let index = self.plans.len();
         if segments
@@ -2074,8 +2079,7 @@ impl<S: Send + Sync + 'static> App<S> {
             self.dynamic_routes.insert(&segments, method.clone(), index);
         }
         self.plans.push(RoutePlan {
-            capture_names,
-            materialize_params: false,
+            capture_mode: CaptureMode::None,
             body_mode: BodyMode::Incoming,
             handler,
         });
@@ -2133,8 +2137,7 @@ impl<S: Send + Sync + 'static> App<S> {
             .or_default()
             .insert(Method::GET, index);
         self.plans.push(RoutePlan {
-            capture_names: Vec::new().into(),
-            materialize_params: false,
+            capture_mode: CaptureMode::None,
             body_mode: BodyMode::None,
             handler: HandlerKind::Builtin(builtin),
         });
@@ -2228,17 +2231,28 @@ impl<S: Send + Sync + 'static> App<S> {
         }
         let mut request = request;
         let path = normalize_request_path(request.uri().path());
-        let response = if resolved.captures.count == 0 && !plan.materialize_params {
-            self.invoke_typed(&mut request, Params::empty(), plan).await
-        } else {
-            let params = Params::from_match(
-                &plan.capture_names,
-                resolved.captures.ranges(),
-                resolved.captures.count as usize,
-                path,
-                plan.materialize_params,
-            );
-            self.invoke_typed(&mut request, &params, plan).await
+        let response = match &plan.capture_mode {
+            CaptureMode::None => self.invoke_typed(&mut request, Params::empty(), plan).await,
+            CaptureMode::Borrowed => {
+                let params = Params::from_match(
+                    &[],
+                    resolved.captures.ranges(),
+                    resolved.captures.count as usize,
+                    path,
+                    false,
+                );
+                self.invoke_typed(&mut request, &params, plan).await
+            }
+            CaptureMode::Materialized(names) => {
+                let params = Params::from_match(
+                    names,
+                    resolved.captures.ranges(),
+                    resolved.captures.count as usize,
+                    path,
+                    true,
+                );
+                self.invoke_typed(&mut request, &params, plan).await
+            }
         };
         maybe_head(&method, response)
     }
@@ -2524,17 +2538,28 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
         }
         let mut request = request;
         let path = normalize_request_path(request.uri().path());
-        let response = if resolved.captures.count == 0 && !plan.materialize_params {
-            self.invoke_typed(&mut request, Params::empty(), plan).await
-        } else {
-            let params = Params::from_match(
-                &plan.capture_names,
-                resolved.captures.ranges(),
-                resolved.captures.count as usize,
-                path,
-                plan.materialize_params,
-            );
-            self.invoke_typed(&mut request, &params, plan).await
+        let response = match &plan.capture_mode {
+            CaptureMode::None => self.invoke_typed(&mut request, Params::empty(), plan).await,
+            CaptureMode::Borrowed => {
+                let params = Params::from_match(
+                    &[],
+                    resolved.captures.ranges(),
+                    resolved.captures.count as usize,
+                    path,
+                    false,
+                );
+                self.invoke_typed(&mut request, &params, plan).await
+            }
+            CaptureMode::Materialized(names) => {
+                let params = Params::from_match(
+                    names,
+                    resolved.captures.ranges(),
+                    resolved.captures.count as usize,
+                    path,
+                    true,
+                );
+                self.invoke_typed(&mut request, &params, plan).await
+            }
         };
         maybe_head(&method, response)
     }
