@@ -38,14 +38,17 @@ cargo build --workspace --examples
 The framework repository keeps correctness checks and the router microbenchmark;
 the HTTP load-test laboratory is maintained separately.
 
-```powershell
-cargo bench --bench router
+```bash
+cargo bench --bench router --features uuid,test-util,swagger
 ```
 
 The release-profile router microbench also checks static route counts at
 1/10/100/1,000/10,000 routes and asserts zero extra allocations/bytes for
 typed path, query, and header extraction against request-shape-matched raw
-comparators.
+comparators. It also reports static and dynamic route latency, response
+construction, buffered JSON extraction, 404/405/OPTIONS dispatch, and dynamic
+route positions (first/middle/last/miss). This is the developer regression
+detector; HTTP acceptance runs belong to the separate `oas-rs-perf` Linux lab.
 
 Streaming is opt-in with `StreamResponse<S>`; ordinary text and JSON responses
 continue to use fixed `Bytes` bodies.
