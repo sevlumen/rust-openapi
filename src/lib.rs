@@ -1399,6 +1399,11 @@ pub struct App<S = ()> {
     version: String,
 }
 
+/// An immutable application runtime produced by [`App::build`].
+pub struct AppRuntime<S = ()> {
+    app: App<S>,
+}
+
 impl App<()> {
     pub fn new() -> Self {
         Self {
@@ -1458,6 +1463,15 @@ impl<S: Send + Sync + 'static> App<S> {
         self.version = version.into();
         self.openapi_bytes = None;
         self
+    }
+
+    /// Freeze route registration into an immutable runtime.
+    ///
+    /// The returned runtime exposes serving and request execution only; route
+    /// registration methods remain available on the builder type.
+    pub fn build(mut self) -> AppRuntime<S> {
+        self.prepare_openapi();
+        AppRuntime { app: self }
     }
 
     pub fn get<H, A>(&mut self, path: &str, handler: H) -> &mut Self
@@ -1686,6 +1700,16 @@ impl<S: Send + Sync + 'static> App<S> {
         headers: &[(&str, &str)],
         body: Option<Bytes>,
     ) -> TestResponse {
+        self.oneshot_inner(method, uri, headers, body).await
+    }
+
+    async fn oneshot_inner(
+        &self,
+        method: Method,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: Option<Bytes>,
+    ) -> TestResponse {
         let mut builder = Request::builder().method(method).uri(uri);
         for (name, value) in headers {
             if !name.is_empty() {
@@ -1704,8 +1728,7 @@ impl<S: Send + Sync + 'static> App<S> {
         self,
         address: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let listener = tokio::net::TcpListener::bind(address).await?;
-        self.serve_listener(listener, std::future::pending()).await
+        self.build().listen(address).await
     }
 
     /// Serve an already-bound listener until `shutdown` resolves. This is
@@ -1718,9 +1741,18 @@ impl<S: Send + Sync + 'static> App<S> {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let mut app = self;
-        app.prepare_openapi();
-        let app = Arc::new(app);
+        self.build().serve_listener(listener, shutdown).await
+    }
+
+    async fn serve_listener_inner<F>(
+        self,
+        listener: tokio::net::TcpListener,
+        shutdown: F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let app = Arc::new(self);
         tokio::pin!(shutdown);
         loop {
             tokio::select! {
@@ -2193,6 +2225,37 @@ impl<S: Send + Sync + 'static> App<S> {
                 HandlerKind::Builtin(_) => unreachable!("builtin route handled separately"),
             },
         )
+    }
+}
+
+impl<S: Send + Sync + 'static> AppRuntime<S> {
+    pub async fn oneshot(
+        &self,
+        method: Method,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: Option<Bytes>,
+    ) -> TestResponse {
+        self.app.oneshot_inner(method, uri, headers, body).await
+    }
+
+    pub async fn listen(
+        self,
+        address: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let listener = tokio::net::TcpListener::bind(address).await?;
+        self.serve_listener(listener, std::future::pending()).await
+    }
+
+    pub async fn serve_listener<F>(
+        self,
+        listener: tokio::net::TcpListener,
+        shutdown: F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.app.serve_listener_inner(listener, shutdown).await
     }
 }
 
