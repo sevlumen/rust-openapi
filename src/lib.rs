@@ -1363,6 +1363,40 @@ enum RouteResolution {
     NotFound,
 }
 
+fn route_index(routes: &RouteSet, method: &Method) -> Option<RouteId> {
+    routes.route(method).or_else(|| {
+        (method == Method::HEAD)
+            .then(|| routes.route(&Method::GET))
+            .flatten()
+    })
+}
+
+fn resolve_static_route_set(method: &Method, routes: &RouteSet) -> RouteResolution {
+    let index = route_index(routes, method);
+    if index.is_none() && *method == Method::OPTIONS {
+        return RouteResolution::Options(routes.allowed_methods());
+    }
+    let Some(index) = index else {
+        return RouteResolution::MethodNotAllowed(routes.allowed_methods());
+    };
+    RouteResolution::Matched(ResolvedRoute::Static { index })
+}
+
+fn resolve_dynamic_route_set(
+    method: &Method,
+    routes: &RouteSet,
+    captures: CaptureSet,
+) -> RouteResolution {
+    let index = route_index(routes, method);
+    if index.is_none() && *method == Method::OPTIONS {
+        return RouteResolution::Options(routes.allowed_methods());
+    }
+    let Some(index) = index else {
+        return RouteResolution::MethodNotAllowed(routes.allowed_methods());
+    };
+    RouteResolution::Matched(ResolvedRoute::Dynamic { index, captures })
+}
+
 impl Default for DynamicRouteTrie {
     fn default() -> Self {
         Self {
@@ -2113,36 +2147,12 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
 
     fn resolve_route(&self, method: &Method, path: &str) -> RouteResolution {
         if let Some(routes) = self.static_routes.get(path) {
-            return self.resolve_route_set(method, routes, None);
+            return resolve_static_route_set(method, routes);
         }
         let Some(path_match) = self.dynamic_routes.find(path) else {
             return RouteResolution::NotFound;
         };
-        self.resolve_route_set(method, path_match.routes, Some(path_match.captures))
-    }
-
-    fn resolve_route_set(
-        &self,
-        method: &Method,
-        routes: &RouteSet,
-        captures: Option<CaptureSet>,
-    ) -> RouteResolution {
-        let index = routes.route(method).or_else(|| {
-            (method == Method::HEAD)
-                .then(|| routes.route(&Method::GET))
-                .flatten()
-        });
-        if index.is_none() && *method == Method::OPTIONS {
-            return RouteResolution::Options(routes.allowed_methods());
-        }
-        let Some(index) = index else {
-            return RouteResolution::MethodNotAllowed(routes.allowed_methods());
-        };
-        let resolved = match captures {
-            Some(captures) => ResolvedRoute::Dynamic { index, captures },
-            None => ResolvedRoute::Static { index },
-        };
-        RouteResolution::Matched(resolved)
+        resolve_dynamic_route_set(method, path_match.routes, path_match.captures)
     }
 
     async fn handle_typed(&self, request: Request<Bytes>, resolved: ResolvedRoute) -> HttpResponse {
@@ -2552,36 +2562,12 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
 
     fn resolve_route(&self, method: &Method, path: &str) -> RouteResolution {
         if let Some(routes) = self.static_routes.get(path) {
-            return self.resolve_route_set(method, routes, None);
+            return resolve_static_route_set(method, routes);
         }
         let Some(path_match) = self.dynamic_routes.find(path) else {
             return RouteResolution::NotFound;
         };
-        self.resolve_route_set(method, path_match.routes, Some(path_match.captures))
-    }
-
-    fn resolve_route_set(
-        &self,
-        method: &Method,
-        routes: &RouteSet,
-        captures: Option<CaptureSet>,
-    ) -> RouteResolution {
-        let index = routes.route(method).or_else(|| {
-            (method == Method::HEAD)
-                .then(|| routes.route(&Method::GET))
-                .flatten()
-        });
-        if index.is_none() && *method == Method::OPTIONS {
-            return RouteResolution::Options(routes.allowed_methods());
-        }
-        let Some(index) = index else {
-            return RouteResolution::MethodNotAllowed(routes.allowed_methods());
-        };
-        let resolved = match captures {
-            Some(captures) => ResolvedRoute::Dynamic { index, captures },
-            None => ResolvedRoute::Static { index },
-        };
-        RouteResolution::Matched(resolved)
+        resolve_dynamic_route_set(method, path_match.routes, path_match.captures)
     }
 
     async fn handle_typed(&self, request: Request<Bytes>, resolved: ResolvedRoute) -> HttpResponse {
