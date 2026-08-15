@@ -2288,6 +2288,7 @@ impl<S: Send + Sync + 'static> App<S> {
         )
     }
 
+    #[allow(dead_code)]
     fn builtin_response(&self, builtin: BuiltinHandler) -> HttpResponse {
         match builtin {
             BuiltinHandler::OpenApi => {
@@ -2331,6 +2332,188 @@ struct RuntimeRef<'a, S> {
     dynamic_routes: &'a DynamicRouteTrie,
     openapi_path: Option<&'a str>,
     openapi_bytes: Option<&'a Bytes>,
+}
+
+struct ConnectionRuntime<S> {
+    runtime: Arc<AppRuntime<S>>,
+}
+
+enum PreparedDispatch {
+    Ready(Option<HttpResponse>),
+    Handler {
+        method: Method,
+        future: HandlerFuture,
+    },
+    Buffered(BoxFuture<HttpResponse>),
+}
+
+impl Future for PreparedDispatch {
+    type Output = HttpResponse;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        unsafe {
+            match self.get_unchecked_mut() {
+                Self::Ready(response) => {
+                    Poll::Ready(response.take().expect("prepared response polled twice"))
+                }
+                Self::Handler { method, future } => {
+                    match Pin::new_unchecked(future).poll(context) {
+                        Poll::Ready(response) => Poll::Ready(maybe_head(method, response)),
+                        Poll::Pending => Poll::Pending,
+                    }
+                }
+                Self::Buffered(future) => Pin::new_unchecked(future).poll(context),
+            }
+        }
+    }
+}
+
+impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
+    fn new(runtime: Arc<AppRuntime<S>>) -> Self {
+        Self { runtime }
+    }
+
+    fn runtime_ref(&self) -> RuntimeRef<'_, S> {
+        self.runtime.runtime_ref()
+    }
+
+    fn prepare(&self, request: Request<Incoming>) -> PreparedDispatch {
+        let method = request.method().clone();
+        let path = normalize_request_path(request.uri().path());
+        let router = self.runtime_ref();
+        match router.resolve_route(&method, path) {
+            RouteResolution::Matched(resolved) => self.prepare_matched(router, request, resolved),
+            RouteResolution::Options(allow) => {
+                PreparedDispatch::Ready(Some(options_response(allow)))
+            }
+            RouteResolution::MethodNotAllowed(allow) => {
+                PreparedDispatch::Ready(Some(method_not_allowed_response(allow)))
+            }
+            RouteResolution::NotFound => PreparedDispatch::Ready(Some(not_found())),
+        }
+    }
+
+    fn prepare_matched(
+        &self,
+        router: RuntimeRef<'_, S>,
+        request: Request<Incoming>,
+        resolved: ResolvedRoute,
+    ) -> PreparedDispatch {
+        let method = request.method().clone();
+        let plan = &router.plans[resolved.index.index()];
+        match plan.body_mode {
+            BodyMode::Incoming => match &plan.handler {
+                HandlerKind::Raw(handler) => PreparedDispatch::Handler {
+                    method,
+                    future: handler(request),
+                },
+                HandlerKind::Zero(_)
+                | HandlerKind::Typed(_)
+                | HandlerKind::Static(_)
+                | HandlerKind::Builtin(_) => {
+                    unreachable!("only raw handlers may receive Incoming")
+                }
+            },
+            BodyMode::None => {
+                let (parts, _) = request.into_parts();
+                let mut request = Request::from_parts(parts, Bytes::new());
+                match &plan.handler {
+                    HandlerKind::Zero(handler) => PreparedDispatch::Handler {
+                        method,
+                        future: handler(),
+                    },
+                    HandlerKind::Static(response) => {
+                        PreparedDispatch::Ready(Some(maybe_head(&method, response.to_response())))
+                    }
+                    HandlerKind::Builtin(builtin) => PreparedDispatch::Ready(Some(maybe_head(
+                        &method,
+                        router.builtin_response(*builtin),
+                    ))),
+                    HandlerKind::Typed(handler) => {
+                        let path = normalize_request_path(request.uri().path());
+                        let future = match &plan.capture_mode {
+                            CaptureMode::None => {
+                                handler(&mut request, Params::empty(), router.state)
+                            }
+                            CaptureMode::Borrowed => {
+                                let params = Params::from_match(
+                                    &[],
+                                    resolved.captures.ranges(),
+                                    resolved.captures.count as usize,
+                                    path,
+                                    false,
+                                );
+                                handler(&mut request, &params, router.state)
+                            }
+                            CaptureMode::Materialized(names) => {
+                                let params = Params::from_match(
+                                    names,
+                                    resolved.captures.ranges(),
+                                    resolved.captures.count as usize,
+                                    path,
+                                    true,
+                                );
+                                handler(&mut request, &params, router.state)
+                            }
+                        };
+                        PreparedDispatch::Handler { method, future }
+                    }
+                    HandlerKind::Raw(_) => unreachable!("raw handler requires Incoming"),
+                }
+            }
+            BodyMode::Buffered { limit } => {
+                let runtime = Arc::clone(&self.runtime);
+                let (parts, body) = request.into_parts();
+                let too_large = parts
+                    .headers
+                    .get(header::CONTENT_LENGTH)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .is_some_and(|length| length > limit);
+                if too_large {
+                    return PreparedDispatch::Ready(Some(response_json(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        json!({
+                            "type": "about:blank",
+                            "title": "Payload Too Large",
+                            "status": 413,
+                            "detail": "request body exceeds the configured limit"
+                        }),
+                    )));
+                }
+                PreparedDispatch::Buffered(Box::pin(async move {
+                    match Limited::new(body, limit).collect().await {
+                        Ok(body) => {
+                            runtime
+                                .runtime_ref()
+                                .handle_typed(Request::from_parts(parts, body.to_bytes()), resolved)
+                                .await
+                        }
+                        Err(error) if error.downcast_ref::<LengthLimitError>().is_some() => {
+                            response_json(
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                json!({
+                                    "type": "about:blank",
+                                    "title": "Payload Too Large",
+                                    "status": 413,
+                                    "detail": "request body exceeds the configured limit"
+                                }),
+                            )
+                        }
+                        Err(_) => response_json(
+                            StatusCode::BAD_REQUEST,
+                            json!({
+                                "type": "about:blank",
+                                "title": "Bad Request",
+                                "status": 400,
+                                "detail": "request body was interrupted"
+                            }),
+                        ),
+                    }
+                }))
+            }
+        }
+    }
 }
 
 impl<S: Send + Sync + 'static> AppRuntime<S> {
@@ -2580,20 +2763,6 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
         }
     }
 
-    async fn handle_zero(&self, method: &Method, resolved: ResolvedRoute) -> HttpResponse {
-        let plan = &self.plans[resolved.index.index()];
-        maybe_head(
-            method,
-            match &plan.handler {
-                HandlerKind::Zero(handler) => handler().await,
-                HandlerKind::Typed(_) => unreachable!("typed route handled separately"),
-                HandlerKind::Raw(_) => unreachable!("raw route handled separately"),
-                HandlerKind::Static(response) => response.to_response(),
-                HandlerKind::Builtin(builtin) => self.builtin_response(*builtin),
-            },
-        )
-    }
-
     fn builtin_response(&self, builtin: BuiltinHandler) -> HttpResponse {
         match builtin {
             BuiltinHandler::OpenApi => {
@@ -2607,25 +2776,6 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
                 response_text(StatusCode::OK, swagger_html(self.openapi_path))
             }
         }
-    }
-
-    async fn handle_incoming(
-        &self,
-        request: Request<Incoming>,
-        resolved: ResolvedRoute,
-    ) -> HttpResponse {
-        let method = request.method().clone();
-        let plan = &self.plans[resolved.index.index()];
-        maybe_head(
-            &method,
-            match &plan.handler {
-                HandlerKind::Raw(handler) => handler(request).await,
-                HandlerKind::Zero(_) => unreachable!("zero route handled separately"),
-                HandlerKind::Typed(_) => unreachable!("typed route handled separately"),
-                HandlerKind::Static(_) => unreachable!("static route handled separately"),
-                HandlerKind::Builtin(_) => unreachable!("builtin route handled separately"),
-            },
-        )
     }
 }
 
@@ -2645,103 +2795,13 @@ where
             _ = &mut shutdown => break,
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
-                let runtime = Arc::clone(&runtime);
+                let connection = ConnectionRuntime::new(Arc::clone(&runtime));
                 tokio::spawn(async move {
                     let io = hyper_util::rt::TokioIo::new(stream);
                     let service = hyper::service::service_fn(move |request: Request<Incoming>| {
-                        let runtime = Arc::clone(&runtime);
+                        let prepared = connection.prepare(request);
                         async move {
-                            let router = runtime.runtime_ref();
-                            let path = normalize_request_path(request.uri().path());
-                            let response = match router.resolve_route(request.method(), path) {
-                                RouteResolution::Matched(resolved) => {
-                                    let plan = &router.plans[resolved.index.index()];
-                                    let is_zero = matches!(
-                                        plan.handler,
-                                        HandlerKind::Zero(_)
-                                            | HandlerKind::Static(_)
-                                            | HandlerKind::Builtin(_)
-                                    );
-                                    match plan.body_mode {
-                                        BodyMode::Incoming => {
-                                            router.handle_incoming(request, resolved).await
-                                        }
-                                        BodyMode::None if is_zero => {
-                                            router.handle_zero(request.method(), resolved).await
-                                        }
-                                        BodyMode::None => {
-                                            let (parts, _) = request.into_parts();
-                                            router
-                                                .handle_typed(
-                                                    Request::from_parts(parts, Bytes::new()),
-                                                    resolved,
-                                                )
-                                                .await
-                                        }
-                                        BodyMode::Buffered { limit } => {
-                                            let (parts, body) = request.into_parts();
-                                            let too_large = parts
-                                                .headers
-                                                .get(header::CONTENT_LENGTH)
-                                                .and_then(|value| value.to_str().ok())
-                                                .and_then(|value| value.parse::<usize>().ok())
-                                                .is_some_and(|length| length > limit);
-                                            if too_large {
-                                                response_json(
-                                                    StatusCode::PAYLOAD_TOO_LARGE,
-                                                    json!({
-                                                        "type": "about:blank",
-                                                        "title": "Payload Too Large",
-                                                        "status": 413,
-                                                        "detail": "request body exceeds the configured limit"
-                                                    }),
-                                                )
-                                            } else {
-                                                match Limited::new(body, limit).collect().await {
-                                                    Ok(body) => {
-                                                        router
-                                                            .handle_typed(
-                                                                Request::from_parts(
-                                                                    parts,
-                                                                    body.to_bytes(),
-                                                                ),
-                                                                resolved,
-                                                            )
-                                                            .await
-                                                    }
-                                                    Err(error)
-                                                        if error
-                                                            .downcast_ref::<LengthLimitError>()
-                                                            .is_some() => response_json(
-                                                        StatusCode::PAYLOAD_TOO_LARGE,
-                                                        json!({
-                                                            "type": "about:blank",
-                                                            "title": "Payload Too Large",
-                                                            "status": 413,
-                                                            "detail": "request body exceeds the configured limit"
-                                                        }),
-                                                    ),
-                                                    Err(_) => response_json(
-                                                        StatusCode::BAD_REQUEST,
-                                                        json!({
-                                                            "type": "about:blank",
-                                                            "title": "Bad Request",
-                                                            "status": 400,
-                                                            "detail": "request body was interrupted"
-                                                        }),
-                                                    ),
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                RouteResolution::Options(allow) => options_response(allow),
-                                RouteResolution::MethodNotAllowed(allow) => {
-                                    method_not_allowed_response(allow)
-                                }
-                                RouteResolution::NotFound => not_found(),
-                            };
-                            Ok::<_, Infallible>(response)
+                            Ok::<_, Infallible>(prepared.await)
                         }
                     });
                     let _ = hyper::server::conn::http1::Builder::new()
