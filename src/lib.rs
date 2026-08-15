@@ -472,6 +472,8 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    #[cold]
+    #[inline(never)]
     pub fn new(status: StatusCode, title: impl Into<String>, detail: impl Into<String>) -> Self {
         Self {
             status,
@@ -481,10 +483,14 @@ impl ApiError {
         }
     }
 
+    #[cold]
+    #[inline(never)]
     pub fn bad_request(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "Bad Request", detail)
     }
 
+    #[cold]
+    #[inline(never)]
     fn missing(detail: impl Into<String>) -> Self {
         let mut error = Self::bad_request(detail);
         error.missing = true;
@@ -497,6 +503,8 @@ impl ApiError {
 }
 
 impl IntoResponse for ApiError {
+    #[cold]
+    #[inline(never)]
     fn into_response(self) -> HttpResponse {
         let body = json!({
             "type": "about:blank",
