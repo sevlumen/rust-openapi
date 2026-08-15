@@ -1182,9 +1182,27 @@ struct DynamicRouteTrie {
 
 #[derive(Default)]
 struct DynamicRouteNode {
-    static_children: HashMap<String, usize>,
-    capture_child: Option<usize>,
+    static_children: HashMap<String, NodeId>,
+    capture_child: Option<NodeId>,
     routes: Option<RouteSet>,
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NodeId(u32);
+
+impl NodeId {
+    fn new(index: usize) -> Self {
+        assert!(
+            index <= u32::MAX as usize,
+            "dynamic trie exceeds u32::MAX nodes"
+        );
+        Self(index as u32)
+    }
+
+    fn index(self) -> usize {
+        self.0 as usize
+    }
 }
 
 #[repr(transparent)]
@@ -1362,12 +1380,12 @@ impl DynamicRouteTrie {
     fn insert(&mut self, segments: &[Segment], method: Method, route: usize) {
         let mut node_index = 0;
         for segment in segments {
-            let next_index = match segment {
+            let next = match segment {
                 Segment::Static(value) => {
                     if let Some(index) = self.nodes[node_index].static_children.get(value) {
                         *index
                     } else {
-                        let index = self.nodes.len();
+                        let index = NodeId::new(self.nodes.len());
                         self.nodes.push(DynamicRouteNode::default());
                         self.nodes[node_index]
                             .static_children
@@ -1379,14 +1397,14 @@ impl DynamicRouteTrie {
                     if let Some(index) = self.nodes[node_index].capture_child {
                         index
                     } else {
-                        let index = self.nodes.len();
+                        let index = NodeId::new(self.nodes.len());
                         self.nodes.push(DynamicRouteNode::default());
                         self.nodes[node_index].capture_child = Some(index);
                         index
                     }
                 }
             };
-            node_index = next_index;
+            node_index = next.index();
         }
         self.nodes[node_index]
             .routes
@@ -1417,7 +1435,7 @@ impl DynamicRouteTrie {
         // Static branches have precedence over captures, but the capture
         // branch remains available if the static branch fails deeper down.
         if let Some(&child) = node.static_children.get(part.value)
-            && let Some(found) = self.find_node(child, parts, captures)
+            && let Some(found) = self.find_node(child.index(), parts, captures)
         {
             return Some(found);
         }
@@ -1433,7 +1451,7 @@ impl DynamicRouteTrie {
                     end: part.end,
                 },
             );
-            if let Some(found) = self.find_node(child, parts, captured) {
+            if let Some(found) = self.find_node(child.index(), parts, captured) {
                 return Some(found);
             }
         }
@@ -3059,6 +3077,8 @@ mod tests {
     #[test]
     fn route_ids_are_compact_u32_handles() {
         assert_eq!(size_of::<RouteId>(), size_of::<u32>());
+        assert_eq!(size_of::<NodeId>(), size_of::<u32>());
+        assert!(size_of::<Option<NodeId>>() <= size_of::<Option<usize>>());
         assert!(size_of::<RouteSet>() <= 32);
     }
 
