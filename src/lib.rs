@@ -2679,6 +2679,12 @@ mod tests {
     }
 
     #[test]
+    fn no_capture_routes_use_a_shared_empty_params() {
+        assert!(std::ptr::eq(Params::empty(), Params::empty()));
+        assert!(Params::empty().get("id").is_none());
+    }
+
+    #[test]
     fn route_plans_precompute_body_modes() {
         let mut app = App::new();
         app.get("/plain", || async { "OK" });
