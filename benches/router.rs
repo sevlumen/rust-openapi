@@ -8,7 +8,7 @@ use std::{
 use bytes::Bytes;
 use http::{Request, Response, StatusCode};
 use http_body_util::Full;
-use oas_rs::{ApiError, App, AppRuntime, Header, HeaderSpec, Method, Path, Query};
+use oas_rs::{ApiError, App, AppRuntime, Header, HeaderSpec, JsonBytes, Method, Path, Query};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -216,6 +216,20 @@ async fn main() {
         static_json_elapsed as f64 / iterations as f64,
         static_json_allocations as f64 / iterations as f64,
         static_json_bytes as f64 / iterations as f64,
+    );
+
+    let mut json_bytes_app = App::new();
+    json_bytes_app.get("/json", || async {
+        JsonBytes::new(Bytes::from_static(br#"{"status":"ok"}"#))
+    });
+    let json_bytes_app = json_bytes_app.build();
+    let (json_bytes_elapsed, json_bytes_allocations, json_bytes_bytes) =
+        measure_app(&json_bytes_app, Method::GET, "/json", &[], iterations).await;
+    println!(
+        "case=json-bytes-response iterations={iterations} ns_per_op={:.2} allocations_per_op={:.4} bytes_per_op={:.2}",
+        json_bytes_elapsed as f64 / iterations as f64,
+        json_bytes_allocations as f64 / iterations as f64,
+        json_bytes_bytes as f64 / iterations as f64,
     );
 
     let mut path_app = App::new();

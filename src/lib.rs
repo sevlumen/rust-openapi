@@ -2869,15 +2869,24 @@ fn normalize_request_path(path: &str) -> &str {
 }
 
 fn response_text(status: StatusCode, body: Bytes) -> HttpResponse {
-    let mut builder = Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8");
-    if body.len() == 2 {
-        builder = builder.header(header::CONTENT_LENGTH, HeaderValue::from_static("2"));
+    let length = body.len();
+    let mut response = Response::new(ResponseBody::full(body));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    if length == 2 {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_LENGTH, HeaderValue::from_static("2"));
     } else {
-        builder = builder.header(header::CONTENT_LENGTH, body.len());
+        response.headers_mut().insert(
+            header::CONTENT_LENGTH,
+            HeaderValue::from_str(&length.to_string()).unwrap(),
+        );
     }
-    builder.body(ResponseBody::full(body)).unwrap()
+    response
 }
 
 fn response_json<T: Serialize>(status: StatusCode, value: T) -> HttpResponse {
@@ -2888,11 +2897,13 @@ fn response_json<T: Serialize>(status: StatusCode, value: T) -> HttpResponse {
 }
 
 fn response_json_bytes(status: StatusCode, body: Bytes) -> HttpResponse {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(ResponseBody::full(body))
-        .unwrap()
+    let mut response = Response::new(ResponseBody::full(body));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
 }
 
 fn not_found() -> HttpResponse {
