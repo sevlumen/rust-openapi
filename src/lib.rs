@@ -1266,8 +1266,7 @@ fn method_slot(method: &Method) -> Option<usize> {
 
 struct DynamicPathMatch<'a> {
     routes: &'a RouteSet,
-    ranges: [Option<CaptureRange>; MAX_CAPTURE_PARAMS],
-    count: usize,
+    captures: CaptureSet,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1277,20 +1276,6 @@ struct CaptureSet {
 }
 
 impl CaptureSet {
-    fn from_ranges(ranges: [Option<CaptureRange>; MAX_CAPTURE_PARAMS], count: usize) -> Self {
-        let mut packed = [0; MAX_CAPTURE_PARAMS];
-        for (index, range) in ranges.into_iter().take(count).enumerate() {
-            let range = range.expect("capture range exists");
-            debug_assert!(range.start <= u32::MAX as usize);
-            debug_assert!(range.end <= u32::MAX as usize);
-            packed[index] = ((range.start as u32 as u64) << 32) | range.end as u32 as u64;
-        }
-        Self {
-            packed,
-            count: count as u8,
-        }
-    }
-
     fn range(self, index: usize) -> Option<CaptureRange> {
         (index < self.count as usize).then(|| {
             let packed = self.packed[index];
@@ -1299,6 +1284,14 @@ impl CaptureSet {
                 end: packed as u32 as usize,
             }
         })
+    }
+
+    fn with_capture(mut self, index: usize, range: CaptureRange) -> Self {
+        debug_assert!(range.start <= u32::MAX as usize);
+        debug_assert!(range.end <= u32::MAX as usize);
+        self.packed[index] = ((range.start as u32 as u64) << 32) | range.end as u32 as u64;
+        self.count = (index + 1) as u8;
+        self
     }
 }
 
@@ -1367,12 +1360,11 @@ impl DynamicRouteTrie {
     }
 
     fn find(&self, path: &str) -> Option<DynamicPathMatch<'_>> {
-        let (node_index, ranges, count) =
-            self.find_node(0, PathParts::new(path), [None; MAX_CAPTURE_PARAMS], 0)?;
+        let (node_index, captures) =
+            self.find_node(0, PathParts::new(path), CaptureSet::default())?;
         Some(DynamicPathMatch {
             routes: self.nodes[node_index].routes.as_ref()?,
-            ranges,
-            count,
+            captures,
         })
     }
 
@@ -1380,35 +1372,33 @@ impl DynamicRouteTrie {
         &self,
         node_index: usize,
         mut parts: PathParts<'_>,
-        ranges: [Option<CaptureRange>; MAX_CAPTURE_PARAMS],
-        capture_count: usize,
-    ) -> Option<(usize, [Option<CaptureRange>; MAX_CAPTURE_PARAMS], usize)> {
+        captures: CaptureSet,
+    ) -> Option<(usize, CaptureSet)> {
         let node = &self.nodes[node_index];
         let Some(part) = parts.next() else {
-            return node
-                .routes
-                .as_ref()
-                .map(|_| (node_index, ranges, capture_count));
+            return node.routes.as_ref().map(|_| (node_index, captures));
         };
 
         // Static branches have precedence over captures, but the capture
         // branch remains available if the static branch fails deeper down.
         if let Some(&child) = node.static_children.get(part.value)
-            && let Some(found) = self.find_node(child, parts, ranges, capture_count)
+            && let Some(found) = self.find_node(child, parts, captures)
         {
             return Some(found);
         }
 
-        if capture_count < MAX_CAPTURE_PARAMS
+        if (captures.count as usize) < MAX_CAPTURE_PARAMS
             && valid_percent_encoding(part.value)
             && let Some(child) = node.capture_child
         {
-            let mut captured = ranges;
-            captured[capture_count] = Some(CaptureRange {
-                start: part.start,
-                end: part.end,
-            });
-            if let Some(found) = self.find_node(child, parts, captured, capture_count + 1) {
+            let captured = captures.with_capture(
+                captures.count as usize,
+                CaptureRange {
+                    start: part.start,
+                    end: part.end,
+                },
+            );
+            if let Some(found) = self.find_node(child, parts, captured) {
                 return Some(found);
             }
         }
@@ -2191,18 +2181,14 @@ impl<S: Send + Sync + 'static> App<S> {
         let Some(path_match) = self.dynamic_routes.find(path) else {
             return RouteResolution::NotFound;
         };
-        self.resolve_route_set(
-            method,
-            path_match.routes,
-            Some((path_match.ranges, path_match.count)),
-        )
+        self.resolve_route_set(method, path_match.routes, Some(path_match.captures))
     }
 
     fn resolve_route_set<'a>(
         &'a self,
         method: &Method,
         routes: &'a RouteSet,
-        captures: Option<([Option<CaptureRange>; MAX_CAPTURE_PARAMS], usize)>,
+        captures: Option<CaptureSet>,
     ) -> RouteResolution<'a> {
         let index = routes.route(method).or_else(|| {
             (method == Method::HEAD)
@@ -2215,9 +2201,7 @@ impl<S: Send + Sync + 'static> App<S> {
         let Some(index) = index else {
             return RouteResolution::MethodNotAllowed(routes.allowed_methods());
         };
-        let captures = captures.map_or_else(CaptureSet::default, |(ranges, count)| {
-            CaptureSet::from_ranges(ranges, count)
-        });
+        let captures = captures.unwrap_or_default();
         RouteResolution::Matched(ResolvedRoute { index, captures })
     }
 
@@ -2659,18 +2643,14 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
         let Some(path_match) = self.dynamic_routes.find(path) else {
             return RouteResolution::NotFound;
         };
-        self.resolve_route_set(
-            method,
-            path_match.routes,
-            Some((path_match.ranges, path_match.count)),
-        )
+        self.resolve_route_set(method, path_match.routes, Some(path_match.captures))
     }
 
     fn resolve_route_set<'b>(
         &'b self,
         method: &Method,
         routes: &'b RouteSet,
-        captures: Option<([Option<CaptureRange>; MAX_CAPTURE_PARAMS], usize)>,
+        captures: Option<CaptureSet>,
     ) -> RouteResolution<'b> {
         let index = routes.route(method).or_else(|| {
             (method == Method::HEAD)
@@ -2683,9 +2663,7 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
         let Some(index) = index else {
             return RouteResolution::MethodNotAllowed(routes.allowed_methods());
         };
-        let captures = captures.map_or_else(CaptureSet::default, |(ranges, count)| {
-            CaptureSet::from_ranges(ranges, count)
-        });
+        let captures = captures.unwrap_or_default();
         RouteResolution::Matched(ResolvedRoute { index, captures })
     }
 
