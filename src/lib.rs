@@ -1436,8 +1436,8 @@ struct Operation {
     request: OpenApiRequest,
 }
 
-/// The application router and runtime.
-pub struct App<S = ()> {
+/// Mutable route-registration builder.
+pub struct AppBuilder<S = ()> {
     state: Arc<S>,
     plans: Vec<RoutePlan<S>>,
     metadata: Vec<RouteMetadata>,
@@ -1453,7 +1453,10 @@ pub struct App<S = ()> {
     version: String,
 }
 
-/// An immutable application runtime produced by [`App::build`].
+/// Backwards-compatible alias for [`AppBuilder`].
+pub type App<S = ()> = AppBuilder<S>;
+
+/// An immutable application runtime produced by [`AppBuilder::build`].
 pub struct AppRuntime<S = ()> {
     state: Arc<S>,
     plans: Box<[RoutePlan<S>]>,
@@ -1466,7 +1469,7 @@ pub struct AppRuntime<S = ()> {
     version: String,
 }
 
-impl App<()> {
+impl AppBuilder<()> {
     pub fn new() -> Self {
         Self {
             state: Arc::new(()),
@@ -1485,12 +1488,12 @@ impl App<()> {
         }
     }
 
-    pub fn with_state<T: Send + Sync + 'static>(self, state: T) -> App<T> {
+    pub fn with_state<T: Send + Sync + 'static>(self, state: T) -> AppBuilder<T> {
         assert!(
             self.plans.is_empty(),
             "with_state must be configured before routes"
         );
-        App {
+        AppBuilder {
             state: Arc::new(state),
             plans: Vec::new(),
             metadata: Vec::new(),
@@ -1508,13 +1511,13 @@ impl App<()> {
     }
 }
 
-impl Default for App<()> {
+impl Default for AppBuilder<()> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<S: Send + Sync + 'static> App<S> {
+impl<S: Send + Sync + 'static> AppBuilder<S> {
     pub fn title(mut self, title: impl Into<String>) -> Self {
         self.title = title.into();
         self.openapi_bytes = None;
