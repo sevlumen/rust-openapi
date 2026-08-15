@@ -54,4 +54,13 @@ if ($unexpected.IsComplete -or $unexpected.Unexpected.Count -eq 0) {
     throw "unexpected tuple was incorrectly accepted"
 }
 
+if ($env:OS -eq "Windows_NT") {
+    $benchmarkScript = Join-Path $PSScriptRoot "..\run-benchmark.ps1"
+    $guardOutput = & pwsh -NoProfile -File $benchmarkScript -Official -AllowUndersizedHost 2>&1
+    $guardText = $guardOutput | Out-String
+    if ($LASTEXITCODE -eq 0 -or ($guardText -notmatch "requires a Linux host")) {
+        throw "official benchmark platform guard was not enforced on Windows"
+    }
+}
+
 Write-Host "benchmark matrix guard test passed"

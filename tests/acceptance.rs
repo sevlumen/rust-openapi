@@ -3,8 +3,8 @@ use futures_core::Stream;
 use http::{Request, StatusCode};
 use hyper::body::Incoming;
 use oas_rs::{
-    ApiError, App, Header, HeaderSpec, Json, Method, NoContent, NotModified, OpenApiSchema, Params,
-    Path, Query, State, StreamResponse,
+    ApiError, App, FromRequest, Header, HeaderSpec, Json, Method, NoContent, NotModified,
+    OpenApiSchema, Params, Path, Query, State, StreamResponse,
 };
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::json;
@@ -44,6 +44,25 @@ impl HeaderSpec for TraceId {
 
     fn parse(value: &str) -> Result<Self, ApiError> {
         Ok(Self(value.to_owned()))
+    }
+}
+
+struct CustomValue;
+
+impl FromRequest<TestState> for CustomValue {
+    fn from_request(
+        request: &mut Request<Bytes>,
+        _params: &Params,
+        _state: &Arc<TestState>,
+    ) -> Result<Self, ApiError> {
+        let Some(value) = request.headers().get("x-custom") else {
+            return Err(ApiError::missing("custom value is absent"));
+        };
+        if value.to_str().ok() == Some("valid") {
+            Ok(Self)
+        } else {
+            Err(ApiError::bad_request("custom value is invalid"))
+        }
     }
 }
 
@@ -97,6 +116,14 @@ async fn optional_trace(value: Option<Header<TraceId>>) -> &'static str {
 }
 
 async fn optional_json(value: Option<Json<Payload>>) -> &'static str {
+    if value.is_some() {
+        "present"
+    } else {
+        "missing"
+    }
+}
+
+async fn optional_custom(value: Option<CustomValue>) -> &'static str {
     if value.is_some() {
         "present"
     } else {
@@ -401,6 +428,39 @@ async fn http_semantics_and_typed_body_header_are_preserved() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.header("content-length"), None);
     assert_eq!(response.body_string().await, "");
+}
+
+#[tokio::test]
+async fn custom_optional_extractors_distinguish_missing_from_invalid() {
+    let mut app = App::new().with_state(TestState);
+    app.get("/optional-custom", optional_custom);
+
+    let response = app
+        .oneshot(Method::GET, "/optional-custom", &[], None)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.body_string().await, "missing");
+
+    let response = app
+        .oneshot(
+            Method::GET,
+            "/optional-custom",
+            &[("x-custom", "invalid")],
+            None,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = app
+        .oneshot(
+            Method::GET,
+            "/optional-custom",
+            &[("x-custom", "valid")],
+            None,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.body_string().await, "present");
 }
 
 #[tokio::test]

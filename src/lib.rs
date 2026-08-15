@@ -538,7 +538,10 @@ impl ApiError {
 
     #[cold]
     #[inline(never)]
-    fn missing(detail: impl Into<String>) -> Self {
+    /// Construct a missing-input error that `Option<T>` extractors convert to
+    /// `None`. Custom extractors should use this only when the input is absent;
+    /// malformed present input must return [`ApiError::bad_request`] instead.
+    pub fn missing(detail: impl Into<String>) -> Self {
         let mut error = Self::bad_request(detail);
         error.missing = true;
         error
@@ -1587,6 +1590,7 @@ pub struct AppBuilder<S = ()> {
     openapi_path: Option<String>,
     openapi_bytes: Option<Bytes>,
     swagger_path: Option<String>,
+    swagger_bytes: Option<Bytes>,
     openapi_route: Option<usize>,
     swagger_route: Option<usize>,
     title: String,
@@ -1603,8 +1607,8 @@ pub struct AppRuntime<S = ()> {
     metadata: Box<[RouteMetadata]>,
     static_routes: HashMap<String, RouteSet>,
     dynamic_routes: DynamicRouteTrie,
-    openapi_path: Option<String>,
     openapi_bytes: Option<Bytes>,
+    swagger_bytes: Option<Bytes>,
     title: String,
     version: String,
 }
@@ -1622,6 +1626,7 @@ impl AppBuilder<()> {
             openapi_path: None,
             openapi_bytes: None,
             swagger_path: None,
+            swagger_bytes: None,
             openapi_route: None,
             swagger_route: None,
             title: "oas-rs API".to_owned(),
@@ -1645,6 +1650,7 @@ impl AppBuilder<()> {
             openapi_path: self.openapi_path,
             openapi_bytes: self.openapi_bytes,
             swagger_path: self.swagger_path,
+            swagger_bytes: self.swagger_bytes,
             openapi_route: self.openapi_route,
             swagger_route: self.swagger_route,
             title: self.title,
@@ -1693,14 +1699,15 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
     /// registration methods remain available on the builder type.
     pub fn build(mut self) -> AppRuntime<S> {
         self.prepare_openapi();
+        self.prepare_swagger();
         AppRuntime {
             state: self.state,
             plans: self.plans.into_boxed_slice(),
             metadata: self.metadata.into_boxed_slice(),
             static_routes: self.static_routes,
             dynamic_routes: self.dynamic_routes,
-            openapi_path: self.openapi_path,
             openapi_bytes: self.openapi_bytes,
+            swagger_bytes: self.swagger_bytes,
             title: self.title,
             version: self.version,
         }
@@ -1835,6 +1842,7 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
     pub fn openapi(&mut self, path: &str) -> &mut Self {
         let path = normalize_path(path);
         self.openapi_path = Some(path.clone());
+        self.swagger_bytes = None;
         self.install_builtin_route(path, BuiltinHandler::OpenApi, true);
         self.openapi_bytes = None;
         self
@@ -2238,6 +2246,12 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
         }
     }
 
+    fn prepare_swagger(&mut self) {
+        if self.swagger_path.is_some() && self.swagger_bytes.is_none() {
+            self.swagger_bytes = Some(swagger_html(self.openapi_path.as_deref()));
+        }
+    }
+
     async fn handle(&self, request: Request<Bytes>) -> HttpResponse {
         let is_head = request.method() == Method::HEAD;
         let path = normalize_request_path(request.uri().path());
@@ -2324,7 +2338,11 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
                 response_json_bytes(StatusCode::OK, body)
             }
             BuiltinHandler::Swagger => {
-                response_text(StatusCode::OK, swagger_html(self.openapi_path.as_deref()))
+                let body = self
+                    .swagger_bytes
+                    .clone()
+                    .unwrap_or_else(|| swagger_html(self.openapi_path.as_deref()));
+                response_text(StatusCode::OK, body)
             }
         }
     }
@@ -2336,8 +2354,8 @@ struct RuntimeRef<'a, S> {
     metadata: &'a [RouteMetadata],
     static_routes: &'a HashMap<String, RouteSet>,
     dynamic_routes: &'a DynamicRouteTrie,
-    openapi_path: Option<&'a str>,
     openapi_bytes: Option<&'a Bytes>,
+    swagger_bytes: Option<&'a Bytes>,
 }
 
 struct ConnectionRuntime<S> {
@@ -2528,8 +2546,8 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
             metadata: &self.metadata,
             static_routes: &self.static_routes,
             dynamic_routes: &self.dynamic_routes,
-            openapi_path: self.openapi_path.as_deref(),
             openapi_bytes: self.openapi_bytes.as_ref(),
+            swagger_bytes: self.swagger_bytes.as_ref(),
         }
     }
 
@@ -2749,7 +2767,11 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
                 response_json_bytes(StatusCode::OK, body)
             }
             BuiltinHandler::Swagger => {
-                response_text(StatusCode::OK, swagger_html(self.openapi_path))
+                let body = self
+                    .swagger_bytes
+                    .expect("Swagger bytes are prepared before runtime serving")
+                    .clone();
+                response_text(StatusCode::OK, body)
             }
         }
     }
@@ -3090,19 +3112,34 @@ fn swagger_html(openapi_path: Option<&str>) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::task::Waker;
 
     type BoxedPathHandler =
         Box<dyn Fn(Path<u64>) -> Pin<Box<dyn Future<Output = &'static str> + Send>> + Send + Sync>;
+
+    fn block_on_without_io<F: Future>(future: F) -> F::Output {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = Box::pin(future);
+        loop {
+            if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+                return output;
+            }
+        }
+    }
 
     #[tokio::test]
     async fn openapi_document_is_prepared_once_for_server_dispatch() {
         let mut app = App::new();
         app.get("/plaintext", || async { "OK" });
-        app.openapi("/openapi.json");
+        app.openapi("/openapi.json").swagger("/swagger");
         assert!(app.openapi_bytes.is_none());
+        assert!(app.swagger_bytes.is_none());
 
         app.prepare_openapi();
+        app.prepare_swagger();
         let prepared = app.openapi_bytes.clone().expect("prepared document");
+        let prepared_swagger = app.swagger_bytes.clone().expect("prepared swagger");
         let response = app
             .handle(
                 Request::builder()
@@ -3114,6 +3151,38 @@ mod tests {
             .await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(app.openapi_bytes.as_ref(), Some(&prepared));
+
+        let response = app
+            .handle(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/swagger")
+                    .body(Bytes::new())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(app.swagger_bytes.as_ref(), Some(&prepared_swagger));
+
+        app.openapi("/spec.json");
+        assert!(app.openapi_bytes.is_none());
+        assert!(app.swagger_bytes.is_none());
+        app.prepare_openapi();
+        app.prepare_swagger();
+        let response = app
+            .handle(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/swagger")
+                    .body(Bytes::new())
+                    .unwrap(),
+            )
+            .await;
+        let swagger_body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            String::from_utf8_lossy(&swagger_body).contains("/spec.json"),
+            "Swagger cache did not follow the updated OpenAPI path"
+        );
     }
 
     #[tokio::test]
@@ -3361,8 +3430,8 @@ mod tests {
         assert!(size_of::<RouteFailure>() <= 32);
     }
 
-    #[tokio::test]
-    async fn inline_future_preserves_pinned_application_future() {
+    #[test]
+    fn inline_future_preserves_pinned_application_future() {
         struct PinnedReady {
             _pin: PhantomPinned,
         }
@@ -3375,19 +3444,20 @@ mod tests {
             }
         }
 
-        let response = HandlerFuture::from_response_future(PinnedReady {
+        let response = block_on_without_io(HandlerFuture::from_response_future(PinnedReady {
             _pin: PhantomPinned,
-        })
-        .await;
+        }));
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            response.into_body().collect().await.unwrap().to_bytes(),
+            block_on_without_io(response.into_body().collect())
+                .unwrap()
+                .to_bytes(),
             Bytes::from_static(b"OK")
         );
     }
 
-    #[tokio::test]
-    async fn inline_future_polls_a_pinned_pending_future_without_moving_it() {
+    #[test]
+    fn inline_future_polls_a_pinned_pending_future_without_moving_it() {
         struct PinnedPending {
             polled: bool,
             _pin: PhantomPinned,
@@ -3410,14 +3480,45 @@ mod tests {
             }
         }
 
-        let response = HandlerFuture::from_response_future(PinnedPending {
+        let response = block_on_without_io(HandlerFuture::from_response_future(PinnedPending {
             polled: false,
             _pin: PhantomPinned,
-        })
-        .await;
+        }));
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            response.into_body().collect().await.unwrap().to_bytes(),
+            block_on_without_io(response.into_body().collect())
+                .unwrap()
+                .to_bytes(),
+            Bytes::from_static(b"OK")
+        );
+    }
+
+    #[test]
+    fn inline_future_uses_heap_fallback_for_oversized_application_future() {
+        struct OversizedFuture {
+            bytes: [u8; INLINE_FUTURE_SIZE + 1],
+        }
+
+        impl Future for OversizedFuture {
+            type Output = &'static str;
+
+            fn poll(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+                let _ = self.bytes[0];
+                Poll::Ready("OK")
+            }
+        }
+
+        let future = HandlerFuture::from_response_future(OversizedFuture {
+            bytes: [0; INLINE_FUTURE_SIZE + 1],
+        });
+        assert!(matches!(&future.0, HandlerFutureKind::Boxed(_)));
+
+        let response = block_on_without_io(future);
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            block_on_without_io(response.into_body().collect())
+                .unwrap()
+                .to_bytes(),
             Bytes::from_static(b"OK")
         );
     }

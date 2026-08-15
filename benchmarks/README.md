@@ -8,7 +8,7 @@ per request; the reference profile uses oha's summary JSON instead so the load
 generator's bind-mounted per-request CSV I/O cannot dominate a 1,000,000-request
 run. The JSON adapter still checks the exact response count and expected status.
 
-Run the full release matrix from PowerShell:
+Run the full release matrix from PowerShell on a dedicated Linux host:
 
 ```powershell
 ./benchmarks/run-benchmark.ps1 -Official
@@ -16,7 +16,8 @@ Run the full release matrix from PowerShell:
 
 `-Official` is a hard release-matrix guard. It requires every configured case,
 VU 32/64/128/256/512, at least 7 paired runs, and at least 1,000,000 requests
-per run; missing any tuple forces `INCONCLUSIVE`.
+per run; missing any tuple forces `INCONCLUSIVE`. It also refuses to run on
+Windows or Docker Desktop because those environments are diagnostic only.
 
 To reproduce the A/B workload from `D:\Code\demo` as closely as this harness
 allows, run the two 100-user endpoints with the same VU sweep and request
@@ -45,12 +46,22 @@ I/O while keeping custom cases and run counts, add `-SummaryOnly`:
 `-ReferenceProfile` implies `-SummaryOnly` and retains its fixed one-run,
 two-endpoint shape; `-SummaryOnly` alone does not change the requested matrix.
 
-For release-profile microbenchmarks of the in-process static-response paths,
-set `OAS_BENCH_CASE` to `static-text`, `static-json`, or `json-bytes`. Each
-focused case reports `ns/request`, allocations/request, and bytes/request:
+For release-profile microbenchmarks of the in-process static-response and
+generated multi-extractor paths, set `OAS_BENCH_CASE` to `static-text`,
+`static-json`, `json-bytes`, or `multi-extractor`. Each focused case reports
+`ns/request`, allocations/request, and bytes/request:
 
 ```powershell
 $env:OAS_BENCH_CASE = "static-json"
+$env:OAS_BENCH_ITERATIONS = "2000000"
+cargo bench --bench router
+```
+
+The `multi-extractor` case exercises the compile-time 1–8 extractor binder with
+`Path<u64>`, generated `Query<T>`, and a typed header in one handler:
+
+```powershell
+$env:OAS_BENCH_CASE = "multi-extractor"
 $env:OAS_BENCH_ITERATIONS = "2000000"
 cargo bench --bench router
 ```

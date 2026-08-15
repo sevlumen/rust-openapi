@@ -13,6 +13,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$isLinuxHost = $IsLinux -eq $true
+if ($Official -and -not $isLinuxHost) {
+    throw "Official release acceptance requires a Linux host; Windows/Docker Desktop runs are diagnostic only."
+}
+
 $compose = Join-Path $PSScriptRoot "docker-compose.yml"
 $adapter = Join-Path $PSScriptRoot "oha-adapter.ps1"
 . $adapter

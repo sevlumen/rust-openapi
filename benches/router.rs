@@ -91,6 +91,15 @@ async fn typed_header(Header(_header): Header<BenchTrace>) -> &'static str {
     "OK"
 }
 
+async fn typed_multi(
+    Path(id): Path<u64>,
+    Query(query): Query<BenchQuery>,
+    Header(_trace): Header<BenchTrace>,
+) -> &'static str {
+    let _ = (id, query.page, query.active);
+    "OK"
+}
+
 struct CountingAllocator;
 
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -234,6 +243,81 @@ async fn main() {
             elapsed as f64 / iterations as f64,
             allocations as f64 / iterations as f64,
             bytes as f64 / iterations as f64,
+        );
+        return;
+    }
+    if std::env::var("OAS_BENCH_CASE").ok().as_deref() == Some("multi-extractor") {
+        let mut app = App::new();
+        app.get("/multi/{id}", typed_multi);
+        let app = app.build();
+        let (elapsed, allocations, bytes) = measure_app(
+            &app,
+            Method::GET,
+            "/multi/123?page=42&active=true",
+            &[("x-trace-id", "abc123")],
+            iterations,
+        )
+        .await;
+        ALLOCATIONS.store(0, Ordering::Relaxed);
+        ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+        let raw_start = Instant::now();
+        for _ in 0..iterations {
+            let request = raw_request(
+                "/multi/123?page=42&active=true",
+                &[("x-trace-id", "abc123")],
+            );
+            let id = request
+                .uri()
+                .path()
+                .strip_prefix("/multi/")
+                .unwrap()
+                .parse::<u64>()
+                .unwrap();
+            let mut values = request.uri().query().unwrap().split('&');
+            let page = values
+                .next()
+                .unwrap()
+                .strip_prefix("page=")
+                .unwrap()
+                .parse::<u32>()
+                .unwrap();
+            let active = values
+                .next()
+                .unwrap()
+                .strip_prefix("active=")
+                .unwrap()
+                .parse::<bool>()
+                .unwrap();
+            let trace = request
+                .headers()
+                .get("x-trace-id")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert_eq!((id, page, active, trace), (123, 42, true, "abc123"));
+            assert_eq!(raw_ok_response().status(), StatusCode::OK);
+        }
+        let raw_elapsed = raw_start.elapsed().as_nanos();
+        let raw_allocations = ALLOCATIONS.load(Ordering::Relaxed);
+        let raw_bytes = ALLOCATED_BYTES.load(Ordering::Relaxed);
+        assert!(
+            allocations <= raw_allocations,
+            "multi-extractor path added heap allocations"
+        );
+        assert!(
+            bytes <= raw_bytes,
+            "multi-extractor path added allocation bytes"
+        );
+        println!(
+            "case=multi-extractor-focused iterations={iterations} ns_per_op={:.2} raw_ns_per_op={:.2} allocations_per_op={:.4} raw_allocations_per_op={:.4} bytes_per_op={:.2} raw_bytes_per_op={:.2} extra_allocations_per_op={:.4} extra_bytes_per_op={:.2}",
+            elapsed as f64 / iterations as f64,
+            raw_elapsed as f64 / iterations as f64,
+            allocations as f64 / iterations as f64,
+            raw_allocations as f64 / iterations as f64,
+            bytes as f64 / iterations as f64,
+            raw_bytes as f64 / iterations as f64,
+            allocations.saturating_sub(raw_allocations) as f64 / iterations as f64,
+            bytes.saturating_sub(raw_bytes) as f64 / iterations as f64,
         );
         return;
     }
