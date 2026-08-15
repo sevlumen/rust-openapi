@@ -3178,6 +3178,11 @@ mod tests {
     }
 
     #[test]
+    fn params_keep_capture_ranges_in_compact_storage() {
+        assert!(size_of::<Params>() <= 128);
+    }
+
+    #[test]
     fn route_ids_are_compact_u32_handles() {
         assert_eq!(size_of::<RouteId>(), size_of::<u32>());
         assert!(size_of::<RouteSet>() < size_of::<[usize; 7]>() + size_of::<String>());
