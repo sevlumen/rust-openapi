@@ -260,9 +260,10 @@ impl Params {
         let owned = materialize.then(|| {
             Self::materialized_names(
                 Arc::from(names.to_owned().into_boxed_slice()),
-                captures,
+                &captures,
                 path,
             )
+            .expect("materialized capture values are valid")
         });
         Self {
             packed: captures.packed,
@@ -271,26 +272,32 @@ impl Params {
         }
     }
 
-    fn from_materialized_names(names: Arc<[String]>, captures: CaptureSet, path: &str) -> Self {
-        Self {
+    fn from_materialized_names(
+        names: Arc<[String]>,
+        captures: CaptureSet,
+        path: &str,
+    ) -> Result<Self, ApiError> {
+        Ok(Self {
             packed: captures.packed,
             count: captures.count,
-            owned: Some(Self::materialized_names(names, captures, path)),
-        }
+            owned: Some(Self::materialized_names(names, &captures, path)?),
+        })
     }
 
-    fn materialized_names(names: Arc<[String]>, captures: CaptureSet, path: &str) -> OwnedParams {
+    fn materialized_names(
+        names: Arc<[String]>,
+        captures: &CaptureSet,
+        path: &str,
+    ) -> Result<OwnedParams, ApiError> {
         let mut values = Vec::with_capacity(captures.count as usize);
         for index in 0..captures.count as usize {
             let range = captures.range(index).expect("capture range exists");
-            let value = percent_decode(&path[range.start..range.end])
-                .expect("route matching validates percent encoding");
-            values.push(value);
+            values.push(percent_decode(&path[range.start..range.end])?);
         }
-        Arc::new(MaterializedParams {
+        Ok(Arc::new(MaterializedParams {
             names,
             values: values.into_boxed_slice(),
-        })
+        }))
     }
 }
 
@@ -1192,7 +1199,10 @@ impl CaptureProvider for DynamicCaptures {
                     .capture_names
                     .as_ref()
                     .expect("materialized captures have names");
-                Params::from_materialized_names(Arc::clone(names), self.0, path)
+                match Params::from_materialized_names(Arc::clone(names), self.0, path) {
+                    Ok(params) => params,
+                    Err(error) => return HandlerFuture::from_response_future(future::ready(error)),
+                }
             }
         };
         handler(request, &params, state)

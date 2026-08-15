@@ -213,6 +213,34 @@ async fn main() {
         );
         return;
     }
+    if std::env::var("OAS_BENCH_CASE").ok().as_deref() == Some("path") {
+        let mut app = App::new();
+        app.get("/users/{id}", typed_path);
+        let app = app.build();
+        let (elapsed, allocations, bytes) =
+            measure_app(&app, Method::GET, "/users/123456", &[], iterations).await;
+        println!(
+            "case=path-focused iterations={iterations} ns_per_op={:.2} allocations_per_op={:.4} bytes_per_op={:.2}",
+            elapsed as f64 / iterations as f64,
+            allocations as f64 / iterations as f64,
+            bytes as f64 / iterations as f64,
+        );
+        return;
+    }
+    if std::env::var("OAS_BENCH_CASE").ok().as_deref() == Some("params") {
+        let mut app = App::new();
+        app.get("/params/{org}/{user}", typed_params);
+        let app = app.build();
+        let (elapsed, allocations, bytes) =
+            measure_app(&app, Method::GET, "/params/acme/alice", &[], iterations).await;
+        println!(
+            "case=params-focused iterations={iterations} ns_per_op={:.2} allocations_per_op={:.4} bytes_per_op={:.2}",
+            elapsed as f64 / iterations as f64,
+            allocations as f64 / iterations as f64,
+            bytes as f64 / iterations as f64,
+        );
+        return;
+    }
     let start = Instant::now();
     ALLOCATIONS.store(0, Ordering::Relaxed);
     ALLOCATED_BYTES.store(0, Ordering::Relaxed);

@@ -496,6 +496,12 @@ async fn router_supports_multiple_params_precedence_and_percent_encoding() {
         "acme:alice"
     );
     assert_eq!(
+        app.oneshot(Method::GET, "/orgs/%FF/users/alice", &[], None)
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
         app.oneshot(Method::GET, "/users/a%20b", &[], None)
             .await
             .body_string()
