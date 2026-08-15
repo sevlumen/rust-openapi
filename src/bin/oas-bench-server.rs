@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use oas_rs::{ApiError, App, Header, HeaderSpec, Json, JsonBytes, Path, Query, State};
+use oas_rs::{ApiError, App, Header, HeaderSpec, Json, JsonBytes, Params, Path, Query, State};
 use serde::{Deserialize, Serialize};
 use std::sync::{
     Arc, OnceLock,
@@ -115,6 +115,14 @@ async fn query_typed(Query(query): Query<Search>) -> String {
     format!("{}:{}", query.page, query.active)
 }
 
+async fn params_typed(params: Params) -> String {
+    format!(
+        "{}:{}",
+        params.get("org").expect("org capture"),
+        params.get("user").expect("user capture")
+    )
+}
+
 async fn header_typed(Header(header): Header<TraceId>) -> String {
     header.0
 }
@@ -219,6 +227,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     app.get("/users/{id}", path_integer);
     app.get("/uuid/{id}", path_uuid);
     app.get("/search", query_typed);
+    app.get("/params/{org}/{user}", params_typed);
     app.get("/trace", header_typed);
     app.get("/validation-success/{id}", validation_success);
     app.get("/problem", problem);
@@ -359,6 +368,23 @@ async fn raw_server(
                             .header("content-type", "text/plain; charset=utf-8")
                             .header("content-length", body.len())
                             .body(Full::new(Bytes::copy_from_slice(body)))
+                            .unwrap()
+                    } else if let Some(value) = request.uri().path().strip_prefix("/params/") {
+                        let body = match value.split_once('/') {
+                            Some((org, user)) if !org.is_empty() && !user.is_empty() => {
+                                Bytes::from(format!("{org}:{user}"))
+                            }
+                            _ => Bytes::from_static(b"Bad Request"),
+                        };
+                        Response::builder()
+                            .status(if body.as_ref() == b"Bad Request" {
+                                StatusCode::BAD_REQUEST
+                            } else {
+                                StatusCode::OK
+                            })
+                            .header("content-type", "text/plain; charset=utf-8")
+                            .header("content-length", body.len())
+                            .body(Full::new(body))
                             .unwrap()
                     } else if let Some(value) = request.uri().path().strip_prefix("/users/") {
                         match value.parse::<u64>() {
