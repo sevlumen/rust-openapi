@@ -188,6 +188,28 @@ async fn main() {
         ((openapi_elapsed.as_nanos() as f64 / elapsed.as_nanos() as f64) - 1.0) * 100.0,
     );
 
+    let mut static_text_app = App::new();
+    static_text_app.static_text("/health", "OK");
+    let (static_text_elapsed, static_text_allocations, static_text_bytes) =
+        measure_app(&static_text_app, Method::GET, "/health", &[], iterations).await;
+    println!(
+        "case=static-text iterations={iterations} ns_per_op={:.2} allocations_per_op={:.4} bytes_per_op={:.2}",
+        static_text_elapsed as f64 / iterations as f64,
+        static_text_allocations as f64 / iterations as f64,
+        static_text_bytes as f64 / iterations as f64,
+    );
+
+    let mut static_json_app = App::new();
+    static_json_app.static_json("/version", Bytes::from_static(br#"{"version":"0.1.0"}"#));
+    let (static_json_elapsed, static_json_allocations, static_json_bytes) =
+        measure_app(&static_json_app, Method::GET, "/version", &[], iterations).await;
+    println!(
+        "case=static-json-fast iterations={iterations} ns_per_op={:.2} allocations_per_op={:.4} bytes_per_op={:.2}",
+        static_json_elapsed as f64 / iterations as f64,
+        static_json_allocations as f64 / iterations as f64,
+        static_json_bytes as f64 / iterations as f64,
+    );
+
     let mut path_app = App::new();
     path_app.get("/users/{id}", typed_path);
     let (path_elapsed, path_allocations, path_bytes) =
