@@ -327,6 +327,7 @@ pub struct Header<T>(pub T);
 
 pub trait HeaderSpec: Sized + Send + 'static {
     const NAME: &'static str;
+    const HEADER_NAME: header::HeaderName = header::HeaderName::from_static(Self::NAME);
     fn parse(value: &str) -> Result<Self, ApiError>;
 }
 
@@ -933,7 +934,7 @@ impl<S: Send + Sync + 'static, T: HeaderSpec> FromRequest<S> for Header<T> {
     ) -> Result<Self, ApiError> {
         let value = request
             .headers()
-            .get(T::NAME)
+            .get(&T::HEADER_NAME)
             .ok_or_else(|| ApiError::missing(format!("missing header {}", T::NAME)))?;
         let value = value
             .to_str()
@@ -2176,11 +2177,14 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
     }
 
     async fn handle(&self, request: Request<Bytes>) -> HttpResponse {
-        let method = request.method().clone();
+        let is_head = request.method() == Method::HEAD;
         let path = normalize_request_path(request.uri().path());
         if let Some(routes) = self.static_routes.get(path) {
-            return match resolve_route_set(&method, routes) {
-                Ok(index) => self.handle_matched(request, index, StaticCaptures).await,
+            return match resolve_route_set(request.method(), routes) {
+                Ok(index) => {
+                    self.handle_matched(request, index, StaticCaptures, is_head)
+                        .await
+                }
                 Err(RouteFailure::Options(allow)) => options_response(&allow),
                 Err(RouteFailure::MethodNotAllowed(allow)) => method_not_allowed_response(&allow),
             };
@@ -2188,10 +2192,15 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
         let Some(path_match) = self.dynamic_routes.find(path) else {
             return not_found();
         };
-        match resolve_route_set(&method, path_match.routes) {
+        match resolve_route_set(request.method(), path_match.routes) {
             Ok(index) => {
-                self.handle_matched(request, index, DynamicCaptures(path_match.captures))
-                    .await
+                self.handle_matched(
+                    request,
+                    index,
+                    DynamicCaptures(path_match.captures),
+                    is_head,
+                )
+                .await
             }
             Err(RouteFailure::Options(allow)) => options_response(&allow),
             Err(RouteFailure::MethodNotAllowed(allow)) => method_not_allowed_response(&allow),
@@ -2203,16 +2212,16 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
         request: Request<Bytes>,
         index: RouteId,
         captures: C,
+        is_head: bool,
     ) -> HttpResponse {
-        let method = request.method().clone();
         let plan = &self.plans[index.index()];
         match &plan.handler {
-            HandlerKind::Zero(handler) => return maybe_head(&method, handler().await),
+            HandlerKind::Zero(handler) => return maybe_head_flag(is_head, handler().await),
             HandlerKind::Static(response) => {
-                return maybe_head(&method, response.to_response());
+                return maybe_head_flag(is_head, response.to_response());
             }
             HandlerKind::Builtin(builtin) => {
-                return maybe_head(&method, self.builtin_response(*builtin));
+                return maybe_head_flag(is_head, self.builtin_response(*builtin));
             }
             HandlerKind::Typed(_) | HandlerKind::Raw(_) => {}
         }
@@ -2229,7 +2238,7 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
                 &self.state,
             )
             .await;
-        maybe_head(&method, response)
+        maybe_head_flag(is_head, response)
     }
 
     fn builtin_response(&self, builtin: BuiltinHandler) -> HttpResponse {
@@ -2416,6 +2425,7 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
                                     Request::from_parts(parts, body.to_bytes()),
                                     index,
                                     captures,
+                                    is_head,
                                 )
                                 .await
                         }
@@ -2590,11 +2600,14 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
 
 impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
     async fn handle(&self, request: Request<Bytes>) -> HttpResponse {
-        let method = request.method().clone();
+        let is_head = request.method() == Method::HEAD;
         let path = normalize_request_path(request.uri().path());
         if let Some(routes) = self.static_routes.get(path) {
-            return match resolve_route_set(&method, routes) {
-                Ok(index) => self.handle_matched(request, index, StaticCaptures).await,
+            return match resolve_route_set(request.method(), routes) {
+                Ok(index) => {
+                    self.handle_matched(request, index, StaticCaptures, is_head)
+                        .await
+                }
                 Err(RouteFailure::Options(allow)) => options_response(&allow),
                 Err(RouteFailure::MethodNotAllowed(allow)) => method_not_allowed_response(&allow),
             };
@@ -2602,10 +2615,15 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
         let Some(path_match) = self.dynamic_routes.find(path) else {
             return not_found();
         };
-        match resolve_route_set(&method, path_match.routes) {
+        match resolve_route_set(request.method(), path_match.routes) {
             Ok(index) => {
-                self.handle_matched(request, index, DynamicCaptures(path_match.captures))
-                    .await
+                self.handle_matched(
+                    request,
+                    index,
+                    DynamicCaptures(path_match.captures),
+                    is_head,
+                )
+                .await
             }
             Err(RouteFailure::Options(allow)) => options_response(&allow),
             Err(RouteFailure::MethodNotAllowed(allow)) => method_not_allowed_response(&allow),
@@ -2617,16 +2635,16 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
         request: Request<Bytes>,
         index: RouteId,
         captures: C,
+        is_head: bool,
     ) -> HttpResponse {
-        let method = request.method().clone();
         let plan = &self.plans[index.index()];
         match &plan.handler {
-            HandlerKind::Zero(handler) => return maybe_head(&method, handler().await),
+            HandlerKind::Zero(handler) => return maybe_head_flag(is_head, handler().await),
             HandlerKind::Static(response) => {
-                return maybe_head(&method, response.to_response());
+                return maybe_head_flag(is_head, response.to_response());
             }
             HandlerKind::Builtin(builtin) => {
-                return maybe_head(&method, self.builtin_response(*builtin));
+                return maybe_head_flag(is_head, self.builtin_response(*builtin));
             }
             HandlerKind::Typed(_) | HandlerKind::Raw(_) => {}
         }
@@ -2643,7 +2661,7 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
                 self.state,
             )
             .await;
-        maybe_head(&method, response)
+        maybe_head_flag(is_head, response)
     }
 
     fn builtin_response(&self, builtin: BuiltinHandler) -> HttpResponse {
@@ -2875,10 +2893,6 @@ fn method_not_allowed_response(allow: &str) -> HttpResponse {
         .header(header::CONTENT_LENGTH, "0")
         .body(ResponseBody::full(Bytes::new()))
         .unwrap()
-}
-
-fn maybe_head(method: &Method, response: HttpResponse) -> HttpResponse {
-    maybe_head_flag(method == Method::HEAD, response)
 }
 
 fn maybe_head_flag(is_head: bool, response: HttpResponse) -> HttpResponse {
