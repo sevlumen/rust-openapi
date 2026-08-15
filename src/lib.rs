@@ -1227,13 +1227,20 @@ impl RouteSet {
             .and_then(|slot| (self.routes[slot] != RouteId::NONE).then_some(self.routes[slot]))
     }
 
+    #[cold]
+    #[inline(never)]
     fn allowed_methods(&self) -> String {
-        METHOD_NAMES
-            .iter()
-            .enumerate()
-            .filter_map(|(index, name)| (self.method_mask & (1_u8 << index) != 0).then_some(*name))
-            .collect::<Vec<_>>()
-            .join(", ")
+        let mut allowed = String::with_capacity(48);
+        for (index, name) in METHOD_NAMES.iter().enumerate() {
+            if self.method_mask & (1_u8 << index) == 0 {
+                continue;
+            }
+            if !allowed.is_empty() {
+                allowed.push_str(", ");
+            }
+            allowed.push_str(name);
+        }
+        allowed
     }
 
     fn remove(&mut self, method: &Method) {
@@ -2807,10 +2814,14 @@ fn response_json_bytes(status: StatusCode, body: Bytes) -> HttpResponse {
     response
 }
 
+#[cold]
+#[inline(never)]
 fn not_found() -> HttpResponse {
     response_text(StatusCode::NOT_FOUND, Bytes::from_static(b"Not Found"))
 }
 
+#[cold]
+#[inline(never)]
 fn options_response(allow: &str) -> HttpResponse {
     Response::builder()
         .status(StatusCode::NO_CONTENT)
@@ -2820,6 +2831,8 @@ fn options_response(allow: &str) -> HttpResponse {
         .unwrap()
 }
 
+#[cold]
+#[inline(never)]
 fn method_not_allowed_response(allow: &str) -> HttpResponse {
     Response::builder()
         .status(StatusCode::METHOD_NOT_ALLOWED)
