@@ -3051,6 +3051,12 @@ mod tests {
     }
 
     #[test]
+    fn route_ids_are_compact_u32_handles() {
+        assert_eq!(size_of::<RouteId>(), size_of::<u32>());
+        assert_eq!(size_of::<RouteSet>(), size_of::<[RouteId; 7]>() + size_of::<String>());
+    }
+
+    #[test]
     fn route_plans_precompute_body_modes() {
         let mut app = App::new();
         app.get("/plain", || async { "OK" });
