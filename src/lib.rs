@@ -18,7 +18,8 @@ use std::{
     convert::Infallible,
     future::{self, Future},
     marker::PhantomPinned,
-    mem::{MaybeUninit, align_of, size_of},
+    mem::{MaybeUninit, align_of, replace, size_of},
+    ops::{Deref, DerefMut, Index, IndexMut},
     pin::Pin,
     str::FromStr,
     sync::Arc,
@@ -1132,6 +1133,66 @@ struct RouteMetadata {
     operation: Operation,
 }
 
+enum RouteStorage<T> {
+    Building(Vec<T>),
+    Frozen(Box<[T]>),
+}
+
+impl<T> RouteStorage<T> {
+    fn new() -> Self {
+        Self::Building(Vec::new())
+    }
+
+    fn push(&mut self, value: T) {
+        match self {
+            Self::Building(values) => values.push(value),
+            Self::Frozen(_) => panic!("route storage is already frozen"),
+        }
+    }
+
+    fn freeze(&mut self) {
+        let storage = replace(self, Self::Building(Vec::new()));
+        *self = match storage {
+            Self::Building(values) => Self::Frozen(values.into_boxed_slice()),
+            Self::Frozen(values) => Self::Frozen(values),
+        };
+    }
+}
+
+impl<T> Deref for RouteStorage<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Building(values) => values,
+            Self::Frozen(values) => values,
+        }
+    }
+}
+
+impl<T> DerefMut for RouteStorage<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Building(values) => values,
+            Self::Frozen(_) => panic!("route storage is already frozen"),
+        }
+    }
+}
+
+impl<T> Index<usize> for RouteStorage<T> {
+    type Output = T;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.deref()[index]
+    }
+}
+
+impl<T> IndexMut<usize> for RouteStorage<T> {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.deref_mut()[index]
+    }
+}
+
 #[derive(Clone)]
 enum Segment {
     Static(String),
@@ -1392,8 +1453,8 @@ struct Operation {
 /// The application router and runtime.
 pub struct App<S = ()> {
     state: Arc<S>,
-    plans: Vec<RoutePlan<S>>,
-    metadata: Vec<RouteMetadata>,
+    plans: RouteStorage<RoutePlan<S>>,
+    metadata: RouteStorage<RouteMetadata>,
     static_routes: HashMap<String, RouteSet>,
     dynamic_routes: DynamicRouteTrie,
     last_route: Option<usize>,
@@ -1415,8 +1476,8 @@ impl App<()> {
     pub fn new() -> Self {
         Self {
             state: Arc::new(()),
-            plans: Vec::new(),
-            metadata: Vec::new(),
+            plans: RouteStorage::new(),
+            metadata: RouteStorage::new(),
             static_routes: HashMap::new(),
             dynamic_routes: DynamicRouteTrie::default(),
             last_route: None,
@@ -1437,8 +1498,8 @@ impl App<()> {
         );
         App {
             state: Arc::new(state),
-            plans: Vec::new(),
-            metadata: Vec::new(),
+            plans: RouteStorage::new(),
+            metadata: RouteStorage::new(),
             static_routes: HashMap::new(),
             dynamic_routes: DynamicRouteTrie::default(),
             last_route: None,
@@ -1478,6 +1539,8 @@ impl<S: Send + Sync + 'static> App<S> {
     /// registration methods remain available on the builder type.
     pub fn build(mut self) -> AppRuntime<S> {
         self.prepare_openapi();
+        self.plans.freeze();
+        self.metadata.freeze();
         AppRuntime { app: self }
     }
 
@@ -1624,7 +1687,7 @@ impl<S: Send + Sync + 'static> App<S> {
 
     pub fn openapi_document(&self) -> Value {
         let mut paths = Map::new();
-        for metadata in &self.metadata {
+        for metadata in self.metadata.iter() {
             if metadata.builtin {
                 continue;
             }
