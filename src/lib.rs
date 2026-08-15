@@ -306,6 +306,7 @@ impl Default for Params {
 
 impl<S: Send + Sync + 'static> FromRequest<S> for Params {
     const NEEDS_PARAMS: bool = true;
+    const NEEDS_CAPTURE: bool = true;
 
     fn from_request(
         _request: &mut Request<Bytes>,
@@ -755,6 +756,8 @@ impl<T: ResponseMetadata> ResponseMetadata for Result<T, ApiError> {
 pub trait Handler<S, Args>: Send + Sync + 'static {
     type Response: ResponseMetadata;
     const NEEDS_PARAMS: bool = false;
+    /// Whether any extractor reads path captures from the router.
+    const NEEDS_CAPTURE: bool = false;
     const NEEDS_BODY: bool = false;
 
     fn openapi_request() -> OpenApiRequest {
@@ -794,6 +797,8 @@ where
 
 pub trait FromRequest<S>: Sized + Send + 'static {
     const NEEDS_PARAMS: bool = false;
+    /// Whether this extractor reads path captures, even without owned `Params`.
+    const NEEDS_CAPTURE: bool = false;
     const NEEDS_BODY: bool = false;
 
     fn openapi_request() -> OpenApiRequest {
@@ -822,6 +827,8 @@ where
     T: FromStr + OpenApiSchema + Send + 'static,
     T::Err: std::fmt::Display,
 {
+    const NEEDS_CAPTURE: bool = true;
+
     fn openapi_request() -> OpenApiRequest {
         OpenApiRequest {
             path_schemas: vec![<T as OpenApiSchema>::schema()],
@@ -958,6 +965,7 @@ where
     T: FromRequest<S>,
 {
     const NEEDS_PARAMS: bool = T::NEEDS_PARAMS;
+    const NEEDS_CAPTURE: bool = T::NEEDS_CAPTURE;
     const NEEDS_BODY: bool = T::NEEDS_BODY;
 
     fn openapi_request() -> OpenApiRequest {
@@ -1032,6 +1040,7 @@ where
 {
     type Response = R;
     const NEEDS_PARAMS: bool = E1::NEEDS_PARAMS;
+    const NEEDS_CAPTURE: bool = E1::NEEDS_CAPTURE;
     const NEEDS_BODY: bool = E1::NEEDS_BODY;
 
     fn openapi_request() -> OpenApiRequest {
@@ -1065,6 +1074,9 @@ macro_rules! impl_extractor_handler {
             const NEEDS_PARAMS: bool =
                 <$first as FromRequest<S>>::NEEDS_PARAMS
                 $(|| <$rest as FromRequest<S>>::NEEDS_PARAMS)*;
+            const NEEDS_CAPTURE: bool =
+                <$first as FromRequest<S>>::NEEDS_CAPTURE
+                $(|| <$rest as FromRequest<S>>::NEEDS_CAPTURE)*;
             const NEEDS_BODY: bool =
                 <$first as FromRequest<S>>::NEEDS_BODY
                 $(|| <$rest as FromRequest<S>>::NEEDS_BODY)*;
@@ -1113,12 +1125,15 @@ impl_extractor_handler!(E1: first, E2: second, E3: third, E4: fourth, E5: fifth,
 impl_extractor_handler!(E1: first, E2: second, E3: third, E4: fourth, E5: fifth, E6: sixth, E7: seventh, E8: eighth);
 
 pub type ErasedZeroHandler = Box<dyn Fn() -> HandlerFuture + Send + Sync>;
+type ErasedNoParamsHandler<S> =
+    Box<dyn Fn(&mut Request<Bytes>, &Arc<S>) -> HandlerFuture + Send + Sync>;
 type ErasedHandler<S> =
     Box<dyn Fn(&mut Request<Bytes>, &Params, &Arc<S>) -> HandlerFuture + Send + Sync>;
 type ErasedRawHandler = Box<dyn Fn(Request<Incoming>) -> HandlerFuture + Send + Sync>;
 
 enum HandlerKind<S> {
     Zero(ErasedZeroHandler),
+    TypedNoParams(ErasedNoParamsHandler<S>),
     Typed(ErasedHandler<S>),
     Raw(ErasedRawHandler),
     // Static payloads are cold registration data; keep them out of every
@@ -2044,6 +2059,12 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
         };
         let handler = match handler.zero_handler() {
             Some(zero_handler) => HandlerKind::Zero(zero_handler),
+            None if !H::NEEDS_CAPTURE => {
+                let handler = handler.clone();
+                HandlerKind::TypedNoParams(Box::new(move |request, state| {
+                    handler.call(request, Params::empty(), state)
+                }))
+            }
             None => HandlerKind::Typed(Box::new(move |request, params, state| {
                 handler.call(request, params, state)
             })),
@@ -2255,26 +2276,32 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
             HandlerKind::Builtin(builtin) => {
                 return maybe_head_flag(is_head, self.builtin_response(*builtin));
             }
-            HandlerKind::Typed(_) | HandlerKind::Raw(_) => {}
+            HandlerKind::TypedNoParams(_) | HandlerKind::Typed(_) | HandlerKind::Raw(_) => {}
         }
         let mut request = request;
-        let HandlerKind::Typed(handler) = &plan.handler else {
-            unreachable!("raw routes require Incoming request bodies")
-        };
         if matches!(plan.body_mode, BodyMode::Buffered)
             && request.body().len() > plan.body_limit as usize
         {
             return payload_too_large_response();
         }
-        let response = captures
-            .invoke(
-                &plan.capture_mode,
-                &mut request,
-                &self.metadata[index.index()],
-                handler,
-                &self.state,
-            )
-            .await;
+        let response = match &plan.handler {
+            HandlerKind::TypedNoParams(handler) => handler(&mut request, &self.state).await,
+            HandlerKind::Typed(handler) => {
+                captures
+                    .invoke(
+                        &plan.capture_mode,
+                        &mut request,
+                        &self.metadata[index.index()],
+                        handler,
+                        &self.state,
+                    )
+                    .await
+            }
+            HandlerKind::Raw(_) => unreachable!("raw routes require Incoming request bodies"),
+            HandlerKind::Zero(_) | HandlerKind::Static(_) | HandlerKind::Builtin(_) => {
+                unreachable!("fast handlers returned before typed dispatch")
+            }
+        };
         maybe_head_flag(is_head, response)
     }
 
@@ -2400,6 +2427,7 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
                     future: handler(request),
                 },
                 HandlerKind::Zero(_)
+                | HandlerKind::TypedNoParams(_)
                 | HandlerKind::Typed(_)
                 | HandlerKind::Static(_)
                 | HandlerKind::Builtin(_) => {
@@ -2418,6 +2446,12 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
                     is_head,
                     router.builtin_response(*builtin),
                 ))),
+                HandlerKind::TypedNoParams(handler) => {
+                    let (parts, _) = request.into_parts();
+                    let mut request = Request::from_parts(parts, Bytes::new());
+                    let future = handler(&mut request, router.state);
+                    PreparedDispatch::Handler { is_head, future }
+                }
                 HandlerKind::Typed(handler) => {
                     let (parts, _) = request.into_parts();
                     let mut request = Request::from_parts(parts, Bytes::new());
@@ -2667,26 +2701,32 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
             HandlerKind::Builtin(builtin) => {
                 return maybe_head_flag(is_head, self.builtin_response(*builtin));
             }
-            HandlerKind::Typed(_) | HandlerKind::Raw(_) => {}
+            HandlerKind::TypedNoParams(_) | HandlerKind::Typed(_) | HandlerKind::Raw(_) => {}
         }
         let mut request = request;
-        let HandlerKind::Typed(handler) = &plan.handler else {
-            unreachable!("raw routes require Incoming request bodies")
-        };
         if matches!(plan.body_mode, BodyMode::Buffered)
             && request.body().len() > plan.body_limit as usize
         {
             return payload_too_large_response();
         }
-        let response = captures
-            .invoke(
-                &plan.capture_mode,
-                &mut request,
-                &self.metadata[index.index()],
-                handler,
-                self.state,
-            )
-            .await;
+        let response = match &plan.handler {
+            HandlerKind::TypedNoParams(handler) => handler(&mut request, self.state).await,
+            HandlerKind::Typed(handler) => {
+                captures
+                    .invoke(
+                        &plan.capture_mode,
+                        &mut request,
+                        &self.metadata[index.index()],
+                        handler,
+                        self.state,
+                    )
+                    .await
+            }
+            HandlerKind::Raw(_) => unreachable!("raw routes require Incoming request bodies"),
+            HandlerKind::Zero(_) | HandlerKind::Static(_) | HandlerKind::Builtin(_) => {
+                unreachable!("fast handlers returned before typed dispatch")
+            }
+        };
         maybe_head_flag(is_head, response)
     }
 
@@ -3258,6 +3298,21 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_trie_restores_captures_after_failed_static_branch() {
+        let mut app = App::new();
+        app.get("/files/static/other", || async { "static" });
+        app.get("/files/{id}/tail", || async { "capture" });
+
+        let matched = app
+            .dynamic_routes
+            .find("/files/static/tail")
+            .expect("capture fallback should match");
+        assert_eq!(matched.captures.count, 1);
+        assert_eq!(matched.captures.range(0).unwrap().start, 7);
+        assert_eq!(matched.captures.range(0).unwrap().end, 13);
+    }
+
+    #[test]
     fn report_hot_path_layout_sizes() {
         println!(
             "HandlerFuture={} InlineFuture={} Params={} CaptureMode={} BodyMode={} HandlerKind={} RoutePlan={} RouteMetadata={} RouteSet={} DynamicRouteNode={} RouteFailure={}",
@@ -3325,5 +3380,39 @@ mod tests {
 
         let response = app.oneshot(Method::PUT, "/other/missing", &[], None).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn typed_no_params_dynamic_route_preserves_header_extraction() {
+        struct Trace;
+
+        impl HeaderSpec for Trace {
+            const NAME: &'static str = "x-trace";
+
+            fn parse(_value: &str) -> Result<Self, ApiError> {
+                Ok(Self)
+            }
+        }
+
+        let mut app = App::new();
+        app.get("/trace/{id}", |Header(_): Header<Trace>| async { "OK" });
+
+        let matched = app
+            .dynamic_routes
+            .find("/trace/abc")
+            .expect("dynamic route should match");
+        let index = matched
+            .routes
+            .route(&Method::GET)
+            .expect("dynamic route should resolve");
+        assert!(matches!(
+            app.plans[index.index()].handler,
+            HandlerKind::TypedNoParams(_)
+        ));
+
+        let response = app
+            .oneshot(Method::GET, "/trace/abc", &[("x-trace", "1")], None)
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

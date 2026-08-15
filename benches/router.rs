@@ -173,6 +173,26 @@ async fn main() {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(100_000u64);
+    if std::env::var("OAS_BENCH_CASE").ok().as_deref() == Some("dynamic-header") {
+        let mut app = App::new();
+        app.get("/trace/{id}", typed_header);
+        let app = app.build();
+        let (elapsed, allocations, bytes) = measure_app(
+            &app,
+            Method::GET,
+            "/trace/abc123",
+            &[("x-trace-id", "abc123")],
+            iterations,
+        )
+        .await;
+        println!(
+            "case=dynamic-header-focused iterations={iterations} ns_per_op={:.2} allocations_per_op={:.4} bytes_per_op={:.2}",
+            elapsed as f64 / iterations as f64,
+            allocations as f64 / iterations as f64,
+            bytes as f64 / iterations as f64,
+        );
+        return;
+    }
     let start = Instant::now();
     ALLOCATIONS.store(0, Ordering::Relaxed);
     ALLOCATED_BYTES.store(0, Ordering::Relaxed);
@@ -532,6 +552,24 @@ async fn main() {
         raw_header_bytes as f64 / iterations as f64,
         header_allocations.saturating_sub(raw_header_allocations) as f64 / iterations as f64,
         header_bytes.saturating_sub(raw_header_bytes) as f64 / iterations as f64,
+    );
+
+    let mut dynamic_header_app = App::new();
+    dynamic_header_app.get("/trace/{id}", typed_header);
+    let dynamic_header_app = dynamic_header_app.build();
+    let (dynamic_header_elapsed, dynamic_header_allocations, dynamic_header_bytes) = measure_app(
+        &dynamic_header_app,
+        Method::GET,
+        "/trace/abc123",
+        &[("x-trace-id", "abc123")],
+        iterations,
+    )
+    .await;
+    println!(
+        "case=dynamic-header-no-capture iterations={iterations} ns_per_op={:.2} allocations_per_op={:.4} bytes_per_op={:.2}",
+        dynamic_header_elapsed as f64 / iterations as f64,
+        dynamic_header_allocations as f64 / iterations as f64,
+        dynamic_header_bytes as f64 / iterations as f64,
     );
 
     for route_count in [1_usize, 10, 100, 1_000, 10_000] {
