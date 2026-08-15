@@ -1158,15 +1158,32 @@ struct DynamicRouteNode {
     routes: Option<RouteSet>,
 }
 
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RouteId(u32);
+
+impl RouteId {
+    const NONE: Self = Self(u32::MAX);
+
+    fn new(index: usize) -> Self {
+        assert!(index <= u32::MAX as usize, "route count exceeds u32::MAX");
+        Self(index as u32)
+    }
+
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 struct RouteSet {
-    routes: [usize; 7],
+    routes: [RouteId; 7],
     allowed_methods: String,
 }
 
 impl Default for RouteSet {
     fn default() -> Self {
         Self {
-            routes: [usize::MAX; 7],
+            routes: [RouteId::NONE; 7],
             allowed_methods: String::new(),
         }
     }
@@ -1175,23 +1192,24 @@ impl Default for RouteSet {
 impl RouteSet {
     fn insert(&mut self, method: Method, route: usize) {
         let slot = method_slot(&method).expect("unsupported route method");
+        let route = RouteId::new(route);
         assert_eq!(
             self.routes[slot],
-            usize::MAX,
+            RouteId::NONE,
             "duplicate route pattern and method"
         );
         self.routes[slot] = route;
         self.allowed_methods = METHOD_NAMES
             .iter()
             .enumerate()
-            .filter_map(|(index, name)| (self.routes[index] != usize::MAX).then_some(*name))
+            .filter_map(|(index, name)| (self.routes[index] != RouteId::NONE).then_some(*name))
             .collect::<Vec<_>>()
             .join(", ");
     }
 
-    fn route(&self, method: &Method) -> Option<usize> {
+    fn route(&self, method: &Method) -> Option<RouteId> {
         method_slot(method)
-            .and_then(|slot| (self.routes[slot] != usize::MAX).then_some(self.routes[slot]))
+            .and_then(|slot| (self.routes[slot] != RouteId::NONE).then_some(self.routes[slot]))
     }
 
     fn allowed_methods(&self) -> &str {
@@ -1200,18 +1218,18 @@ impl RouteSet {
 
     fn remove(&mut self, method: &Method) {
         if let Some(slot) = method_slot(method) {
-            self.routes[slot] = usize::MAX;
+            self.routes[slot] = RouteId::NONE;
             self.allowed_methods = METHOD_NAMES
                 .iter()
                 .enumerate()
-                .filter_map(|(index, name)| (self.routes[index] != usize::MAX).then_some(*name))
+                .filter_map(|(index, name)| (self.routes[index] != RouteId::NONE).then_some(*name))
                 .collect::<Vec<_>>()
                 .join(", ");
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.routes.iter().all(|route| *route == usize::MAX)
+        self.routes.iter().all(|route| *route == RouteId::NONE)
     }
 }
 
@@ -1275,7 +1293,7 @@ impl CaptureSet {
 }
 
 struct ResolvedRoute {
-    index: usize,
+    index: RouteId,
     captures: CaptureSet,
 }
 
@@ -1812,7 +1830,7 @@ impl<S: Send + Sync + 'static> App<S> {
                                 let path = normalize_request_path(request.uri().path());
                                 let response = match app.resolve_route(request.method(), path) {
                                         RouteResolution::Matched(resolved) => {
-                                            let plan = &app.plans[resolved.index];
+                                            let plan = &app.plans[resolved.index.index()];
                                             let is_zero = matches!(
                                                 plan.handler,
                                                 HandlerKind::Zero(_)
@@ -2197,7 +2215,7 @@ impl<S: Send + Sync + 'static> App<S> {
 
     async fn handle_typed(&self, request: Request<Bytes>, resolved: ResolvedRoute) -> HttpResponse {
         let method = request.method().clone();
-        let plan = &self.plans[resolved.index];
+        let plan = &self.plans[resolved.index.index()];
         match &plan.handler {
             HandlerKind::Zero(handler) => return maybe_head(&method, handler().await),
             HandlerKind::Static(response) => {
@@ -2243,7 +2261,7 @@ impl<S: Send + Sync + 'static> App<S> {
 
     #[allow(dead_code)]
     async fn handle_zero(&self, method: &Method, resolved: ResolvedRoute) -> HttpResponse {
-        let plan = &self.plans[resolved.index];
+        let plan = &self.plans[resolved.index.index()];
         maybe_head(
             method,
             match &plan.handler {
@@ -2278,7 +2296,7 @@ impl<S: Send + Sync + 'static> App<S> {
         resolved: ResolvedRoute,
     ) -> HttpResponse {
         let method = request.method().clone();
-        let plan = &self.plans[resolved.index];
+        let plan = &self.plans[resolved.index.index()];
         maybe_head(
             &method,
             match &plan.handler {
@@ -2493,7 +2511,7 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
 
     async fn handle_typed(&self, request: Request<Bytes>, resolved: ResolvedRoute) -> HttpResponse {
         let method = request.method().clone();
-        let plan = &self.plans[resolved.index];
+        let plan = &self.plans[resolved.index.index()];
         match &plan.handler {
             HandlerKind::Zero(handler) => return maybe_head(&method, handler().await),
             HandlerKind::Static(response) => {
@@ -2538,7 +2556,7 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
     }
 
     async fn handle_zero(&self, method: &Method, resolved: ResolvedRoute) -> HttpResponse {
-        let plan = &self.plans[resolved.index];
+        let plan = &self.plans[resolved.index.index()];
         maybe_head(
             method,
             match &plan.handler {
@@ -2572,7 +2590,7 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
         resolved: ResolvedRoute,
     ) -> HttpResponse {
         let method = request.method().clone();
-        let plan = &self.plans[resolved.index];
+        let plan = &self.plans[resolved.index.index()];
         maybe_head(
             &method,
             match &plan.handler {
@@ -2612,7 +2630,7 @@ where
                             let path = normalize_request_path(request.uri().path());
                             let response = match router.resolve_route(request.method(), path) {
                                 RouteResolution::Matched(resolved) => {
-                                    let plan = &router.plans[resolved.index];
+                                    let plan = &router.plans[resolved.index.index()];
                                     let is_zero = matches!(
                                         plan.handler,
                                         HandlerKind::Zero(_)
@@ -3013,7 +3031,7 @@ mod tests {
             _ => panic!("zero route did not resolve"),
         };
         assert!(matches!(
-            app.plans[resolved.index].handler,
+            app.plans[resolved.index.index()].handler,
             HandlerKind::Zero(_)
         ));
         assert_eq!(resolved.captures.count, 0);
@@ -3053,7 +3071,7 @@ mod tests {
     #[test]
     fn route_ids_are_compact_u32_handles() {
         assert_eq!(size_of::<RouteId>(), size_of::<u32>());
-        assert_eq!(size_of::<RouteSet>(), size_of::<[RouteId; 7]>() + size_of::<String>());
+        assert!(size_of::<RouteSet>() < size_of::<[usize; 7]>() + size_of::<String>());
     }
 
     #[test]
@@ -3083,7 +3101,7 @@ mod tests {
             _ => panic!("raw POST route did not resolve"),
         };
         assert!(matches!(
-            app.plans[resolved.index].handler,
+            app.plans[resolved.index.index()].handler,
             HandlerKind::Raw(_)
         ));
     }
@@ -3101,7 +3119,10 @@ mod tests {
             .dynamic_routes
             .find("/dynamic/9999/42")
             .expect("dynamic route match");
-        assert_eq!(matched.routes.route(&Method::GET), Some(9_999));
+        assert_eq!(
+            matched.routes.route(&Method::GET).map(RouteId::index),
+            Some(9_999)
+        );
         assert!(app.dynamic_routes.find("/dynamic/missing/42").is_none());
     }
 
