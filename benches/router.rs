@@ -307,6 +307,14 @@ async fn main() {
     let raw_params_elapsed = raw_params_start.elapsed().as_nanos();
     let raw_params_allocations = ALLOCATIONS.load(Ordering::Relaxed);
     let raw_params_bytes = ALLOCATED_BYTES.load(Ordering::Relaxed);
+    assert!(
+        params_allocations <= raw_params_allocations + iterations as usize * 3,
+        "materialized Params exceeded the three-allocation framework budget"
+    );
+    assert!(
+        params_bytes <= raw_params_bytes + iterations as usize * 263,
+        "materialized Params exceeded the allocation-byte framework budget"
+    );
     println!(
         "case=params iterations={iterations} ns_per_op={:.2} raw_ns_per_op={:.2} allocations_per_op={:.4} raw_allocations_per_op={:.4} bytes_per_op={:.2} raw_bytes_per_op={:.2} extra_allocations_per_op={:.4} extra_bytes_per_op={:.2}",
         params_elapsed as f64 / iterations as f64,

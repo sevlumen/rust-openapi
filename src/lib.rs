@@ -197,11 +197,19 @@ struct CaptureRange {
 
 /// A path capture collection. Typed extractors use ranges into the request
 /// URI, while the explicit `Params` extractor opts into owned decoded values.
+#[derive(Debug)]
+struct MaterializedParams {
+    names: Arc<[String]>,
+    values: Box<[String]>,
+}
+
+type OwnedParams = Arc<MaterializedParams>;
+
 #[derive(Clone, Debug)]
 pub struct Params {
     packed: [u64; MAX_CAPTURE_PARAMS],
     count: u8,
-    owned: Option<Arc<[(String, String)]>>,
+    owned: Option<OwnedParams>,
 }
 
 static EMPTY_PARAMS: Params = Params {
@@ -216,10 +224,12 @@ impl Params {
     }
 
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.owned
-            .as_ref()?
+        let owned = self.owned.as_ref()?;
+        owned
+            .names
             .iter()
-            .find(|(key, _)| key == name)
+            .zip(owned.values.iter())
+            .find(|(key, _)| key.as_str() == name)
             .map(|(_, value)| value.as_str())
     }
 
@@ -239,20 +249,39 @@ impl Params {
 
     fn from_match(names: &[String], captures: CaptureSet, path: &str, materialize: bool) -> Self {
         let owned = materialize.then(|| {
-            let mut values = Vec::with_capacity(captures.count as usize);
-            for (index, name) in names.iter().enumerate() {
-                let range = captures.range(index).expect("capture range exists");
-                let value = percent_decode(&path[range.start..range.end])
-                    .expect("route matching validates percent encoding");
-                values.push((name.clone(), value));
-            }
-            Arc::from(values.into_boxed_slice())
+            Self::materialized_names(
+                Arc::from(names.to_owned().into_boxed_slice()),
+                captures,
+                path,
+            )
         });
         Self {
             packed: captures.packed,
             count: captures.count,
             owned,
         }
+    }
+
+    fn from_materialized_names(names: Arc<[String]>, captures: CaptureSet, path: &str) -> Self {
+        Self {
+            packed: captures.packed,
+            count: captures.count,
+            owned: Some(Self::materialized_names(names, captures, path)),
+        }
+    }
+
+    fn materialized_names(names: Arc<[String]>, captures: CaptureSet, path: &str) -> OwnedParams {
+        let mut values = Vec::with_capacity(captures.count as usize);
+        for index in 0..captures.count as usize {
+            let range = captures.range(index).expect("capture range exists");
+            let value = percent_decode(&path[range.start..range.end])
+                .expect("route matching validates percent encoding");
+            values.push(value);
+        }
+        Arc::new(MaterializedParams {
+            names,
+            values: values.into_boxed_slice(),
+        })
     }
 }
 
@@ -1136,9 +1165,9 @@ impl CaptureProvider for DynamicCaptures {
             CaptureMode::Materialized => {
                 let names = metadata
                     .capture_names
-                    .as_deref()
+                    .as_ref()
                     .expect("materialized captures have names");
-                Params::from_match(names, self.0, path, true)
+                Params::from_materialized_names(Arc::clone(names), self.0, path)
             }
         };
         handler(request, &params, state)
@@ -3060,6 +3089,10 @@ mod tests {
         assert!(Arc::ptr_eq(
             params.owned.as_ref().expect("materialized values"),
             cloned.owned.as_ref().expect("materialized values"),
+        ));
+        assert!(Arc::ptr_eq(
+            &params.owned.as_ref().expect("materialized values").names,
+            &cloned.owned.as_ref().expect("materialized values").names,
         ));
     }
 
