@@ -1052,7 +1052,7 @@ impl StaticResponse {
         Self::Json { body }
     }
 
-    fn into_response(&self) -> HttpResponse {
+    fn to_response(&self) -> HttpResponse {
         let mut response = Response::new(ResponseBody::full(match self {
             Self::Text { body, .. } | Self::Json { body } => body.clone(),
         }));
@@ -2089,7 +2089,7 @@ impl<S: Send + Sync + 'static> App<S> {
         match &plan.handler {
             HandlerKind::Zero(handler) => return maybe_head(&method, handler().await),
             HandlerKind::Static(response) => {
-                return maybe_head(&method, response.into_response());
+                return maybe_head(&method, response.to_response());
             }
             HandlerKind::Builtin(builtin) => {
                 return maybe_head(&method, self.builtin_response(*builtin));
@@ -2126,7 +2126,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 HandlerKind::Zero(handler) => handler().await,
                 HandlerKind::Typed(_) => unreachable!("typed route handled separately"),
                 HandlerKind::Raw(_) => unreachable!("raw route handled separately"),
-                HandlerKind::Static(response) => response.into_response(),
+                HandlerKind::Static(response) => response.to_response(),
                 HandlerKind::Builtin(builtin) => self.builtin_response(*builtin),
             },
         )
