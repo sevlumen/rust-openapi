@@ -173,6 +173,50 @@ async fn main() {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(100_000u64);
+    if std::env::var("OAS_BENCH_CASE").ok().as_deref() == Some("static-text") {
+        let mut app = App::new();
+        app.static_text("/health", "OK");
+        let app = app.build();
+        let (elapsed, allocations, bytes) =
+            measure_app(&app, Method::GET, "/health", &[], iterations).await;
+        println!(
+            "case=static-text-focused iterations={iterations} ns_per_op={:.2} allocations_per_op={:.4} bytes_per_op={:.2}",
+            elapsed as f64 / iterations as f64,
+            allocations as f64 / iterations as f64,
+            bytes as f64 / iterations as f64,
+        );
+        return;
+    }
+    if std::env::var("OAS_BENCH_CASE").ok().as_deref() == Some("static-json") {
+        let mut app = App::new();
+        app.static_json("/version", Bytes::from_static(br#"{"version":"0.1.0"}"#));
+        let app = app.build();
+        let (elapsed, allocations, bytes) =
+            measure_app(&app, Method::GET, "/version", &[], iterations).await;
+        println!(
+            "case=static-json-focused iterations={iterations} ns_per_op={:.2} allocations_per_op={:.4} bytes_per_op={:.2}",
+            elapsed as f64 / iterations as f64,
+            allocations as f64 / iterations as f64,
+            bytes as f64 / iterations as f64,
+        );
+        return;
+    }
+    if std::env::var("OAS_BENCH_CASE").ok().as_deref() == Some("json-bytes") {
+        let mut app = App::new();
+        app.get("/json", || async {
+            JsonBytes::new(Bytes::from_static(br#"{"status":"ok"}"#))
+        });
+        let app = app.build();
+        let (elapsed, allocations, bytes) =
+            measure_app(&app, Method::GET, "/json", &[], iterations).await;
+        println!(
+            "case=json-bytes-focused iterations={iterations} ns_per_op={:.2} allocations_per_op={:.4} bytes_per_op={:.2}",
+            elapsed as f64 / iterations as f64,
+            allocations as f64 / iterations as f64,
+            bytes as f64 / iterations as f64,
+        );
+        return;
+    }
     if std::env::var("OAS_BENCH_CASE").ok().as_deref() == Some("dynamic-header") {
         let mut app = App::new();
         app.get("/trace/{id}", typed_header);

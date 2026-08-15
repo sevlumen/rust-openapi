@@ -45,6 +45,16 @@ I/O while keeping custom cases and run counts, add `-SummaryOnly`:
 `-ReferenceProfile` implies `-SummaryOnly` and retains its fixed one-run,
 two-endpoint shape; `-SummaryOnly` alone does not change the requested matrix.
 
+For release-profile microbenchmarks of the in-process static-response paths,
+set `OAS_BENCH_CASE` to `static-text`, `static-json`, or `json-bytes`. Each
+focused case reports `ns/request`, allocations/request, and bytes/request:
+
+```powershell
+$env:OAS_BENCH_CASE = "static-json"
+$env:OAS_BENCH_ITERATIONS = "2000000"
+cargo bench --bench router
+```
+
 For a quick Docker smoke test (not a release gate):
 
 ```powershell
