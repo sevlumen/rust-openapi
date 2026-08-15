@@ -2605,6 +2605,17 @@ mod tests {
     }
 
     #[test]
+    fn build_freezes_route_storage_into_boxed_slices() {
+        let mut app = App::new();
+        app.get("/zero", || async { "OK" });
+
+        let runtime = app.build();
+
+        assert!(matches!(runtime.app.plans, RouteStorage::Frozen(_)));
+        assert!(matches!(runtime.app.metadata, RouteStorage::Frozen(_)));
+    }
+
+    #[test]
     fn route_plans_precompute_body_modes() {
         let mut app = App::new();
         app.get("/plain", || async { "OK" });
