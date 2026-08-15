@@ -39,4 +39,19 @@ if ($incomplete.Duplicates.Count -eq 0 -or $incomplete.Missing.Count -eq 0) {
     throw "duplicate/missing tuple details were not reported"
 }
 
+$unexpectedRecords = @($completeRecords + [pscustomobject]@{
+        case = "unexpected"
+        implementation = "raw"
+        vu = 32
+        run = 1
+    })
+$unexpected = Get-BenchmarkMatrixStatus `
+    -Records $unexpectedRecords `
+    -Cases $cases `
+    -Vus $vus `
+    -Runs $runs
+if ($unexpected.IsComplete -or $unexpected.Unexpected.Count -eq 0) {
+    throw "unexpected tuple was incorrectly accepted"
+}
+
 Write-Host "benchmark matrix guard test passed"
