@@ -3075,6 +3075,21 @@ mod tests {
     }
 
     #[test]
+    fn route_plans_encode_capture_materialization_mode() {
+        let mut app = App::new();
+        app.get("/plain", || async { "OK" });
+        app.get("/path/{id}", |Path(_id): Path<String>| async { "OK" });
+        app.get("/params/{id}", |_params: Params| async { "OK" });
+
+        assert!(matches!(app.plans[0].capture_mode, CaptureMode::None));
+        assert!(matches!(app.plans[1].capture_mode, CaptureMode::Borrowed));
+        assert!(matches!(
+            app.plans[2].capture_mode,
+            CaptureMode::Materialized(_)
+        ));
+    }
+
+    #[test]
     fn route_plans_precompute_body_modes() {
         let mut app = App::new();
         app.get("/plain", || async { "OK" });
