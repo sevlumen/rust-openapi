@@ -16,6 +16,8 @@ $ErrorActionPreference = "Stop"
 $compose = Join-Path $PSScriptRoot "docker-compose.yml"
 $adapter = Join-Path $PSScriptRoot "oha-adapter.ps1"
 . $adapter
+$matrixGuard = Join-Path $PSScriptRoot "matrix-guard.ps1"
+. $matrixGuard
 $resultRoot = Join-Path $PSScriptRoot "results\$Version"
 New-Item -ItemType Directory -Force -Path $resultRoot | Out-Null
 $Cases = @($Cases | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -295,10 +297,15 @@ $stoppedEarly = $false
 }
 
 $expectedRecordCount = $Cases.Count * $Vus.Count * $Runs * 2
-$matrixComplete = $records.Count -eq $expectedRecordCount
+$matrixStatus = Get-BenchmarkMatrixStatus `
+    -Records @($records | ForEach-Object { $_ }) `
+    -Cases $Cases `
+    -Vus $Vus `
+    -Runs $Runs
+$matrixComplete = $matrixStatus.IsComplete
 if ($Official -and -not $matrixComplete) {
     $officialShapeValid = $false
-    Write-Warning "Official release matrix is incomplete: expected $expectedRecordCount measurements, collected $($records.Count). Result will be INCONCLUSIVE."
+    Write-Warning "Official release matrix is incomplete: expected $expectedRecordCount unique measurements, collected $($records.Count). Missing=$($matrixStatus.Missing.Count), duplicates=$($matrixStatus.Duplicates.Count), unexpected=$($matrixStatus.Unexpected.Count). Result will be INCONCLUSIVE."
 }
 
 function Get-Median([double[]]$values) {
@@ -507,9 +514,9 @@ $completionNote = if ($stoppedEarly) {
     "Execution completed all requested case/VU/run loops."
 }
 $matrixNote = if ($Official -and -not $officialShapeValid) {
-    "Official matrix guard: INCONCLUSIVE because the required case/VU/run/request tuple set was not complete."
+    "Official matrix guard: INCONCLUSIVE because the required case/VU/run/request tuple set was not complete (expected $($matrixStatus.ExpectedCount) unique tuples, observed $($matrixStatus.ActualCount); missing $($matrixStatus.Missing.Count), duplicates $($matrixStatus.Duplicates.Count), unexpected $($matrixStatus.Unexpected.Count))."
 } elseif ($Official) {
-    "Official matrix guard: complete ($($records.Count) measurements)."
+    "Official matrix guard: complete ($($matrixStatus.ExpectedCount) unique tuples)."
 } else {
     "Official matrix guard: not requested; use -Official for release acceptance."
 }
@@ -598,5 +605,10 @@ records=$($records.Count)
 expected_records=$expectedRecordCount
 official_shape_valid=$officialShapeValid
 matrix_complete=$matrixComplete
+matrix_expected_unique=$($matrixStatus.ExpectedCount)
+matrix_actual_records=$($matrixStatus.ActualCount)
+matrix_missing=$($matrixStatus.Missing.Count)
+matrix_duplicates=$($matrixStatus.Duplicates.Count)
+matrix_unexpected=$($matrixStatus.Unexpected.Count)
 "@ | Set-Content (Join-Path $resultRoot "manifest.txt")
 Write-Host "Benchmark artifacts written to $resultRoot"
