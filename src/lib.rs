@@ -1194,14 +1194,14 @@ impl RouteId {
 
 struct RouteSet {
     routes: [RouteId; 7],
-    allowed_methods: String,
+    method_mask: u8,
 }
 
 impl Default for RouteSet {
     fn default() -> Self {
         Self {
             routes: [RouteId::NONE; 7],
-            allowed_methods: String::new(),
+            method_mask: 0,
         }
     }
 }
@@ -1216,12 +1216,7 @@ impl RouteSet {
             "duplicate route pattern and method"
         );
         self.routes[slot] = route;
-        self.allowed_methods = METHOD_NAMES
-            .iter()
-            .enumerate()
-            .filter_map(|(index, name)| (self.routes[index] != RouteId::NONE).then_some(*name))
-            .collect::<Vec<_>>()
-            .join(", ");
+        self.method_mask |= 1_u8 << slot;
     }
 
     fn route(&self, method: &Method) -> Option<RouteId> {
@@ -1229,24 +1224,24 @@ impl RouteSet {
             .and_then(|slot| (self.routes[slot] != RouteId::NONE).then_some(self.routes[slot]))
     }
 
-    fn allowed_methods(&self) -> &str {
-        &self.allowed_methods
+    fn allowed_methods(&self) -> String {
+        METHOD_NAMES
+            .iter()
+            .enumerate()
+            .filter_map(|(index, name)| (self.method_mask & (1_u8 << index) != 0).then_some(*name))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     fn remove(&mut self, method: &Method) {
         if let Some(slot) = method_slot(method) {
             self.routes[slot] = RouteId::NONE;
-            self.allowed_methods = METHOD_NAMES
-                .iter()
-                .enumerate()
-                .filter_map(|(index, name)| (self.routes[index] != RouteId::NONE).then_some(*name))
-                .collect::<Vec<_>>()
-                .join(", ");
+            self.method_mask &= !(1_u8 << slot);
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.routes.iter().all(|route| *route == RouteId::NONE)
+        self.method_mask == 0
     }
 }
 
@@ -1322,12 +1317,12 @@ impl ResolvedRoute {
 }
 
 #[allow(clippy::large_enum_variant)]
-enum RouteResolution<'a> {
+enum RouteResolution {
     // Keep the match on the stack: boxing this variant adds one allocation to
     // every typed request and breaks the zero-extra-allocation extractor gate.
     Matched(ResolvedRoute),
-    Options(&'a str),
-    MethodNotAllowed(&'a str),
+    Options(String),
+    MethodNotAllowed(String),
     NotFound,
 }
 
@@ -2080,13 +2075,13 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
         let path = normalize_request_path(request.uri().path());
         match self.resolve_route(&method, path) {
             RouteResolution::Matched(resolved) => self.handle_typed(request, resolved).await,
-            RouteResolution::Options(allow) => options_response(allow),
-            RouteResolution::MethodNotAllowed(allow) => method_not_allowed_response(allow),
+            RouteResolution::Options(allow) => options_response(&allow),
+            RouteResolution::MethodNotAllowed(allow) => method_not_allowed_response(&allow),
             RouteResolution::NotFound => not_found(),
         }
     }
 
-    fn resolve_route(&self, method: &Method, path: &str) -> RouteResolution<'_> {
+    fn resolve_route(&self, method: &Method, path: &str) -> RouteResolution {
         if let Some(routes) = self.static_routes.get(path) {
             return self.resolve_route_set(method, routes, None);
         }
@@ -2096,12 +2091,12 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
         self.resolve_route_set(method, path_match.routes, Some(path_match.captures))
     }
 
-    fn resolve_route_set<'a>(
-        &'a self,
+    fn resolve_route_set(
+        &self,
         method: &Method,
-        routes: &'a RouteSet,
+        routes: &RouteSet,
         captures: Option<CaptureSet>,
-    ) -> RouteResolution<'a> {
+    ) -> RouteResolution {
         let index = routes.route(method).or_else(|| {
             (method == Method::HEAD)
                 .then(|| routes.route(&Method::GET))
@@ -2248,10 +2243,10 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
                 self.prepare_matched(router, request, resolved, path_end)
             }
             RouteResolution::Options(allow) => {
-                PreparedDispatch::Ready(Some(options_response(allow)))
+                PreparedDispatch::Ready(Some(options_response(&allow)))
             }
             RouteResolution::MethodNotAllowed(allow) => {
-                PreparedDispatch::Ready(Some(method_not_allowed_response(allow)))
+                PreparedDispatch::Ready(Some(method_not_allowed_response(&allow)))
             }
             RouteResolution::NotFound => PreparedDispatch::Ready(Some(not_found())),
         }
@@ -2517,13 +2512,13 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
         let path = normalize_request_path(request.uri().path());
         match self.resolve_route(&method, path) {
             RouteResolution::Matched(resolved) => self.handle_typed(request, resolved).await,
-            RouteResolution::Options(allow) => options_response(allow),
-            RouteResolution::MethodNotAllowed(allow) => method_not_allowed_response(allow),
+            RouteResolution::Options(allow) => options_response(&allow),
+            RouteResolution::MethodNotAllowed(allow) => method_not_allowed_response(&allow),
             RouteResolution::NotFound => not_found(),
         }
     }
 
-    fn resolve_route(&self, method: &Method, path: &str) -> RouteResolution<'_> {
+    fn resolve_route(&self, method: &Method, path: &str) -> RouteResolution {
         if let Some(routes) = self.static_routes.get(path) {
             return self.resolve_route_set(method, routes, None);
         }
@@ -2533,12 +2528,12 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
         self.resolve_route_set(method, path_match.routes, Some(path_match.captures))
     }
 
-    fn resolve_route_set<'b>(
-        &'b self,
+    fn resolve_route_set(
+        &self,
         method: &Method,
-        routes: &'b RouteSet,
+        routes: &RouteSet,
         captures: Option<CaptureSet>,
-    ) -> RouteResolution<'b> {
+    ) -> RouteResolution {
         let index = routes.route(method).or_else(|| {
             (method == Method::HEAD)
                 .then(|| routes.route(&Method::GET))
@@ -3035,7 +3030,21 @@ mod tests {
     #[test]
     fn route_ids_are_compact_u32_handles() {
         assert_eq!(size_of::<RouteId>(), size_of::<u32>());
-        assert!(size_of::<RouteSet>() < size_of::<[usize; 7]>() + size_of::<String>());
+        assert!(size_of::<RouteSet>() <= 32);
+    }
+
+    #[test]
+    fn route_sets_keep_allow_metadata_off_the_hot_slots() {
+        let mut routes = RouteSet::default();
+        assert!(routes.is_empty());
+        routes.insert(Method::POST, 0);
+        routes.insert(Method::GET, 1);
+        assert_eq!(routes.allowed_methods(), "GET, POST");
+        routes.remove(&Method::GET);
+        assert_eq!(routes.allowed_methods(), "POST");
+        assert!(!routes.is_empty());
+        routes.remove(&Method::POST);
+        assert!(routes.is_empty());
     }
 
     #[test]
@@ -3109,21 +3118,22 @@ mod tests {
     #[test]
     fn report_hot_path_layout_sizes() {
         println!(
-            "HandlerFuture={} InlineFuture={} Params={} CaptureMode={} RoutePlan={} RouteMetadata={} RouteResolution={}",
+            "HandlerFuture={} InlineFuture={} Params={} CaptureMode={} RoutePlan={} RouteMetadata={} RouteSet={} RouteResolution={}",
             size_of::<HandlerFuture>(),
             size_of::<InlineFuture>(),
             size_of::<Params>(),
             size_of::<CaptureMode>(),
             size_of::<RoutePlan<()>>(),
             size_of::<RouteMetadata>(),
-            size_of::<RouteResolution<'static>>(),
+            size_of::<RouteSet>(),
+            size_of::<RouteResolution>(),
         );
     }
 
     #[test]
     fn capture_names_stay_out_of_hot_route_plans() {
         assert_eq!(size_of::<CaptureMode>(), 1);
-        assert!(size_of::<RouteResolution<'static>>() <= 80);
+        assert!(size_of::<RouteResolution>() <= 80);
     }
 
     #[tokio::test]
