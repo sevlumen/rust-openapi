@@ -1405,7 +1405,7 @@ struct CaptureSet {
 }
 
 impl CaptureSet {
-    fn range(self, index: usize) -> Option<CaptureRange> {
+    fn range(&self, index: usize) -> Option<CaptureRange> {
         (index < self.count as usize).then(|| {
             let packed = self.packed[index];
             CaptureRange {
