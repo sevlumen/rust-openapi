@@ -1295,9 +1295,29 @@ impl CaptureSet {
     }
 }
 
-struct ResolvedRoute {
-    index: RouteId,
-    captures: CaptureSet,
+enum ResolvedRoute {
+    Static {
+        index: RouteId,
+    },
+    Dynamic {
+        index: RouteId,
+        captures: CaptureSet,
+    },
+}
+
+impl ResolvedRoute {
+    fn route_id(&self) -> RouteId {
+        match self {
+            Self::Static { index } | Self::Dynamic { index, .. } => *index,
+        }
+    }
+
+    fn captures(&self) -> CaptureSet {
+        match self {
+            Self::Static { .. } => CaptureSet::default(),
+            Self::Dynamic { captures, .. } => *captures,
+        }
+    }
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -1830,7 +1850,7 @@ impl<S: Send + Sync + 'static> App<S> {
                                 let path = normalize_request_path(request.uri().path());
                                 let response = match app.resolve_route(request.method(), path) {
                                         RouteResolution::Matched(resolved) => {
-                                            let plan = &app.plans[resolved.index.index()];
+                                            let plan = &app.plans[resolved.route_id().index()];
                                             let is_zero = matches!(
                                                 plan.handler,
                                                 HandlerKind::Zero(_)
@@ -2201,13 +2221,16 @@ impl<S: Send + Sync + 'static> App<S> {
         let Some(index) = index else {
             return RouteResolution::MethodNotAllowed(routes.allowed_methods());
         };
-        let captures = captures.unwrap_or_default();
-        RouteResolution::Matched(ResolvedRoute { index, captures })
+        let resolved = match captures {
+            Some(captures) => ResolvedRoute::Dynamic { index, captures },
+            None => ResolvedRoute::Static { index },
+        };
+        RouteResolution::Matched(resolved)
     }
 
     async fn handle_typed(&self, request: Request<Bytes>, resolved: ResolvedRoute) -> HttpResponse {
         let method = request.method().clone();
-        let plan = &self.plans[resolved.index.index()];
+        let plan = &self.plans[resolved.route_id().index()];
         match &plan.handler {
             HandlerKind::Zero(handler) => return maybe_head(&method, handler().await),
             HandlerKind::Static(response) => {
@@ -2223,11 +2246,11 @@ impl<S: Send + Sync + 'static> App<S> {
         let response = match &plan.capture_mode {
             CaptureMode::None => self.invoke_typed(&mut request, Params::empty(), plan).await,
             CaptureMode::Borrowed => {
-                let params = Params::from_match(&[], resolved.captures, path, false);
+                let params = Params::from_match(&[], resolved.captures(), path, false);
                 self.invoke_typed(&mut request, &params, plan).await
             }
             CaptureMode::Materialized(names) => {
-                let params = Params::from_match(names, resolved.captures, path, true);
+                let params = Params::from_match(names, resolved.captures(), path, true);
                 self.invoke_typed(&mut request, &params, plan).await
             }
         };
@@ -2252,7 +2275,7 @@ impl<S: Send + Sync + 'static> App<S> {
 
     #[allow(dead_code)]
     async fn handle_zero(&self, method: &Method, resolved: ResolvedRoute) -> HttpResponse {
-        let plan = &self.plans[resolved.index.index()];
+        let plan = &self.plans[resolved.route_id().index()];
         maybe_head(
             method,
             match &plan.handler {
@@ -2288,7 +2311,7 @@ impl<S: Send + Sync + 'static> App<S> {
         resolved: ResolvedRoute,
     ) -> HttpResponse {
         let method = request.method().clone();
-        let plan = &self.plans[resolved.index.index()];
+        let plan = &self.plans[resolved.route_id().index()];
         maybe_head(
             &method,
             match &plan.handler {
@@ -2377,7 +2400,7 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
         resolved: ResolvedRoute,
     ) -> PreparedDispatch {
         let method = request.method().clone();
-        let plan = &router.plans[resolved.index.index()];
+        let plan = &router.plans[resolved.route_id().index()];
         match plan.body_mode {
             BodyMode::Incoming => match &plan.handler {
                 HandlerKind::Raw(handler) => PreparedDispatch::Handler {
@@ -2414,12 +2437,12 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
                             }
                             CaptureMode::Borrowed => {
                                 let params =
-                                    Params::from_match(&[], resolved.captures, path, false);
+                                    Params::from_match(&[], resolved.captures(), path, false);
                                 handler(&mut request, &params, router.state)
                             }
                             CaptureMode::Materialized(names) => {
                                 let params =
-                                    Params::from_match(names, resolved.captures, path, true);
+                                    Params::from_match(names, resolved.captures(), path, true);
                                 handler(&mut request, &params, router.state)
                             }
                         };
@@ -2663,13 +2686,16 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
         let Some(index) = index else {
             return RouteResolution::MethodNotAllowed(routes.allowed_methods());
         };
-        let captures = captures.unwrap_or_default();
-        RouteResolution::Matched(ResolvedRoute { index, captures })
+        let resolved = match captures {
+            Some(captures) => ResolvedRoute::Dynamic { index, captures },
+            None => ResolvedRoute::Static { index },
+        };
+        RouteResolution::Matched(resolved)
     }
 
     async fn handle_typed(&self, request: Request<Bytes>, resolved: ResolvedRoute) -> HttpResponse {
         let method = request.method().clone();
-        let plan = &self.plans[resolved.index.index()];
+        let plan = &self.plans[resolved.route_id().index()];
         match &plan.handler {
             HandlerKind::Zero(handler) => return maybe_head(&method, handler().await),
             HandlerKind::Static(response) => {
@@ -2685,11 +2711,11 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
         let response = match &plan.capture_mode {
             CaptureMode::None => self.invoke_typed(&mut request, Params::empty(), plan).await,
             CaptureMode::Borrowed => {
-                let params = Params::from_match(&[], resolved.captures, path, false);
+                let params = Params::from_match(&[], resolved.captures(), path, false);
                 self.invoke_typed(&mut request, &params, plan).await
             }
             CaptureMode::Materialized(names) => {
-                let params = Params::from_match(names, resolved.captures, path, true);
+                let params = Params::from_match(names, resolved.captures(), path, true);
                 self.invoke_typed(&mut request, &params, plan).await
             }
         };
@@ -3076,7 +3102,7 @@ mod tests {
             _ => panic!("zero route did not resolve"),
         };
         assert!(matches!(
-            app.plans[resolved.index.index()].handler,
+            app.plans[resolved.route_id().index()].handler,
             HandlerKind::Zero(_)
         ));
         assert!(matches!(resolved, ResolvedRoute::Static { .. }));
@@ -3179,7 +3205,7 @@ mod tests {
             _ => panic!("raw POST route did not resolve"),
         };
         assert!(matches!(
-            app.plans[resolved.index.index()].handler,
+            app.plans[resolved.route_id().index()].handler,
             HandlerKind::Raw(_)
         ));
     }
