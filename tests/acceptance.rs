@@ -63,6 +63,26 @@ async fn echo(Json(payload): Json<Payload>) -> Json<Payload> {
     Json(payload)
 }
 
+async fn eight_extractors(
+    Path(id): Path<u64>,
+    Query(query): Query<Search>,
+    Header(trace): Header<TraceId>,
+    State(_state): State<TestState>,
+    Json(payload): Json<Payload>,
+    optional_trace: Option<Header<TraceId>>,
+    optional_json: Option<Json<Payload>>,
+    _params: Params,
+) -> String {
+    format!(
+        "{id}:{}:{}:{}:{}:{}",
+        query.active,
+        trace.0,
+        payload.name,
+        optional_trace.is_some(),
+        optional_json.is_some(),
+    )
+}
+
 async fn trace(Header(trace): Header<TraceId>) -> String {
     trace.0
 }
@@ -219,6 +239,26 @@ async fn app_registers_static_dynamic_and_query_routes() {
         .await;
     assert_eq!(response.status(), 200);
     assert_eq!(response.body_string().await, "42:true");
+}
+
+#[tokio::test]
+async fn handler_supports_eight_extractors() {
+    let mut app = App::new().with_state(TestState);
+    app.post("/multi/{id}", eight_extractors);
+
+    let response = app
+        .oneshot(
+            Method::POST,
+            "/multi/42?page=7&active=true",
+            &[
+                ("content-type", "application/json"),
+                ("x-trace-id", "abc123"),
+            ],
+            Some(Bytes::from_static(br#"{"name":"Ada"}"#)),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.body_string().await, "42:true:abc123:Ada:true:true");
 }
 
 #[tokio::test]
