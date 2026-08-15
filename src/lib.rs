@@ -1025,7 +1025,54 @@ enum HandlerKind<S> {
     Zero(ErasedZeroHandler),
     Typed(ErasedHandler<S>),
     Raw(ErasedRawHandler),
+    Static(StaticResponse),
     Builtin(BuiltinHandler),
+}
+
+enum StaticResponse {
+    Text {
+        body: Bytes,
+        content_length: HeaderValue,
+    },
+    Json {
+        body: Bytes,
+    },
+}
+
+impl StaticResponse {
+    fn text(body: &'static str) -> Self {
+        Self::Text {
+            body: Bytes::from_static(body.as_bytes()),
+            content_length: HeaderValue::from_str(&body.len().to_string())
+                .expect("static text length is a valid header value"),
+        }
+    }
+
+    fn json(body: Bytes) -> Self {
+        Self::Json { body }
+    }
+
+    fn into_response(&self) -> HttpResponse {
+        let mut response = Response::new(ResponseBody::full(match self {
+            Self::Text { body, .. } | Self::Json { body } => body.clone(),
+        }));
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, self.content_type());
+        if let Self::Text { content_length, .. } = self {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_LENGTH, content_length.clone());
+        }
+        response
+    }
+
+    fn content_type(&self) -> HeaderValue {
+        match self {
+            Self::Text { .. } => HeaderValue::from_static("text/plain; charset=utf-8"),
+            Self::Json { .. } => HeaderValue::from_static("application/json"),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1394,6 +1441,25 @@ impl<S: Send + Sync + 'static> App<S> {
         self
     }
 
+    /// Register a GET route whose text response is prepared at startup.
+    ///
+    /// This is the lowest-overhead route for health checks, readiness probes,
+    /// and other immutable text responses. It does not create or poll a
+    /// handler future per request.
+    pub fn static_text(&mut self, path: &str, body: &'static str) -> &mut Self {
+        self.add_static_route(path, StaticResponse::text(body));
+        self
+    }
+
+    /// Register a GET route whose JSON bytes are prepared by the application.
+    ///
+    /// The bytes are reference-counted and cloned by handle, so serialization
+    /// is not repeated during request dispatch.
+    pub fn static_json(&mut self, path: &str, body: Bytes) -> &mut Self {
+        self.add_static_route(path, StaticResponse::json(body));
+        self
+    }
+
     pub fn head<H, A>(&mut self, path: &str, handler: H) -> &mut Self
     where
         H: Clone + Handler<S, A>,
@@ -1654,7 +1720,9 @@ impl<S: Send + Sync + 'static> App<S> {
                                             let is_raw = matches!(route.plan.handler, HandlerKind::Raw(_));
                                             let is_zero = matches!(
                                                 route.plan.handler,
-                                                HandlerKind::Zero(_) | HandlerKind::Builtin(_)
+                                                HandlerKind::Zero(_)
+                                                    | HandlerKind::Static(_)
+                                                    | HandlerKind::Builtin(_)
                                             );
                                             let needs_body = route.plan.needs_body;
                                             if is_raw {
@@ -1742,6 +1810,54 @@ impl<S: Send + Sync + 'static> App<S> {
             }
         }
         Ok(())
+    }
+
+    fn add_static_route(&mut self, path: &str, response: StaticResponse) {
+        let template = normalize_path(path);
+        let segments = parse_template(&template);
+        assert!(
+            segments
+                .iter()
+                .all(|segment| matches!(segment, Segment::Static(_))),
+            "static response routes cannot contain captures"
+        );
+        assert!(
+            self.routes
+                .iter()
+                .all(|route| route.metadata.method != Method::GET
+                    || route.metadata.template != template),
+            "duplicate route"
+        );
+
+        let index = self.routes.len();
+        self.static_routes
+            .entry(template.clone())
+            .or_default()
+            .insert(Method::GET, index);
+        self.routes.push(Route {
+            plan: RoutePlan {
+                capture_names: Vec::new().into(),
+                materialize_params: false,
+                needs_body: false,
+                handler: HandlerKind::Static(response),
+            },
+            metadata: RouteMetadata {
+                builtin: false,
+                method: Method::GET,
+                template,
+                segments,
+                operation: Operation {
+                    tag: None,
+                    summary: None,
+                    operation_id: None,
+                    response_status: StatusCode::OK,
+                    response_schema: None,
+                    request: OpenApiRequest::default(),
+                },
+            },
+        });
+        self.openapi_bytes = None;
+        self.last_route = Some(index);
     }
 
     fn add_route<H, A>(&mut self, method: Method, path: &str, handler: H)
@@ -1988,8 +2104,15 @@ impl<S: Send + Sync + 'static> App<S> {
     async fn handle_typed(&self, request: Request<Bytes>, resolved: ResolvedRoute) -> HttpResponse {
         let method = request.method().clone();
         let route = &self.routes[resolved.index];
-        if let HandlerKind::Zero(handler) = &route.plan.handler {
-            return maybe_head(&method, handler().await);
+        match &route.plan.handler {
+            HandlerKind::Zero(handler) => return maybe_head(&method, handler().await),
+            HandlerKind::Static(response) => {
+                return maybe_head(&method, response.into_response());
+            }
+            HandlerKind::Builtin(builtin) => {
+                return maybe_head(&method, self.builtin_response(*builtin));
+            }
+            HandlerKind::Typed(_) | HandlerKind::Raw(_) => {}
         }
         let mut request = request;
         let path = normalize_request_path(request.uri().path());
@@ -2006,7 +2129,9 @@ impl<S: Send + Sync + 'static> App<S> {
                 HandlerKind::Typed(handler) => handler(&mut request, &params, &self.state).await,
                 HandlerKind::Zero(_) => unreachable!("zero route handled above"),
                 HandlerKind::Raw(_) => unreachable!("raw route handled separately"),
-                HandlerKind::Builtin(builtin) => self.builtin_response(*builtin),
+                HandlerKind::Static(_) | HandlerKind::Builtin(_) => {
+                    unreachable!("non-typed route handled above")
+                }
             },
         )
     }
@@ -2019,6 +2144,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 HandlerKind::Zero(handler) => handler().await,
                 HandlerKind::Typed(_) => unreachable!("typed route handled separately"),
                 HandlerKind::Raw(_) => unreachable!("raw route handled separately"),
+                HandlerKind::Static(response) => response.into_response(),
                 HandlerKind::Builtin(builtin) => self.builtin_response(*builtin),
             },
         )
@@ -2052,6 +2178,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 HandlerKind::Raw(handler) => handler(request).await,
                 HandlerKind::Zero(_) => unreachable!("zero route handled separately"),
                 HandlerKind::Typed(_) => unreachable!("typed route handled separately"),
+                HandlerKind::Static(_) => unreachable!("static route handled separately"),
                 HandlerKind::Builtin(_) => unreachable!("builtin route handled separately"),
             },
         )
