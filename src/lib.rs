@@ -3079,7 +3079,7 @@ mod tests {
             app.plans[resolved.index.index()].handler,
             HandlerKind::Zero(_)
         ));
-        assert_eq!(resolved.captures.count, 0);
+        assert!(matches!(resolved, ResolvedRoute::Static { .. }));
 
         let response = app.oneshot(Method::GET, "/zero", &[], None).await;
         assert_eq!(response.status(), StatusCode::OK);
