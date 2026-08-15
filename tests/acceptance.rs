@@ -825,7 +825,7 @@ async fn bodyless_route_does_not_wait_for_request_body() {
 #[tokio::test]
 async fn raw_route_receives_incoming_without_collecting_request_body() {
     let mut app = App::new();
-    app.raw_get("/raw-incoming", raw_incoming);
+    app.raw(Method::POST, "/raw-incoming", raw_incoming);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -836,7 +836,7 @@ async fn raw_route_receives_incoming_without_collecting_request_body() {
     let mut stream = TcpStream::connect(address).await.unwrap();
     stream
         .write_all(
-            b"GET /raw-incoming HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1048576\r\n\r\n",
+            b"POST /raw-incoming HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1048576\r\n\r\n",
         )
         .await
         .unwrap();
