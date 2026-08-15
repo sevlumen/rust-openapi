@@ -3099,6 +3099,19 @@ mod tests {
     }
 
     #[test]
+    fn connection_runtime_reuses_one_runtime_owner_for_request_borrows() {
+        let mut app = App::new();
+        app.get("/zero", || async { "OK" });
+        let runtime = Arc::new(app.build());
+        let connection = ConnectionRuntime::new(Arc::clone(&runtime));
+
+        assert_eq!(Arc::strong_count(&runtime), 2);
+        let _first = connection.runtime_ref();
+        let _second = connection.runtime_ref();
+        assert_eq!(Arc::strong_count(&runtime), 2);
+    }
+
+    #[test]
     fn no_capture_routes_use_a_shared_empty_params() {
         assert!(std::ptr::eq(Params::empty(), Params::empty()));
         assert!(Params::empty().get("id").is_none());
