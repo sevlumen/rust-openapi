@@ -11,12 +11,24 @@ param(
     [int]$Connections = 256,
     [ValidateRange(0, 10000000)]
     [int]$WarmupRequests = 10000,
+    [ValidateRange(100, 599)]
+    [int]$ExpectedStatus = 200,
     [ValidateRange(1024, 65535)]
     [int]$Port = 18080,
     [string]$Version = "native-diagnostic"
 )
 
 $ErrorActionPreference = "Stop"
+
+$Cases = @(
+    $Cases |
+        ForEach-Object { $_ -split ',' } |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ }
+)
+if ($Cases.Count -eq 0) {
+    throw "at least one benchmark case is required"
+}
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $serverPath = Join-Path $repoRoot "target\release\oas-bench-server.exe"
@@ -100,6 +112,7 @@ function Invoke-OhaJson {
         [int]$ConnectionCount,
         [int]$ServerPort,
         [string]$OutputRoot,
+        [int]$ExpectedStatus = 200,
         [switch]$Warmup
     )
 
@@ -127,11 +140,20 @@ function Invoke-OhaJson {
 
     $summary = Get-Content -Raw -LiteralPath $outputPath | ConvertFrom-Json
     $responseCount = 0
+    $expectedCount = 0
     foreach ($property in $summary.statusCodeDistribution.PSObject.Properties) {
-        $responseCount += [int]$property.Value
+        $count = [int]$property.Value
+        $responseCount += $count
+        if ($property.Name -eq "$ExpectedStatus") {
+            $expectedCount += $count
+        }
     }
     if ($responseCount -ne $RequestCount) {
         throw "oha returned $responseCount responses, expected $RequestCount for ${Implementation}/${Case} run ${Run}"
+    }
+    if ($expectedCount -ne $RequestCount) {
+        $distribution = $summary.statusCodeDistribution | ConvertTo-Json -Compress
+        throw "oha returned unexpected status distribution for ${Implementation}/${Case} run ${Run}; expected $ExpectedStatus x $RequestCount, got $distribution"
     }
     if ([double]$summary.summary.successRate -ne 1.0) {
         throw "oha reported a non-zero error rate for ${Implementation}/${Case} run ${Run}"
@@ -142,6 +164,7 @@ function Invoke-OhaJson {
         implementation = $Implementation
         run = $Run
         requests = $responseCount
+        expected_status = $ExpectedStatus
         rps = [double]$summary.summary.requestsPerSec
         total_seconds = [double]$summary.summary.total
         success_rate = [double]$summary.summary.successRate
@@ -177,6 +200,7 @@ for ($run = 1; $run -le $Runs; $run++) {
                         -ConnectionCount $Connections `
                         -ServerPort $Port `
                         -OutputRoot $resultRoot `
+                        -ExpectedStatus $ExpectedStatus `
                         -Warmup
                 }
                 $record = Invoke-OhaJson `
@@ -186,7 +210,8 @@ for ($run = 1; $run -le $Runs; $run++) {
                     -RequestCount $Requests `
                     -ConnectionCount $Connections `
                     -ServerPort $Port `
-                    -OutputRoot $resultRoot
+                    -OutputRoot $resultRoot `
+                    -ExpectedStatus $ExpectedStatus
                 $records.Add($record)
                 $record | ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $resultRoot "records.jsonl")
                 Write-Host ("{0} {1} run={2} rps={3:N2} p50_ms={4:N3} p95_ms={5:N3} p99_ms={6:N3}" -f `
@@ -231,6 +256,7 @@ $environment = @(
     "requests=$Requests",
     "connections=$Connections",
     "warmup_requests=$WarmupRequests",
+    "expected_status=$ExpectedStatus",
     "runs=$Runs",
     "cases=$($Cases -join ',')",
     "implementations=$($Implementations -join ',')"
