@@ -3387,6 +3387,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inline_future_polls_a_pinned_pending_future_without_moving_it() {
+        struct PinnedPending {
+            polled: bool,
+            _pin: PhantomPinned,
+        }
+
+        impl Future for PinnedPending {
+            type Output = &'static str;
+
+            fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+                // Accessing a field through a pinned, !Unpin future is safe as
+                // long as the future itself is never moved after pinning.
+                let this = unsafe { self.get_unchecked_mut() };
+                if this.polled {
+                    Poll::Ready("OK")
+                } else {
+                    this.polled = true;
+                    context.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }
+        }
+
+        let response = HandlerFuture::from_response_future(PinnedPending {
+            polled: false,
+            _pin: PhantomPinned,
+        })
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            Bytes::from_static(b"OK")
+        );
+    }
+
+    #[tokio::test]
     async fn dynamic_terminal_resolves_methods_without_route_scan() {
         let mut app = App::new();
         app.get("/resource/{id}", || async { "GET" });
