@@ -3134,6 +3134,13 @@ mod tests {
     }
 
     #[test]
+    fn app_builder_is_available_as_the_registration_type() {
+        let mut builder = AppBuilder::new();
+        builder.get("/zero", || async { "OK" });
+        assert_eq!(builder.plans.len(), 1);
+    }
+
+    #[test]
     fn connection_runtime_reuses_one_runtime_owner_for_request_borrows() {
         let mut app = App::new();
         app.get("/zero", || async { "OK" });
