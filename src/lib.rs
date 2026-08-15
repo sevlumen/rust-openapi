@@ -36,6 +36,15 @@ pub type HttpResponse = Response<ResponseBody>;
 /// Default upper bound for request bodies collected by body extractors.
 pub const DEFAULT_MAX_BODY_SIZE: usize = 1024 * 1024;
 
+fn encode_body_limit(limit: usize) -> u32 {
+    assert!(limit > 0, "max_body_size must be greater than zero");
+    assert!(
+        limit <= u32::MAX as usize,
+        "max_body_size must fit in a u32"
+    );
+    limit as u32
+}
+
 pub enum ResponseBody {
     Full(Option<Bytes>),
     Stream(Pin<Box<dyn Stream<Item = Bytes> + Send + 'static>>),
@@ -1228,9 +1237,10 @@ enum BuiltinHandler {
 }
 
 struct RoutePlan<S> {
+    handler: HandlerKind<S>,
+    body_limit: u32,
     capture_mode: CaptureMode,
     body_mode: BodyMode,
-    handler: HandlerKind<S>,
 }
 
 enum CaptureMode {
@@ -1543,6 +1553,7 @@ struct Operation {
 /// Mutable route-registration builder.
 pub struct AppBuilder<S = ()> {
     state: Arc<S>,
+    max_body_size: u32,
     plans: Vec<RoutePlan<S>>,
     metadata: Vec<RouteMetadata>,
     static_routes: HashMap<String, RouteSet>,
@@ -1577,6 +1588,7 @@ impl AppBuilder<()> {
     pub fn new() -> Self {
         Self {
             state: Arc::new(()),
+            max_body_size: encode_body_limit(DEFAULT_MAX_BODY_SIZE),
             plans: Vec::new(),
             metadata: Vec::new(),
             static_routes: HashMap::new(),
@@ -1599,6 +1611,7 @@ impl AppBuilder<()> {
         );
         AppBuilder {
             state: Arc::new(state),
+            max_body_size: self.max_body_size,
             plans: Vec::new(),
             metadata: Vec::new(),
             static_routes: HashMap::new(),
@@ -1631,6 +1644,21 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
     pub fn version(mut self, version: impl Into<String>) -> Self {
         self.version = version.into();
         self.openapi_bytes = None;
+        self
+    }
+
+    /// Set the maximum body size collected by buffered typed extractors.
+    ///
+    /// The value is copied into each buffered route plan during registration;
+    /// raw `Incoming` handlers remain streaming and are not affected.
+    pub fn max_body_size(&mut self, limit: usize) -> &mut Self {
+        let limit = encode_body_limit(limit);
+        self.max_body_size = limit;
+        for plan in &mut self.plans {
+            if matches!(plan.body_mode, BodyMode::Buffered) {
+                plan.body_limit = limit;
+            }
+        }
         self
     }
 
@@ -1954,9 +1982,10 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
             .or_default()
             .insert(Method::GET, index);
         self.plans.push(RoutePlan {
+            handler: HandlerKind::Static(Box::new(response)),
+            body_limit: 0,
             capture_mode: CaptureMode::None,
             body_mode: BodyMode::None,
-            handler: HandlerKind::Static(Box::new(response)),
         });
         self.metadata.push(RouteMetadata {
             builtin: false,
@@ -2032,13 +2061,14 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
             self.dynamic_routes.insert(&segments, method.clone(), index);
         }
         self.plans.push(RoutePlan {
+            handler,
+            body_limit: if H::NEEDS_BODY { self.max_body_size } else { 0 },
             capture_mode,
             body_mode: if H::NEEDS_BODY {
                 BodyMode::Buffered
             } else {
                 BodyMode::None
             },
-            handler,
         });
         self.metadata.push(RouteMetadata {
             builtin: false,
@@ -2085,9 +2115,10 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
             self.dynamic_routes.insert(&segments, method.clone(), index);
         }
         self.plans.push(RoutePlan {
+            handler,
+            body_limit: 0,
             capture_mode: CaptureMode::None,
             body_mode: BodyMode::Incoming,
-            handler,
         });
         self.metadata.push(RouteMetadata {
             builtin: false,
@@ -2144,9 +2175,10 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
             .or_default()
             .insert(Method::GET, index);
         self.plans.push(RoutePlan {
+            handler: HandlerKind::Builtin(builtin),
+            body_limit: 0,
             capture_mode: CaptureMode::None,
             body_mode: BodyMode::None,
-            handler: HandlerKind::Builtin(builtin),
         });
         self.metadata.push(RouteMetadata {
             builtin: true,
@@ -2229,6 +2261,11 @@ impl<S: Send + Sync + 'static> AppBuilder<S> {
         let HandlerKind::Typed(handler) = &plan.handler else {
             unreachable!("raw routes require Incoming request bodies")
         };
+        if matches!(plan.body_mode, BodyMode::Buffered)
+            && request.body().len() > plan.body_limit as usize
+        {
+            return payload_too_large_response();
+        }
         let response = captures
             .invoke(
                 &plan.capture_mode,
@@ -2396,7 +2433,7 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
                 HandlerKind::Raw(_) => unreachable!("raw handler requires Incoming"),
             },
             BodyMode::Buffered => {
-                let limit = DEFAULT_MAX_BODY_SIZE;
+                let limit = plan.body_limit as usize;
                 let runtime = Arc::clone(&self.runtime);
                 let (parts, body) = request.into_parts();
                 let too_large = parts
@@ -2406,15 +2443,7 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
                     .and_then(|value| value.parse::<usize>().ok())
                     .is_some_and(|length| length > limit);
                 if too_large {
-                    return PreparedDispatch::Ready(Some(response_json(
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        json!({
-                            "type": "about:blank",
-                            "title": "Payload Too Large",
-                            "status": 413,
-                            "detail": "request body exceeds the configured limit"
-                        }),
-                    )));
+                    return PreparedDispatch::Ready(Some(payload_too_large_response()));
                 }
                 PreparedDispatch::Buffered(Box::pin(async move {
                     match Limited::new(body, limit).collect().await {
@@ -2430,15 +2459,7 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
                                 .await
                         }
                         Err(error) if error.downcast_ref::<LengthLimitError>().is_some() => {
-                            response_json(
-                                StatusCode::PAYLOAD_TOO_LARGE,
-                                json!({
-                                    "type": "about:blank",
-                                    "title": "Payload Too Large",
-                                    "status": 413,
-                                    "detail": "request body exceeds the configured limit"
-                                }),
-                            )
+                            payload_too_large_response()
                         }
                         Err(_) => response_json(
                             StatusCode::BAD_REQUEST,
@@ -2652,6 +2673,11 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
         let HandlerKind::Typed(handler) = &plan.handler else {
             unreachable!("raw routes require Incoming request bodies")
         };
+        if matches!(plan.body_mode, BodyMode::Buffered)
+            && request.body().len() > plan.body_limit as usize
+        {
+            return payload_too_large_response();
+        }
         let response = captures
             .invoke(
                 &plan.capture_mode,
@@ -2865,6 +2891,20 @@ fn response_json_bytes(status: StatusCode, body: Bytes) -> HttpResponse {
         HeaderValue::from_static("application/json"),
     );
     response
+}
+
+#[cold]
+#[inline(never)]
+fn payload_too_large_response() -> HttpResponse {
+    response_json(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        json!({
+            "type": "about:blank",
+            "title": "Payload Too Large",
+            "status": 413,
+            "detail": "request body exceeds the configured limit"
+        }),
+    )
 }
 
 #[cold]
@@ -3162,7 +3202,22 @@ mod tests {
 
         assert!(matches!(app.plans[0].body_mode, BodyMode::None));
         assert!(matches!(app.plans[1].body_mode, BodyMode::Buffered));
+        assert_eq!(app.plans[1].body_limit, DEFAULT_MAX_BODY_SIZE as u32);
         assert!(matches!(app.plans[2].body_mode, BodyMode::Incoming));
+    }
+
+    #[test]
+    fn buffered_body_limit_is_compiled_into_route_plans() {
+        let mut app = App::new();
+        app.post("/json", |Json(body): Json<String>| async move { body });
+        app.raw_get("/upload", |_request| async { "OK" });
+
+        app.max_body_size(32);
+        assert_eq!(app.plans[0].body_limit, 32);
+        assert_eq!(app.plans[1].body_limit, 0);
+
+        app.max_body_size(64);
+        assert_eq!(app.plans[0].body_limit, 64);
     }
 
     #[test]

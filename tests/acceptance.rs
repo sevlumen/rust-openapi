@@ -387,6 +387,23 @@ async fn http_semantics_and_typed_body_header_are_preserved() {
     assert_eq!(response.body_string().await, "");
 }
 
+#[tokio::test]
+async fn configured_body_limit_is_enforced_before_collection() {
+    let mut app = App::new();
+    app.max_body_size(4);
+    app.post("/echo", echo);
+
+    let response = app
+        .oneshot(
+            Method::POST,
+            "/echo",
+            &[("content-type", "application/json")],
+            Some(Bytes::from_static(br#"{"name":"Ada"}"#)),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
 #[test]
 #[should_panic(expected = "with_state must be configured before routes")]
 fn with_state_rejects_routes_registered_before_state() {

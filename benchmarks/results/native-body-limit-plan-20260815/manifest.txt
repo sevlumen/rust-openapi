@@ -1,0 +1,6 @@
+REPORT.md
+environment.md
+src/lib.rs: RoutePlan::body_limit, AppBuilder::max_body_size, cold 413 response
+tests/acceptance.rs: configured_body_limit_is_enforced_before_collection
+command: cargo bench --bench router
+env: OAS_BENCH_ITERATIONS=1000000 OAS_DYNAMIC_ITERATIONS=100
