@@ -108,10 +108,11 @@ app.swagger().path("/swagger");
 Enable `swagger` for the UI and `uuid` for UUID extraction/schema support.
 `ApiSchema` derives are provided by the companion `oas-rs-macros` crate.
 
-`#[derive(ApiSchema)]` currently supports structs with named fields whose types
-are scalars (`String`, `bool`, integers, floats, `Uuid`) or `Option` of those.
-Collections, enums and serde attributes such as `#[serde(rename)]` are not yet
-reflected in the generated schema; see the roadmap below.
+`#[derive(ApiSchema)]` supports structs with named fields. Field types may be
+scalars (`String`, `bool`, integers, `f32`/`f64`, `Uuid`), `Option`, `Vec`,
+`Box`, string-keyed maps, `serde_json::Value`, or another `ApiSchema` type.
+Enums and serde attributes such as `#[serde(rename)]` are not yet reflected in
+the generated schema; see the roadmap below.
 
 Swagger UI is loaded from a pinned `swagger-ui-dist` release on unpkg with
 Subresource Integrity hashes, so it needs network access from the browser.
@@ -208,7 +209,7 @@ version) before committing.
 
 ## Roadmap
 
-Planned after `0.1`: `ApiSchema` support for `Vec`, enums and serde renames,
+Planned after `0.1`: `ApiSchema` support for enums and serde renames,
 splitting `src/lib.rs` into modules, middleware, TLS, and the full HTTP
 acceptance benchmark matrix.
 

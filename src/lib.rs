@@ -331,6 +331,57 @@ impl<T: ApiSchema + ?Sized> ApiSchema for &T {
     }
 }
 
+macro_rules! integer_schema {
+    ($($ty:ty => $format:literal),* $(,)?) => {$(
+        impl ApiSchema for $ty {
+            fn schema() -> Value {
+                json!({ "type": "integer", "format": $format })
+            }
+        }
+    )*};
+}
+
+integer_schema! {
+    i8 => "int32", i16 => "int32", u8 => "int32", u16 => "int32",
+    isize => "int64", usize => "int64",
+}
+
+impl ApiSchema for f32 {
+    fn schema() -> Value {
+        json!({ "type": "number", "format": "float" })
+    }
+}
+
+impl ApiSchema for f64 {
+    fn schema() -> Value {
+        json!({ "type": "number", "format": "double" })
+    }
+}
+
+impl<T: ApiSchema + ?Sized> ApiSchema for Box<T> {
+    fn schema() -> Value {
+        T::schema()
+    }
+}
+
+impl<V: ApiSchema> ApiSchema for std::collections::HashMap<String, V> {
+    fn schema() -> Value {
+        json!({ "type": "object", "additionalProperties": V::schema() })
+    }
+}
+
+impl<V: ApiSchema> ApiSchema for std::collections::BTreeMap<String, V> {
+    fn schema() -> Value {
+        json!({ "type": "object", "additionalProperties": V::schema() })
+    }
+}
+
+impl ApiSchema for Value {
+    fn schema() -> Value {
+        json!({})
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct OpenApiRequest {
     path_schemas: Vec<Value>,
@@ -1063,6 +1114,27 @@ fn swagger_html(openapi_path: Option<&str>) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_schemas_cover_numbers_collections_and_wrappers() {
+        assert_eq!(
+            f64::schema(),
+            json!({ "type": "number", "format": "double" })
+        );
+        assert_eq!(f32::schema()["format"], "float");
+        assert_eq!(u8::schema()["format"], "int32");
+        assert_eq!(usize::schema()["format"], "int64");
+        assert_eq!(Box::<String>::schema(), json!({ "type": "string" }));
+        assert_eq!(
+            Vec::<f64>::schema(),
+            json!({ "type": "array", "items": { "type": "number", "format": "double" } })
+        );
+        assert_eq!(
+            std::collections::HashMap::<String, bool>::schema(),
+            json!({ "type": "object", "additionalProperties": { "type": "boolean" } })
+        );
+        assert_eq!(Value::schema(), json!({}));
+    }
 
     #[test]
     fn percent_decode_handles_runs_escapes_and_malformed_input() {

@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `ApiSchema` implementations for `f32`, `f64`, small integers, `Box`,
+  string-keyed maps and `serde_json::Value`.
 - `LICENSE-MIT`, `CONTRIBUTING.md`, and `scripts/verify-docker.sh`.
 - Crate metadata (`repository`, `readme`, `keywords`, `categories`, `rust-version`).
 
