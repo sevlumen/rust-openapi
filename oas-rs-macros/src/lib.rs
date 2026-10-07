@@ -1,12 +1,24 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, GenericArgument, PathArguments, Type, parse_macro_input};
+use syn::{
+    Data, DataEnum, DeriveInput, Fields, GenericArgument, Ident, PathArguments, Type,
+    parse_macro_input,
+};
 
-#[proc_macro_derive(ApiSchema)]
+mod serde_attrs;
+
+use serde_attrs::{NameBase, wire_name};
+
+#[proc_macro_derive(ApiSchema, attributes(serde))]
 pub fn derive_api_schema(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    let rename_all = match serde_attrs::parse(&input.attrs) {
+        Ok(attrs) => attrs.rename_all,
+        Err(error) => return error.to_compile_error().into(),
+    };
     let name = input.ident;
     let fields = match input.data {
+        Data::Enum(data) => return derive_enum(&name, &data, rename_all.as_deref()),
         Data::Struct(data) => match data.fields {
             Fields::Named(fields) => fields.named,
             _ => {
@@ -32,7 +44,15 @@ pub fn derive_api_schema(input: TokenStream) -> TokenStream {
     let mut direct_query_parser = true;
     for field in fields {
         let field_name = field.ident.expect("named field");
-        let field_name_string = field_name.to_string();
+        let field_name_string = match wire_name(
+            &field.attrs,
+            &field_name,
+            rename_all.as_deref(),
+            NameBase::Snake,
+        ) {
+            Ok(name) => name,
+            Err(error) => return error.to_compile_error().into(),
+        };
         let (schema_type, is_optional) = option_inner(&field.ty);
         let required_flag = !is_optional;
         let schema = quote! { <#schema_type as ::oas_rs::ApiSchema>::schema() };
@@ -135,6 +155,32 @@ pub fn derive_api_schema(input: TokenStream) -> TokenStream {
             }
 
             #query_parser
+        }
+    }
+    .into()
+}
+
+fn derive_enum(name: &Ident, data: &DataEnum, rename_all: Option<&str>) -> TokenStream {
+    let mut values = Vec::new();
+    for variant in &data.variants {
+        if !matches!(variant.fields, Fields::Unit) {
+            return syn::Error::new_spanned(variant, "ApiSchema enums support unit variants only")
+                .to_compile_error()
+                .into();
+        }
+        match wire_name(&variant.attrs, &variant.ident, rename_all, NameBase::Pascal) {
+            Ok(value) => values.push(value),
+            Err(error) => return error.to_compile_error().into(),
+        }
+    }
+    quote! {
+        impl ::oas_rs::ApiSchema for #name {
+            fn schema() -> ::oas_rs::__private::serde_json::Value {
+                ::oas_rs::__private::serde_json::json!({
+                    "type": "string",
+                    "enum": [#(#values),*]
+                })
+            }
         }
     }
     .into()
