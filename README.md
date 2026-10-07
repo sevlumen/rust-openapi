@@ -108,6 +108,14 @@ app.swagger().path("/swagger");
 Enable `swagger` for the UI and `uuid` for UUID extraction/schema support.
 `ApiSchema` derives are provided by the companion `oas-rs-macros` crate.
 
+`#[derive(ApiSchema)]` currently supports structs with named fields whose types
+are scalars (`String`, `bool`, integers, floats, `Uuid`) or `Option` of those.
+Collections, enums and serde attributes such as `#[serde(rename)]` are not yet
+reflected in the generated schema; see the roadmap below.
+
+Swagger UI is loaded from a pinned `swagger-ui-dist` release on unpkg with
+Subresource Integrity hashes, so it needs network access from the browser.
+
 ## Distribution through the Quangt registry
 
 Released crates are distributed through the static sparse registry at
@@ -197,6 +205,12 @@ Documentation is built with `RUSTDOCFLAGS="-D warnings" cargo doc --workspace
 --no-deps --all-features`. Run `bash scripts/verify-docker.sh` to execute all of
 the above in Docker with the CI toolchain (Rust 1.88, the minimum supported
 version) before committing.
+
+## Roadmap
+
+Planned after `0.1`: `ApiSchema` support for `Vec`, enums and serde renames,
+splitting `src/lib.rs` into modules, middleware, TLS, and the full HTTP
+acceptance benchmark matrix.
 
 ## Contributing and license
 

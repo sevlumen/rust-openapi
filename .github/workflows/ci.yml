@@ -55,3 +55,12 @@ jobs:
 
       - name: Check pinned inline futures with Miri
         run: cargo miri test --lib inline_future --
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Audit dependencies, licenses and sources
+        uses: EmbarkStudios/cargo-deny-action@v2
