@@ -2,7 +2,11 @@
 name = "oas-rs-macros"
 version = "0.1.0"
 edition = "2024"
-publish = false
+description = "Derive macros for oas-rs"
+license = "MIT"
+rust-version = "1.88"
+repository = "https://github.com/sevlumen/rust-openapi"
+publish = ["quangt"]
 
 [lib]
 proc-macro = true
