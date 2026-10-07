@@ -111,8 +111,11 @@ Enable `swagger` for the UI and `uuid` for UUID extraction/schema support.
 `#[derive(ApiSchema)]` supports structs with named fields. Field types may be
 scalars (`String`, `bool`, integers, `f32`/`f64`, `Uuid`), `Option`, `Vec`,
 `Box`, string-keyed maps, `serde_json::Value`, or another `ApiSchema` type.
-Enums and serde attributes such as `#[serde(rename)]` are not yet reflected in
-the generated schema; see the roadmap below.
+Unit-variant enums derive a string `enum` schema. `#[serde(rename = "...")]`
+and `#[serde(rename_all = "...")]` (all serde casing rules) are honored for
+schema names, query parameter names and the direct query parser. Other serde
+attributes (`flatten`, `skip`, tagged enums) are not yet reflected; see the
+roadmap below.
 
 Swagger UI is loaded from a pinned `swagger-ui-dist` release on unpkg with
 Subresource Integrity hashes, so it needs network access from the browser.
@@ -209,7 +212,8 @@ version) before committing.
 
 ## Roadmap
 
-Planned after `0.1`: `ApiSchema` support for enums and serde renames,
+Planned after `0.1`: `ApiSchema` support for data-carrying enums and more
+serde attributes,
 splitting `src/lib.rs` into modules, middleware, TLS, and the full HTTP
 acceptance benchmark matrix.
 

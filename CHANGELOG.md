@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `#[derive(ApiSchema)]` on unit-variant enums and support for
+  `#[serde(rename)]` / `#[serde(rename_all)]` on structs and enums.
 - `ApiSchema` implementations for `f32`, `f64`, small integers, `Box`,
   string-keyed maps and `serde_json::Value`.
 - `LICENSE-MIT`, `CONTRIBUTING.md`, and `scripts/verify-docker.sh`.
