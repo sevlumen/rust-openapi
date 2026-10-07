@@ -1,8 +1,8 @@
 # oas-rs
 
 Typed HTTP routing on Hyper + Tokio with startup-generated OpenAPI 3.1
-metadata. The V1 release line is Cargo `0.1.0`; the current release target is
-internal use while the public API and HTTP semantics are being frozen.
+metadata. The V1 release line is Cargo `0.1.0`; the public API and HTTP
+semantics are frozen for the `0.1` line. Licensed under the MIT License.
 
 ## Quick start
 
@@ -108,6 +108,56 @@ app.swagger().path("/swagger");
 Enable `swagger` for the UI and `uuid` for UUID extraction/schema support.
 `ApiSchema` derives are provided by the companion `oas-rs-macros` crate.
 
+## Distribution through the Quangt registry
+
+Released crates are distributed through the static sparse registry at
+`storage.quangt.com`. A consuming project configures the registry once:
+
+```toml
+# .cargo/config.toml
+[registries.quangt]
+index = "sparse+https://storage.quangt.com/cargo/index/"
+```
+
+Then it can depend on the release without a path checkout:
+
+```toml
+[dependencies]
+oas-rs = { version = "=0.1.0", registry = "quangt" }
+```
+
+The proc-macro crate is published to the same registry and is resolved
+automatically as an internal dependency. Public dependencies such as Hyper,
+Tokio, Serde, and Bytes continue to come from crates.io. The release artifacts
+and sparse index files can be prepared with:
+
+```powershell
+cargo package -p oas-rs-macros --registry quangt --locked
+pwsh -File .\scripts\generate-sparse-index.ps1 -CrateNames oas-rs-macros
+# Upload the macro crate and its index entry to R2 before packaging oas-rs.
+cargo package -p oas-rs --registry quangt --locked
+pwsh -File .\scripts\generate-sparse-index.ps1 -CrateNames oas-rs
+```
+
+Upload the resulting `dist/cargo/index` and `dist/cargo/crates` trees to R2.
+When adding a version, invalidate the CDN cache for the changed index object.
+The `.crate` files contain source code and are compiled by the consuming
+project.
+
+For the current `0.1.0` release, upload these objects under the `cargo/`
+prefix:
+
+```text
+cargo/index/config.json
+cargo/index/oa/s-/oas-rs
+cargo/index/oa/s-/oas-rs-macros
+cargo/crates/oas-rs/0.1.0/oas-rs-0.1.0.crate
+cargo/crates/oas-rs-macros/0.1.0/oas-rs-macros-0.1.0.crate
+```
+
+The release download endpoint is
+`https://storage.quangt.com/cargo/crates/{crate}/{version}/{crate}-{version}.crate`.
+
 ## Performance workflow
 
 The core repository contains the release-profile router microbenchmark used as
@@ -135,3 +185,11 @@ cargo build --workspace --examples --features 'uuid swagger'
 ```
 
 The Miri inline-future safety job is a permanent CI gate.
+
+Run `bash scripts/verify-docker.sh` to execute all of the above in Docker with
+the CI toolchain before committing.
+
+## Contributing and license
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md). This
+project is licensed under the [MIT License](LICENSE-MIT).

@@ -969,9 +969,15 @@ fn parse_query<T: DeserializeOwned>(query: &str) -> Result<T, ApiError> {
         let json_value = match value.as_str() {
             "true" => Value::Bool(true),
             "false" => Value::Bool(false),
-            value if value.parse::<i64>().is_ok() => json!(value.parse::<i64>().unwrap()),
-            value if value.parse::<f64>().is_ok() => json!(value.parse::<f64>().unwrap()),
-            value => Value::String(value.to_owned()),
+            text => {
+                if let Ok(number) = text.parse::<i64>() {
+                    json!(number)
+                } else if let Ok(number) = text.parse::<f64>() {
+                    json!(number)
+                } else {
+                    Value::String(value)
+                }
+            }
         };
         object.insert(key, json_value);
     }
@@ -984,20 +990,25 @@ fn percent_decode(value: &str) -> Result<String, ApiError> {
     let bytes = value.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'%' {
-            if index + 2 >= bytes.len() {
-                return Err(ApiError::bad_request("invalid percent encoding"));
-            }
-            let high = hex(bytes[index + 1])
-                .ok_or_else(|| ApiError::bad_request("invalid percent encoding"))?;
-            let low = hex(bytes[index + 2])
-                .ok_or_else(|| ApiError::bad_request("invalid percent encoding"))?;
-            output.push(high * 16 + low);
-            index += 3;
-        } else {
-            output.push(bytes[index]);
-            index += 1;
+        // Copy the run of literal bytes up to the next escape in one go.
+        let run = bytes[index..]
+            .iter()
+            .position(|&byte| byte == b'%')
+            .unwrap_or(bytes.len() - index);
+        output.extend_from_slice(&bytes[index..index + run]);
+        index += run;
+        if index == bytes.len() {
+            break;
         }
+        if index + 2 >= bytes.len() {
+            return Err(ApiError::bad_request("invalid percent encoding"));
+        }
+        let high = hex(bytes[index + 1])
+            .ok_or_else(|| ApiError::bad_request("invalid percent encoding"))?;
+        let low = hex(bytes[index + 2])
+            .ok_or_else(|| ApiError::bad_request("invalid percent encoding"))?;
+        output.push(high * 16 + low);
+        index += 3;
     }
     String::from_utf8(output)
         .map_err(|_| ApiError::bad_request("invalid UTF-8 in percent encoding"))
@@ -1045,13 +1056,26 @@ fn swagger_html(openapi_path: Option<&str>) -> Bytes {
     let openapi_path = openapi_path.unwrap_or("/openapi.json");
     let encoded_path = serde_json::to_string(openapi_path).unwrap();
     Bytes::from(format!(
-        "<!doctype html><html><head><title>Swagger UI</title><link rel=\"stylesheet\" href=\"https://unpkg.com/swagger-ui-dist@5/swagger-ui.css\"></head><body><div id=\"swagger-ui\">Loading Swagger UI…</div><script src=\"https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js\"></script><script>window.onload=()=>window.ui=SwaggerUIBundle({{url:{encoded_path},dom_id:'#swagger-ui'}});</script></body></html>"
+        "<!doctype html><html><head><title>Swagger UI</title><link rel=\"stylesheet\" href=\"https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui.css\"></head><body><div id=\"swagger-ui\">Loading Swagger UI…</div><script src=\"https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-bundle.js\"></script><script>window.onload=()=>window.ui=SwaggerUIBundle({{url:{encoded_path},dom_id:'#swagger-ui'}});</script></body></html>"
     ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percent_decode_handles_runs_escapes_and_malformed_input() {
+        assert_eq!(percent_decode("").unwrap(), "");
+        assert_eq!(percent_decode("plain").unwrap(), "plain");
+        assert_eq!(percent_decode("%41").unwrap(), "A");
+        assert_eq!(percent_decode("a%20b%2Fc").unwrap(), "a b/c");
+        assert_eq!(percent_decode("%41%42%43").unwrap(), "ABC");
+        assert_eq!(percent_decode("x%C3%A9y").unwrap(), "x\u{e9}y");
+        for bad in ["%", "%4", "a%", "a%4", "%zz", "%4g", "%FF"] {
+            assert!(percent_decode(bad).is_err(), "{bad} should be rejected");
+        }
+    }
     use std::{marker::PhantomPinned, mem::size_of, task::Waker};
 
     type BoxedPathHandler =
