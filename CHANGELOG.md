@@ -14,6 +14,10 @@ All notable changes to this project are documented here. The format follows
 - Crate metadata (`repository`, `readme`, `keywords`, `categories`, `rust-version`).
 
 ### Changed
+- Split the 1500-line `src/lib.rs` into `params`, `schema`, `codec` and `path`
+  modules and moved response, handler and extractor types next to their
+  related code. No public API or behavior change.
+- CI lints the default feature set as well as all features.
 - Swagger UI assets carry Subresource Integrity hashes.
 - CI runs `cargo-deny` (advisories, licenses, sources) via `deny.toml`.
 - CI and `scripts/verify-docker.sh` also build the docs with warnings denied.

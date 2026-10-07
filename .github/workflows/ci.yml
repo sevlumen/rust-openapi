@@ -34,7 +34,10 @@ jobs:
       - name: Build examples
         run: cargo build --workspace --examples --features "uuid swagger"
 
-      - name: Run Clippy
+      - name: Run Clippy (default features)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run Clippy (all features)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Build docs

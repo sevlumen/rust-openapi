@@ -15,6 +15,7 @@ MSYS_NO_PATHCONV=1 docker run --rm \
   -w /src "rust:${RUST_VERSION}" bash -euxc '
     rustup component add rustfmt clippy
     cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets -- -D warnings
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     cargo test --workspace --all-targets --features "uuid test-util swagger"
     cargo test --doc --workspace
