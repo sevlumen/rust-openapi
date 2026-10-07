@@ -10,6 +10,9 @@ All notable changes to this project are documented here. The format follows
 - Crate metadata (`repository`, `readme`, `keywords`, `categories`, `rust-version`).
 
 ### Changed
+- CI and `scripts/verify-docker.sh` also build the docs with warnings denied.
+- Benchmark design notes moved to `docs/benchmark-design.md`; internal agent
+  plan files removed.
 - Swagger UI assets are pinned to `swagger-ui-dist@5.17.14`.
 - Inline-future safety invariants are enforced with `assert!` and documented
   with `SAFETY` comments.

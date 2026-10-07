@@ -19,5 +19,6 @@ MSYS_NO_PATHCONV=1 docker run --rm \
     cargo test --workspace --all-targets --features "uuid test-util swagger"
     cargo test --doc --workspace
     cargo build --workspace --examples --features "uuid swagger"
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
   '
 echo "verify-docker: all gates passed"

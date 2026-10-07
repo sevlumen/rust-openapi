@@ -158,10 +158,11 @@ cargo/crates/oas-rs-macros/0.1.0/oas-rs-macros-0.1.0.crate
 The release download endpoint is
 `https://storage.quangt.com/cargo/crates/{crate}/{version}/{crate}-{version}.crate`.
 
-## Performance workflow
+## Performance
 
 The core repository contains the release-profile router microbenchmark used as
-the developer regression detector:
+the developer regression detector (design notes in
+[`docs/benchmark-design.md`](docs/benchmark-design.md)):
 
 ```bash
 cargo bench --bench router --features uuid,test-util,swagger
@@ -173,6 +174,12 @@ separate Linux lab at `../oas-rs-perf`, comparing raw Hyper with `oas-rs` over
 real TCP/Hyper/Tokio connections. The current diagnostic reference is about a
 `-0.90%` throughput delta and `+0.54%` p95 overhead; the full 7-run, 1M-request
 matrix is a deferred performance milestone rather than a V1 blocker.
+
+Reference microbenchmark numbers (Linux container, release profile): a static
+route costs about 256 ns per request against about 239 ns for a raw handler,
+with 3 allocations per request (raw: 5). Static and dynamic routing time stays
+flat from 1 to 10,000 routes. Treat these as relative signals; run the
+benchmark on your own hardware for absolute values.
 
 ## Verification
 
@@ -186,8 +193,10 @@ cargo build --workspace --examples --features 'uuid swagger'
 
 The Miri inline-future safety job is a permanent CI gate.
 
-Run `bash scripts/verify-docker.sh` to execute all of the above in Docker with
-the CI toolchain before committing.
+Documentation is built with `RUSTDOCFLAGS="-D warnings" cargo doc --workspace
+--no-deps --all-features`. Run `bash scripts/verify-docker.sh` to execute all of
+the above in Docker with the CI toolchain (Rust 1.88, the minimum supported
+version) before committing.
 
 ## Contributing and license
 
