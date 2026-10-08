@@ -34,6 +34,10 @@ pub trait Middleware: Send + Sync + 'static {
   }
   app.layer(timing);
   ```
+- The returned future is `'static`, so a struct that implements `Middleware`
+  by hand clones the state it needs (typically an `Arc`) into the future rather
+  than borrowing `&self`; functions and closures that capture only owned data
+  have no such concern.
 - `Next` is an owned, `'static` handle (an `Arc` plus an index), so ordinary
   `async fn`s work without lifetime gymnastics. `Next::run(self, request) ->
   impl Future<Output = HttpResponse>` runs the remaining layers and then the
