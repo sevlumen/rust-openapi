@@ -2,7 +2,7 @@
 
 Typed HTTP routing on Hyper + Tokio with startup-generated OpenAPI 3.1
 metadata. The V1 release line is Cargo `0.1.0`; the public API and HTTP
-semantics follow semver within the `0.3` line. Licensed under the MIT License.
+semantics follow semver within the `0.4` line. Licensed under the MIT License.
 
 ## Quick start
 
@@ -54,6 +54,16 @@ runtime.listen("0.0.0.0:8080").await?;
 
 `AppRuntime::serve_listener` accepts an already-bound Tokio listener and a
 shutdown future. The default OpenAPI endpoint is `/openapi.json`.
+
+### TCP_NODELAY
+
+Accepted connections get `TCP_NODELAY` by default. Without it, a response that
+is written in several small pieces (streamed or chunked bodies) can stall for
+about 40 ms on Linux while the kernel waits for a delayed ACK; with it that
+stall disappears and small-response throughput showed no measurable change.
+Use `app.build()?.tcp_nodelay(false)` to leave sockets as accepted (they then
+inherit the listener's setting). This applies to every serving entry point:
+`listen`, `serve_listener` and `serve_tls`.
 
 ### Graceful shutdown
 
@@ -290,7 +300,7 @@ status and elapsed time of every request.
 
 ```toml
 [dependencies]
-oas-rs = "0.3"
+oas-rs = "0.4"
 ```
 
 Enable optional features as needed: `swagger` (Swagger UI), `uuid` (UUID

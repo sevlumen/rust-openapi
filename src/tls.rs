@@ -113,6 +113,7 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
     {
         let shutdown_timeout = self.shutdown_timeout;
         let handshake_timeout = self.handshake_timeout;
+        let nodelay = self.tcp_nodelay;
         let runtime = self.inner;
         let acceptor = tls.acceptor();
         // `GracefulShutdown::watch` needs an already-built connection, which
@@ -121,7 +122,7 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         let (signal, _) = tokio::sync::watch::channel(());
         let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
         tokio::pin!(shutdown);
-        while let Some(stream) = accept_next(&listener, &mut shutdown).await? {
+        while let Some(stream) = accept_next(&listener, &mut shutdown, nodelay).await? {
             let acceptor = acceptor.clone();
             let connection = ConnectionRuntime::new(Arc::clone(&runtime));
             let mut stop = signal.subscribe();
