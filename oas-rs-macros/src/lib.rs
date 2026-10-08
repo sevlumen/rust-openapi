@@ -9,16 +9,50 @@ mod serde_attrs;
 
 use serde_attrs::{NameBase, wire_name};
 
-#[proc_macro_derive(ApiSchema, attributes(serde))]
+/// The component name from `#[api_schema(name = "...")]`, or the type's name.
+fn schema_name(attrs: &[syn::Attribute], default: &Ident) -> syn::Result<String> {
+    let mut name = default.to_string();
+    for attr in attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("api_schema"))
+    {
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("name") {
+                let value: syn::LitStr = meta.value()?.parse()?;
+                name = value.value();
+                Ok(())
+            } else {
+                Err(meta.error("unsupported api_schema attribute; expected `name = \"...\"`"))
+            }
+        })?;
+    }
+    let valid = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    if !valid {
+        return Err(syn::Error::new_spanned(
+            attrs.iter().find(|attr| attr.path().is_ident("api_schema")),
+            "an OpenAPI component name may only contain letters, digits, '.', '-' and '_'",
+        ));
+    }
+    Ok(name)
+}
+
+#[proc_macro_derive(ApiSchema, attributes(serde, api_schema))]
 pub fn derive_api_schema(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    let component = match schema_name(&input.attrs, &input.ident) {
+        Ok(name) => name,
+        Err(error) => return error.to_compile_error().into(),
+    };
     let rename_all = match serde_attrs::parse(&input.attrs) {
         Ok(attrs) => attrs.rename_all,
         Err(error) => return error.to_compile_error().into(),
     };
     let name = input.ident;
     let fields = match input.data {
-        Data::Enum(data) => return derive_enum(&name, &data, rename_all.as_deref()),
+        Data::Enum(data) => return derive_enum(&name, &component, &data, rename_all.as_deref()),
         Data::Struct(data) => match data.fields {
             Fields::Named(fields) => fields.named,
             _ => {
@@ -55,9 +89,10 @@ pub fn derive_api_schema(input: TokenStream) -> TokenStream {
         };
         let (schema_type, is_optional) = option_inner(&field.ty);
         let required_flag = !is_optional;
-        let schema = quote! { <#schema_type as ::oas_rs::ApiSchema>::schema() };
+        let component_schema =
+            quote! { <#schema_type as ::oas_rs::ApiSchema>::schema_with(registry) };
         properties.push(quote! {
-            properties.insert(#field_name_string.to_owned(), #schema);
+            properties.insert(#field_name_string.to_owned(), #component_schema);
         });
         parameters.push(quote! {
             parameters.push(::oas_rs::__private::serde_json::json!({
@@ -133,17 +168,25 @@ pub fn derive_api_schema(input: TokenStream) -> TokenStream {
     quote! {
         impl ::oas_rs::ApiSchema for #name {
             fn schema() -> ::oas_rs::__private::serde_json::Value {
-                let mut properties = ::oas_rs::__private::serde_json::Map::new();
-                #(#properties)*
-                let mut schema = ::oas_rs::__private::serde_json::Map::new();
-                schema.insert("type".to_owned(), ::oas_rs::__private::serde_json::json!("object"));
-                schema.insert("properties".to_owned(), ::oas_rs::__private::serde_json::Value::Object(properties));
-                let mut required = Vec::new();
-                #(#required)*
-                if let Some(required) = #required_value {
-                    schema.insert("required".to_owned(), required);
-                }
-                ::oas_rs::__private::serde_json::Value::Object(schema)
+                <Self as ::oas_rs::ApiSchema>::schema_with(&mut ::oas_rs::SchemaRegistry::inline())
+            }
+
+            fn schema_with(
+                registry: &mut ::oas_rs::SchemaRegistry,
+            ) -> ::oas_rs::__private::serde_json::Value {
+                registry.define::<Self>(#component, |registry| {
+                    let mut properties = ::oas_rs::__private::serde_json::Map::new();
+                    #(#properties)*
+                    let mut schema = ::oas_rs::__private::serde_json::Map::new();
+                    schema.insert("type".to_owned(), ::oas_rs::__private::serde_json::json!("object"));
+                    schema.insert("properties".to_owned(), ::oas_rs::__private::serde_json::Value::Object(properties));
+                    let mut required = Vec::new();
+                    #(#required)*
+                    if let Some(required) = #required_value {
+                        schema.insert("required".to_owned(), required);
+                    }
+                    ::oas_rs::__private::serde_json::Value::Object(schema)
+                })
             }
         }
 
@@ -160,7 +203,12 @@ pub fn derive_api_schema(input: TokenStream) -> TokenStream {
     .into()
 }
 
-fn derive_enum(name: &Ident, data: &DataEnum, rename_all: Option<&str>) -> TokenStream {
+fn derive_enum(
+    name: &Ident,
+    component: &str,
+    data: &DataEnum,
+    rename_all: Option<&str>,
+) -> TokenStream {
     let mut values = Vec::new();
     for variant in &data.variants {
         if !matches!(variant.fields, Fields::Unit) {
@@ -176,9 +224,17 @@ fn derive_enum(name: &Ident, data: &DataEnum, rename_all: Option<&str>) -> Token
     quote! {
         impl ::oas_rs::ApiSchema for #name {
             fn schema() -> ::oas_rs::__private::serde_json::Value {
-                ::oas_rs::__private::serde_json::json!({
-                    "type": "string",
-                    "enum": [#(#values),*]
+                <Self as ::oas_rs::ApiSchema>::schema_with(&mut ::oas_rs::SchemaRegistry::inline())
+            }
+
+            fn schema_with(
+                registry: &mut ::oas_rs::SchemaRegistry,
+            ) -> ::oas_rs::__private::serde_json::Value {
+                registry.define::<Self>(#component, |_| {
+                    ::oas_rs::__private::serde_json::json!({
+                        "type": "string",
+                        "enum": [#(#values),*]
+                    })
                 })
             }
         }

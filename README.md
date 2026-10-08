@@ -182,6 +182,27 @@ schema names, query parameter names and the direct query parser. Other serde
 attributes (`flatten`, `skip`, tagged enums) are not yet reflected; see the
 roadmap below.
 
+Named schemas (structs and enums that derive `ApiSchema`) are written once under
+`components.schemas` and referenced with `$ref`, so a type used in several
+routes, or nested in another, appears a single time (recursive types work).
+A hand-written `ApiSchema` impl stays inline unless it implements `schema_with`
+and calls `SchemaRegistry::define`. Rename a component with
+`#[api_schema(name = "ItemDto")]`; two different types with the same name make
+`build()` fail with `BuildError::SchemaNameConflict`.
+
+Every route also documents the errors the framework itself returns, all with
+the shared `Problem` schema (`type`, `title`, `status`, `detail`, media type
+`application/json`, which is what the server sends): `400` for routes with typed
+path/query/header parameters or a JSON body, `413` and `415` for routes with a
+body, and `401` for routes whose declared security (`.security(..)` or the
+document default) is non-empty. It follows the declarations, not middleware:
+a layer that enforces auth without `.security(..)` is not reflected, and raw
+routes and custom extractors declare nothing. Turn it off with
+`app.openapi().document_errors(false)`. Do not name your own type `Problem`
+while it is on and some route documents errors. The component name of a
+derived type is its Rust name (a container `#[serde(rename)]` does not change
+it); use `#[api_schema(name = "...")]` to change it.
+
 Swagger UI is loaded from a pinned `swagger-ui-dist` release on unpkg with
 Subresource Integrity hashes, so it needs network access from the browser.
 

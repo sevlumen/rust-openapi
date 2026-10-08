@@ -134,6 +134,12 @@ pub trait ResponseMetadata {
     fn response_schema() -> Option<Value> {
         None
     }
+    /// Like [`response_schema`](Self::response_schema), but named schemas go
+    /// into `registry` and are referenced with `$ref`.
+    fn response_schema_with(registry: &mut SchemaRegistry) -> Option<Value> {
+        let _ = registry;
+        Self::response_schema()
+    }
 }
 
 impl ResponseMetadata for &'static str {}
@@ -196,6 +202,9 @@ impl<T: Serialize + ApiSchema + Send + 'static> IntoResponse for Json<T> {
 impl<T: Serialize + ApiSchema + Send + 'static> ResponseMetadata for Json<T> {
     fn response_schema() -> Option<Value> {
         Some(T::schema())
+    }
+    fn response_schema_with(registry: &mut SchemaRegistry) -> Option<Value> {
+        Some(T::schema_with(registry))
     }
 }
 
@@ -261,6 +270,9 @@ impl<T: Serialize + ApiSchema + Send + 'static> ResponseMetadata for Created<T> 
     fn response_schema() -> Option<Value> {
         Some(T::schema())
     }
+    fn response_schema_with(registry: &mut SchemaRegistry) -> Option<Value> {
+        Some(T::schema_with(registry))
+    }
 }
 
 /// Explicit bodyless response for `204 No Content` handlers.
@@ -314,6 +326,9 @@ impl<T: ResponseMetadata> ResponseMetadata for Result<T, ApiError> {
     }
     fn response_schema() -> Option<Value> {
         T::response_schema()
+    }
+    fn response_schema_with(registry: &mut SchemaRegistry) -> Option<Value> {
+        T::response_schema_with(registry)
     }
 }
 

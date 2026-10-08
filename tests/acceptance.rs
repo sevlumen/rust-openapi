@@ -711,12 +711,15 @@ fn openapi_uses_extractor_types_and_response_statuses() {
     );
     assert_eq!(
         document["paths"]["/echo"]["post"]["requestBody"]["content"]["application/json"]["schema"]
-            ["type"],
+            ["$ref"],
+        "#/components/schemas/Payload"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["Payload"]["type"],
         "object"
     );
     assert_eq!(
-        document["paths"]["/echo"]["post"]["requestBody"]["content"]["application/json"]["schema"]
-            ["properties"]["name"]["type"],
+        document["components"]["schemas"]["Payload"]["properties"]["name"]["type"],
         "string"
     );
     assert_eq!(

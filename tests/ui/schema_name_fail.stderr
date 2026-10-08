@@ -1,0 +1,5 @@
+error: an OpenAPI component name may only contain letters, digits, '.', '-' and '_'
+ --> tests/ui/schema_name_fail.rs:4:1
+  |
+4 | #[api_schema(name = "Item Dto/x")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
