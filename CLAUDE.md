@@ -20,10 +20,10 @@ Without Docker, the same steps (feature flags matter — many tests/benches/exam
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --features "uuid test-util swagger multipart tls"
+cargo test --workspace --all-targets --features "uuid test-util swagger multipart tls http2"
 cargo test --doc --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
-cargo test --features "uuid test-util swagger multipart tls" percent_decode   # single test by name filter
+cargo test --features "uuid test-util swagger multipart tls http2" percent_decode   # single test by name filter
 cargo test --test derive                                         # single integration test file
 cargo bench --bench router --features uuid,test-util,swagger     # microbenchmark (release profile)
 cargo +nightly miri test --lib inline_future --                  # CI gate for the unsafe inline-future code
@@ -42,7 +42,7 @@ Two-phase lifecycle: `App` (mutable builder, `src/app.rs`) → `App::build()` �
 - Profiling note: under real TCP load the router/handler/response code is only about 2% of server CPU (about 75% is kernel syscalls, 8% Hyper), so socket-level settings (`accept_next` sets `TCP_NODELAY`) matter far more than router micro-optimizations; profile before optimizing.
 - `src/codec.rs` / `src/path.rs`: percent-decoding, query parsing, route-template splitting and path normalization.
 - `oas-rs-macros`: the derive generates `ApiSchema` + `OpenApiQuery` impls and a direct (non-serde) query parser when all field types are simple; otherwise it falls back to serde. Generated code refers to the runtime through `::oas_rs::__private` (`#[doc(hidden)]`), so anything the macro needs must be re-exported there. Serde `rename` / `rename_all` handling lives in `oas-rs-macros/src/serde_attrs.rs`; unit enums are supported, data-carrying enums are not.
-- Cargo features: `tls` (`serve_tls`; the accept loop is shared via `runtime::accept_next`, but the TLS path tracks connections with a `watch` shutdown signal plus an `mpsc` completion channel instead of `GracefulShutdown::watch`, because the handshake happens inside the per-connection task before a connection object exists), `multipart` (`Multipart`/`Field` extractor backed by `multer`; the body is buffered up to the route's limit, so memory per upload is about 3x `body_limit`), `swagger` (Swagger UI page, loaded from a pinned unpkg release with SRI hashes — update the hashes in `swagger_html` if the version changes), `uuid`, `test-util` (exposes `TestResponse`/in-process dispatch used by tests and benches).
+- Cargo features: `http2` (implies `tls`; after the TLS handshake `serve_tls` picks `hyper::server::conn::http2` when ALPN negotiated `h2`, otherwise HTTP/1.1; both are driven by the same watch/mpsc drain; no h2c on the plain listener), `tls` (`serve_tls`; the accept loop is shared via `runtime::accept_next`, but the TLS path tracks connections with a `watch` shutdown signal plus an `mpsc` completion channel instead of `GracefulShutdown::watch`, because the handshake happens inside the per-connection task before a connection object exists), `multipart` (`Multipart`/`Field` extractor backed by `multer`; the body is buffered up to the route's limit, so memory per upload is about 3x `body_limit`), `swagger` (Swagger UI page, loaded from a pinned unpkg release with SRI hashes — update the hashes in `swagger_html` if the version changes), `uuid`, `test-util` (exposes `TestResponse`/in-process dispatch used by tests and benches).
 
 ## Conventions specific to this repo
 

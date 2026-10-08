@@ -17,7 +17,7 @@ MSYS_NO_PATHCONV=1 docker run --rm \
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     cargo test --workspace --all-targets --features "uuid test-util swagger multipart tls http2"
     cargo test --doc --workspace
-    cargo build --workspace --examples --features "uuid swagger tls"
+    cargo build --workspace --examples --features "uuid swagger tls http2"
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
   '
 echo "verify-docker: all gates passed"

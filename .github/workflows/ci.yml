@@ -26,13 +26,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run tests
-        run: cargo test --workspace --all-targets --features "uuid test-util swagger multipart tls"
+        run: cargo test --workspace --all-targets --features "uuid test-util swagger multipart tls http2"
 
       - name: Run doctests
         run: cargo test --doc --workspace
 
       - name: Build examples
-        run: cargo build --workspace --examples --features "uuid swagger tls"
+        run: cargo build --workspace --examples --features "uuid swagger tls http2"
 
       - name: Run Clippy (default features)
         run: cargo clippy --workspace --all-targets -- -D warnings

@@ -208,6 +208,23 @@ runtime
   TCP; with short connections the handshake dominates (see
   `docs/tls-design.md`). Reuse connections where you can.
 
+### HTTP/2
+
+Enable the `http2` feature (it implies `tls`) and `serve_tls` also serves HTTP/2
+to clients that negotiate `h2` through ALPN; everything else keeps working as
+HTTP/1.1. Routing, extractors, middleware and graceful shutdown behave the same
+over both protocols.
+
+- It is HTTP/2 **over TLS** only: cleartext HTTP/2 (h2c) is not supported on
+  `serve_listener`, and the plain HTTP/1.1 path is unchanged.
+- `TlsConfig::from_pem_files(..)?.enable_http2(false)` offers HTTP/1.1 only; a
+  client that offers only `h2` is then rejected during the handshake.
+- HTTP/2 requests carry the authority in the request URI and have no `Host`
+  header.
+- HTTP/2 multiplexes many requests over one connection, which pays off with many
+  concurrent requests; for tiny responses at low concurrency a single h2 stream
+  was slower than HTTP/1.1 on a loopback benchmark (see `docs/http2-design.md`).
+
 ## Multipart uploads
 
 Enable the `multipart` feature to accept `multipart/form-data` (for example
@@ -307,7 +324,7 @@ oas-rs = "0.4"
 
 Enable optional features as needed: `swagger` (Swagger UI), `uuid` (UUID
 extraction and schema support), `multipart` (`multipart/form-data` uploads),
-`tls` (HTTPS via `serve_tls`), `test-util` (in-process `oneshot` testing).
+`tls` (HTTPS via `serve_tls`), `http2` (HTTP/2 over TLS), `test-util` (in-process `oneshot` testing).
 The minimum supported Rust version is 1.88.
 
 ## Performance
@@ -338,9 +355,9 @@ benchmark on your own hardware for absolute values.
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --features 'uuid test-util swagger multipart tls'
+cargo test --workspace --all-targets --features 'uuid test-util swagger multipart tls http2'
 cargo test --doc --workspace
-cargo build --workspace --examples --features 'uuid swagger tls'
+cargo build --workspace --examples --features 'uuid swagger tls http2'
 ```
 
 The Miri inline-future safety job is a permanent CI gate.

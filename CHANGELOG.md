@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- HTTP/2 over TLS behind the new `http2` feature: `serve_tls` negotiates `h2`
+  through ALPN and serves it with the same routing, middleware and graceful
+  shutdown as HTTP/1.1. `TlsConfig::enable_http2(bool)` opts out. No h2c.
 - `examples/tls.rs`, built in CI.
 
 ### Changed
