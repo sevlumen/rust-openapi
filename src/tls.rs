@@ -137,7 +137,9 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
 
     /// Serves HTTPS on `listener` until `shutdown` completes, then waits for
     /// in-flight requests like [`AppRuntime::serve_listener`], bounded by
-    /// [`AppRuntime::shutdown_timeout`]. HTTP/1.1 only.
+    /// [`AppRuntime::shutdown_timeout`]. HTTP/1.1, plus HTTP/2 when the
+    /// `http2` feature is enabled and the client negotiates `h2` through ALPN
+    /// (see [`TlsConfig::enable_http2`]).
     ///
     /// The handshake runs inside the per-connection task, so a slow client
     /// never blocks the accept loop; a failed or timed-out handshake closes
@@ -180,11 +182,28 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
                     // Shutting down during the handshake.
                     _ = stop.changed() => return,
                 };
+                // The ALPN result picks the protocol; anything but `h2` is HTTP/1.1.
+                #[cfg(feature = "http2")]
+                let negotiated_h2 = tls_stream.get_ref().1.alpn_protocol() == Some(b"h2");
                 let io = hyper_util::rt::TokioIo::new(tls_stream);
                 let service = hyper::service::service_fn(move |request: Request<Incoming>| {
                     let prepared = connection.prepare(request);
                     async move { Ok::<_, Infallible>(prepared.await) }
                 });
+                #[cfg(feature = "http2")]
+                if negotiated_h2 {
+                    let conn = hyper::server::conn::http2::Builder::new(
+                        hyper_util::rt::TokioExecutor::new(),
+                    )
+                    .serve_connection(io, service);
+                    tokio::pin!(conn);
+                    tokio::select! {
+                        _ = conn.as_mut() => return,
+                        _ = stop.changed() => conn.as_mut().graceful_shutdown(),
+                    }
+                    let _ = conn.await;
+                    return;
+                }
                 let conn = hyper::server::conn::http1::Builder::new().serve_connection(io, service);
                 tokio::pin!(conn);
                 tokio::select! {
