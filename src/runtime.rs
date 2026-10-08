@@ -2,12 +2,30 @@ use super::*;
 
 /// An immutable application runtime produced by [`App::build`].
 pub struct AppRuntime<S = ()> {
+    pub(crate) inner: Arc<RuntimeInner<S>>,
+    pub(crate) shutdown_timeout: Duration,
+}
+
+/// The immutable routing state, shared (by `Arc`) with every connection and
+/// with any middleware chain in flight.
+pub(crate) struct RuntimeInner<S> {
     pub(crate) state: Arc<S>,
     pub(crate) plans: Box<[RoutePlan<S>]>,
     pub(crate) capture_names: Box<[Option<Arc<[String]>>]>,
     pub(crate) static_routes: HashMap<String, RouteSet>,
     pub(crate) dynamic_routes: DynamicRouteTrie,
-    pub(crate) shutdown_timeout: Duration,
+}
+
+impl<S: Send + Sync + 'static> RuntimeInner<S> {
+    pub(crate) fn runtime_ref(&self) -> RuntimeRef<'_, S> {
+        RuntimeRef {
+            state: &self.state,
+            plans: &self.plans,
+            capture_names: &self.capture_names,
+            static_routes: &self.static_routes,
+            dynamic_routes: &self.dynamic_routes,
+        }
+    }
 }
 
 /// How long [`AppRuntime::serve_listener`] waits for in-flight requests after
@@ -23,7 +41,7 @@ pub(crate) struct RuntimeRef<'a, S> {
 }
 
 pub(crate) struct ConnectionRuntime<S> {
-    runtime: Arc<AppRuntime<S>>,
+    runtime: Arc<RuntimeInner<S>>,
 }
 
 enum PreparedDispatch {
@@ -57,7 +75,7 @@ impl Future for PreparedDispatch {
 }
 
 impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
-    pub(crate) fn new(runtime: Arc<AppRuntime<S>>) -> Self {
+    pub(crate) fn new(runtime: Arc<RuntimeInner<S>>) -> Self {
         Self { runtime }
     }
 
@@ -207,13 +225,7 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
     }
 
     fn runtime_ref(&self) -> RuntimeRef<'_, S> {
-        RuntimeRef {
-            state: &self.state,
-            plans: &self.plans,
-            capture_names: &self.capture_names,
-            static_routes: &self.static_routes,
-            dynamic_routes: &self.dynamic_routes,
-        }
+        self.inner.runtime_ref()
     }
 
     #[cfg(any(test, feature = "test-util"))]
@@ -376,7 +388,7 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     let shutdown_timeout = runtime.shutdown_timeout;
-    let runtime = Arc::new(runtime);
+    let runtime = runtime.inner;
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
     tokio::pin!(shutdown);
     loop {

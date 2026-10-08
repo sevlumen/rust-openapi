@@ -166,16 +166,18 @@ impl<S: Send + Sync + 'static> App<S> {
         self.prepare_swagger();
         self.install_generated_routes()?;
         Ok(AppRuntime {
-            state: self.state,
-            plans: self.plans.into_boxed_slice(),
-            capture_names: self
-                .metadata
-                .iter()
-                .map(|metadata| metadata.capture_names.clone())
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-            static_routes: self.static_routes,
-            dynamic_routes: self.dynamic_routes,
+            inner: Arc::new(RuntimeInner {
+                state: self.state,
+                plans: self.plans.into_boxed_slice(),
+                capture_names: self
+                    .metadata
+                    .iter()
+                    .map(|metadata| metadata.capture_names.clone())
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                static_routes: self.static_routes,
+                dynamic_routes: self.dynamic_routes,
+            }),
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
         })
     }

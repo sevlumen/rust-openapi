@@ -63,6 +63,7 @@ use router::{
 use router::{DynamicRouteNode, NodeId};
 #[cfg(test)]
 use runtime::ConnectionRuntime;
+use runtime::RuntimeInner;
 #[cfg(any(test, feature = "test-util"))]
 pub use runtime::TestResponse;
 pub use runtime::{AppRuntime, DEFAULT_SHUTDOWN_TIMEOUT};
@@ -231,7 +232,7 @@ mod tests {
 
         let runtime = app.build().expect("test app builds");
 
-        assert_eq!(runtime.plans.len(), 1);
+        assert_eq!(runtime.inner.plans.len(), 1);
     }
 
     #[test]
@@ -245,7 +246,7 @@ mod tests {
     fn connection_runtime_reuses_one_runtime_owner_for_request_borrows() {
         let mut app = App::new();
         app.get("/zero", || async { "OK" });
-        let runtime = Arc::new(app.build().expect("test app builds"));
+        let runtime = app.build().expect("test app builds").inner;
         let connection = ConnectionRuntime::new(Arc::clone(&runtime));
 
         assert_eq!(Arc::strong_count(&runtime), 2);
