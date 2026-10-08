@@ -32,7 +32,7 @@ jobs:
         run: cargo test --doc --workspace
 
       - name: Build examples
-        run: cargo build --workspace --examples --features "uuid swagger"
+        run: cargo build --workspace --examples --features "uuid swagger tls"
 
       - name: Run Clippy (default features)
         run: cargo clippy --workspace --all-targets -- -D warnings

@@ -5,6 +5,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `examples/tls.rs`, built in CI.
+
+### Changed
+- `TlsError` keeps its underlying cause as `std::error::Error::source` (for
+  example an `io::Error` for a missing certificate file).
+
 ## [0.4.0] - 2026-10-08
 
 ### Added

@@ -11,12 +11,25 @@ use crate::*;
 #[derive(Debug)]
 pub struct TlsError {
     message: String,
+    source: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
 
 impl TlsError {
-    fn new(context: &str, source: impl fmt::Display) -> Self {
+    /// An error without an underlying cause.
+    fn new(context: &str, detail: impl fmt::Display) -> Self {
+        Self {
+            message: format!("{context}: {detail}"),
+            source: None,
+        }
+    }
+
+    /// An error that keeps its underlying cause, available through
+    /// [`std::error::Error::source`] (for example an `io::Error` for a
+    /// missing file).
+    fn with_source(context: &str, source: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self {
             message: format!("{context}: {source}"),
+            source: Some(Box::new(source)),
         }
     }
 }
@@ -27,7 +40,13 @@ impl fmt::Display for TlsError {
     }
 }
 
-impl std::error::Error for TlsError {}
+impl std::error::Error for TlsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|source| source as &(dyn std::error::Error + 'static))
+    }
+}
 
 /// Server-side TLS settings: a certificate chain and its private key.
 ///
@@ -44,9 +63,9 @@ impl TlsConfig {
     /// SEC1) from files.
     pub fn from_pem_files(cert: impl AsRef<Path>, key: impl AsRef<Path>) -> Result<Self, TlsError> {
         let cert = std::fs::read(cert.as_ref())
-            .map_err(|error| TlsError::new("reading the certificate file", error))?;
+            .map_err(|error| TlsError::with_source("reading the certificate file", error))?;
         let key = std::fs::read(key.as_ref())
-            .map_err(|error| TlsError::new("reading the private key file", error))?;
+            .map_err(|error| TlsError::with_source("reading the private key file", error))?;
         Self::from_pem(&cert, &key)
     }
 
@@ -54,7 +73,7 @@ impl TlsConfig {
     pub fn from_pem(cert: &[u8], key: &[u8]) -> Result<Self, TlsError> {
         let certs = CertificateDer::pem_slice_iter(cert)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| TlsError::new("parsing the certificate PEM", error))?;
+            .map_err(|error| TlsError::with_source("parsing the certificate PEM", error))?;
         if certs.is_empty() {
             return Err(TlsError::new(
                 "parsing the certificate PEM",
@@ -62,14 +81,14 @@ impl TlsConfig {
             ));
         }
         let key = PrivateKeyDer::from_pem_slice(key)
-            .map_err(|error| TlsError::new("parsing the private key PEM", error))?;
+            .map_err(|error| TlsError::with_source("parsing the private key PEM", error))?;
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let mut config = rustls::ServerConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
-            .map_err(|error| TlsError::new("selecting TLS protocol versions", error))?
+            .map_err(|error| TlsError::with_source("selecting TLS protocol versions", error))?
             .with_no_client_auth()
             .with_single_cert(certs, key)
-            .map_err(|error| TlsError::new("using the certificate and key", error))?;
+            .map_err(|error| TlsError::with_source("using the certificate and key", error))?;
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
         Ok(Self {
             config: Arc::new(config),

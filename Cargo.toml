@@ -56,7 +56,7 @@ strip = true
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
 trybuild = "1.0"
 uuid = { version = "1.17", features = ["serde", "v4"] }
-tokio = { version = "1.45", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.45", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 
 [[bench]]
 name = "router"
@@ -79,6 +79,10 @@ required-features = ["swagger"]
 name = "users-api"
 required-features = ["uuid", "swagger"]
 
+[[example]]
+name = "tls"
+required-features = ["tls"]
+
 [[test]]
 name = "middleware"
 required-features = ["test-util"]
@@ -93,4 +97,4 @@ required-features = ["multipart", "test-util"]
 
 [[test]]
 name = "tls"
-required-features = ["tls", "test-util"]
+required-features = ["tls"]
