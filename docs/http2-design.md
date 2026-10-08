@@ -79,7 +79,15 @@ Written before the implementation, with a `hyper` HTTP/2 client over
 - `h2` adds dependencies behind the feature; `cargo deny` must pass with default
   features and `--all-features`.
 - HTTP/2 rapid-reset style abuse is mitigated by `h2`'s defaults (bounded
-  pending-accept reset streams); the version in use is recorded in the results.
+  pending-accept reset streams, bounded CONTINUATION/header-list size); the
+  version in use is recorded in the results. That covers protocol-level abuse
+  only. The cost of legitimate-looking load is multiplied: Hyper's default is
+  200 concurrent streams per connection (no knob here), so one h2 connection can
+  hold up to 200 x `body_limit` of buffered bodies and 200 handler tasks, and
+  there is no idle/header-read timeout (no Hyper timer is configured, on either
+  protocol), so a stalled stream holds its slot. Mitigation is a reverse proxy
+  or OS limits; exposing `max_concurrent_streams` and a timer is a possible
+  follow-up.
 
 ## Results (measured 2026-10-08, Docker Linux, Rust 1.88, release profile)
 
@@ -112,6 +120,10 @@ tasks), so HTTP/2 is not a speed-up for tiny responses on loopback. Its value is
 multiplexing many requests over few connections: at 128 requests in flight it
 delivered about 11% more throughput than 16 HTTP/1.1 connections (latency is
 higher there because more requests are queued).
+
+Methodology: the harness is a scratch program (not committed) in which the
+client and the server share one process on one machine, so client CPU counts
+against the server numbers; treat the figures as relative, not absolute.
 
 Supply chain: `cargo deny check` passes with default features and with
 `--all-features`; the resolved `h2` version is 0.4.19.

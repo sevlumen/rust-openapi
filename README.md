@@ -194,9 +194,10 @@ runtime
 - The certificate file may contain a chain; the private key may be PKCS#8,
   PKCS#1 or SEC1 PEM (parsed by `rustls-pki-types`). A missing file, malformed
   PEM or a key that does not match the certificate returns a `TlsError`.
-- TLS 1.2 and 1.3 with rustls' safe defaults; HTTP/1.1 only: ALPN advertises
-  only `http/1.1`, so a client that offers only `h2` is rejected during the
-  handshake. No client certificates.
+- TLS 1.2 and 1.3 with rustls' safe defaults. Without the `http2` feature the
+  server speaks HTTP/1.1 only: ALPN advertises only `http/1.1`, so a client that
+  offers only `h2` is rejected during the handshake (see "HTTP/2" below for the
+  feature). No client certificates.
 - The handshake runs per connection, so a slow client never blocks accepting
   others, and a failed or timed-out handshake closes only that connection.
 - Shutdown behaves like `serve_listener`: stop accepting, let in-flight
@@ -221,6 +222,19 @@ over both protocols.
   client that offers only `h2` is then rejected during the handshake.
 - HTTP/2 requests carry the authority in the request URI and have no `Host`
   header.
+- Capacity: Hyper allows up to 200 concurrent streams per HTTP/2 connection
+  and this crate exposes no knob to lower it, so one h2 connection can hold up
+  to 200 times a route's `body_limit` of buffered request bodies (about 3x that
+  for multipart) and 200 handler tasks, versus one of each on an HTTP/1.1
+  connection. No idle or header-read timeout is configured on either protocol
+  (a stream that sends headers and never finishes holds its slot), so bound
+  this with a reverse proxy or OS limits when exposed to untrusted clients.
+- Hyper limits an h2 request's header list to 16 KiB (larger gets a `431` and a
+  reset stream), stricter than the HTTP/1.1 path; clients with very large
+  cookies or tokens will notice.
+- Cargo feature unification: enabling `http2` anywhere in a dependency graph
+  turns ALPN `h2` on for every `TlsConfig` in that binary; `enable_http2(false)`
+  is the opt-out and only exists when the feature is on.
 - HTTP/2 multiplexes many requests over one connection, which pays off with many
   concurrent requests; for tiny responses at low concurrency a single h2 stream
   was slower than HTTP/1.1 on a loopback benchmark (see `docs/http2-design.md`).

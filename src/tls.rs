@@ -51,8 +51,9 @@ impl std::error::Error for TlsError {
 /// Server-side TLS settings: a certificate chain and its private key.
 ///
 /// TLS 1.2 and 1.3 are enabled with rustls' safe defaults and the `ring`
-/// crypto provider; the server speaks HTTP/1.1 only and does not request
-/// client certificates.
+/// crypto provider; the server speaks HTTP/1.1, plus HTTP/2 when the `http2`
+/// feature is enabled (see `enable_http2`), and does not request client
+/// certificates.
 #[derive(Clone)]
 pub struct TlsConfig {
     config: Arc<rustls::ServerConfig>,
