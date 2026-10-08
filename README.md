@@ -557,8 +557,10 @@ for clients whose `Accept-Encoding` allows it (`min_size` and `level` are
 configurable), with `Content-Encoding`, a corrected `Content-Length` and a weak
 `ETag`. Streaming responses, `HEAD`, bodiless statuses, already-encoded
 responses and other media types pass through, and any response that could
-have been compressed carries `Vary: Accept-Encoding`. Gzip only (no
-brotli/zstd yet); do not use it on endpoints that mix secrets with
+have been compressed carries `Vary: Accept-Encoding`. Gzip is built in; the
+`compression-brotli` feature (pure-Rust `brotli`) adds `br`, chosen when the
+client's quality for it is at least gzip's (`Compress::brotli_quality`, default
+4). There is no zstd. Do not use compression on endpoints that mix secrets with
 attacker-chosen input over TLS (BREACH).
 
 ### Custom error format
@@ -673,7 +675,7 @@ benchmark on your own hardware for absolute values.
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --features 'uuid test-util swagger multipart tls http2 compression'
+cargo test --workspace --all-targets --features 'uuid test-util swagger multipart tls http2 compression compression-brotli'
 cargo test --doc --workspace
 cargo build --workspace --examples --features 'uuid swagger tls http2'
 ```
@@ -687,7 +689,7 @@ version) before committing.
 
 ## Roadmap
 
-Planned: HTTP/3, brotli/zstd compression, and the full HTTP
+Planned: HTTP/3, zstd compression, and the full HTTP
 acceptance benchmark matrix.
 
 ## Contributing and license

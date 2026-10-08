@@ -8,11 +8,13 @@ use crate::*;
 /// large response does not stall the async worker.
 const BLOCKING_THRESHOLD: usize = 16 * 1024;
 
-/// Gzip response compression.
+/// Gzip (and, with the `compression-brotli` feature, brotli) response
+/// compression.
 ///
 /// Compresses buffered text-like responses (`text/*`, JSON, XML, JavaScript,
 /// SVG) of at least [`min_size`](Self::min_size) bytes for clients whose
-/// `Accept-Encoding` allows gzip, and sets `Content-Encoding`, an adjusted
+/// `Accept-Encoding` allows an encoding (the highest quality wins, brotli on
+/// a tie), and sets `Content-Encoding`, an adjusted
 /// `Content-Length` and a weak `ETag`. Streaming responses, `HEAD` and bodiless
 /// statuses, responses that already have a `Content-Encoding`, and other
 /// media types (images, archives) pass through unchanged. A response whose
@@ -26,6 +28,8 @@ const BLOCKING_THRESHOLD: usize = 16 * 1024;
 pub struct Compress {
     min_size: usize,
     level: u32,
+    #[cfg(feature = "compression-brotli")]
+    brotli_quality: u32,
 }
 
 impl Compress {
@@ -34,12 +38,27 @@ impl Compress {
         Self {
             min_size: 1024,
             level: 6,
+            #[cfg(feature = "compression-brotli")]
+            brotli_quality: 4,
         }
     }
 
     /// Bodies smaller than this are sent as they are.
     pub fn min_size(mut self, bytes: usize) -> Self {
         self.min_size = bytes;
+        self
+    }
+
+    /// Brotli quality, 0 (fastest) to 11 (smallest, slow). The default 4 is a
+    /// good trade for responses compressed on the fly.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `quality` is above 11.
+    #[cfg(feature = "compression-brotli")]
+    pub fn brotli_quality(mut self, quality: u32) -> Self {
+        assert!(quality <= 11, "the brotli quality must be 0 to 11");
+        self.brotli_quality = quality;
         self
     }
 
@@ -61,14 +80,31 @@ impl Default for Compress {
     }
 }
 
-/// Whether `Accept-Encoding` allows gzip: an explicit `gzip` entry wins over
-/// `*`, and a quality of 0 forbids.
-fn accepts_gzip(value: &str) -> bool {
-    let mut gzip = None;
-    let mut any = None;
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Encoding {
+    Gzip,
+    #[cfg(feature = "compression-brotli")]
+    Brotli,
+}
+
+impl Encoding {
+    fn token(self) -> &'static str {
+        match self {
+            Self::Gzip => "gzip",
+            #[cfg(feature = "compression-brotli")]
+            Self::Brotli => "br",
+        }
+    }
+}
+
+/// Picks the encoding `Accept-Encoding` prefers among the ones this build can
+/// produce: the highest quality above 0 wins and brotli wins a tie. An
+/// explicit entry beats `*`; a quality of 0 forbids.
+fn negotiate(value: &str) -> Option<Encoding> {
+    let mut entries: Vec<(String, f32)> = Vec::new();
     for entry in value.split(',') {
         let mut parts = entry.split(';');
-        let coding = parts.next().unwrap_or_default().trim();
+        let coding = parts.next().unwrap_or_default().trim().to_ascii_lowercase();
         let quality = parts
             .find_map(|param| {
                 let (name, value) = param.split_once('=')?;
@@ -78,13 +114,29 @@ fn accepts_gzip(value: &str) -> bool {
                     .flatten()
             })
             .unwrap_or(1.0);
-        if coding.eq_ignore_ascii_case("gzip") || coding.eq_ignore_ascii_case("x-gzip") {
-            gzip = Some(quality);
-        } else if coding == "*" {
-            any = Some(quality);
-        }
+        entries.push((coding, quality));
     }
-    gzip.or(any).is_some_and(|quality| quality > 0.0)
+    let quality_of = |names: &[&str]| -> Option<f32> {
+        entries
+            .iter()
+            .rev()
+            .find(|(coding, _)| names.contains(&coding.as_str()))
+            .or_else(|| entries.iter().rev().find(|(coding, _)| coding == "*"))
+            .map(|(_, quality)| *quality)
+    };
+    let mut best: Option<(Encoding, f32)> = None;
+    let mut consider = |encoding: Encoding, quality: Option<f32>| {
+        if let Some(quality) = quality.filter(|quality| *quality > 0.0)
+            && best.is_none_or(|(_, current)| quality > current)
+        {
+            best = Some((encoding, quality));
+        }
+    };
+    // Brotli first so that it wins ties (`>` keeps the earlier candidate).
+    #[cfg(feature = "compression-brotli")]
+    consider(Encoding::Brotli, quality_of(&["br"]));
+    consider(Encoding::Gzip, quality_of(&["gzip", "x-gzip"]));
+    best.map(|(encoding, _)| encoding)
 }
 
 fn compressible(content_type: &str) -> bool {
@@ -122,6 +174,14 @@ fn add_vary(headers: &mut http::HeaderMap) {
     }
 }
 
+#[cfg(feature = "compression-brotli")]
+fn brotli_compress(bytes: &[u8], quality: u32) -> Vec<u8> {
+    let mut writer = brotli::CompressorWriter::new(Vec::new(), 4096, quality, 22);
+    // Writing to a Vec cannot fail.
+    let _ = writer.write_all(bytes);
+    writer.into_inner()
+}
+
 fn gzip(bytes: &[u8], level: u32) -> Vec<u8> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::new(level));
     // Writing to a Vec cannot fail.
@@ -139,9 +199,11 @@ impl Middleware for Compress {
             .filter_map(|value| value.to_str().ok())
             .collect::<Vec<_>>()
             .join(",");
-        let accepts = accepts_gzip(&accept_encoding);
+        let encoding = negotiate(&accept_encoding);
         let is_head = request.method() == Method::HEAD;
         let (min_size, level) = (self.min_size, self.level);
+        #[cfg(feature = "compression-brotli")]
+        let brotli_quality = self.brotli_quality;
         Box::pin(async move {
             let mut response = next.run(request).await;
             let status = response.status();
@@ -165,8 +227,10 @@ impl Middleware for Compress {
                 .filter_map(|value| value.to_str().ok())
                 .flat_map(|value| value.split(','))
                 .any(|directive| directive.trim().eq_ignore_ascii_case("no-transform"));
-            if !accepts
-                || no_transform
+            let Some(encoding) = encoding else {
+                return response;
+            };
+            if no_transform
                 || is_head
                 || status.is_informational()
                 || status == StatusCode::NO_CONTENT
@@ -183,14 +247,19 @@ impl Middleware for Compress {
                 return response;
             };
             let original = body.clone();
+            let compress = move |bytes: &[u8]| match encoding {
+                Encoding::Gzip => gzip(bytes, level),
+                #[cfg(feature = "compression-brotli")]
+                Encoding::Brotli => brotli_compress(bytes, brotli_quality),
+            };
             let compressed = if original.len() > BLOCKING_THRESHOLD {
                 let source = original.clone();
-                match tokio::task::spawn_blocking(move || gzip(&source, level)).await {
+                match tokio::task::spawn_blocking(move || compress(&source)).await {
                     Ok(bytes) => bytes,
                     Err(_) => return response,
                 }
             } else {
-                gzip(&original, level)
+                compress(&original)
             };
             if compressed.is_empty() || compressed.len() >= original.len() {
                 return response;
@@ -198,7 +267,10 @@ impl Middleware for Compress {
             let length = compressed.len();
             *response.body_mut() = ResponseBody::full(Bytes::from(compressed));
             let headers = response.headers_mut();
-            headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+            headers.insert(
+                header::CONTENT_ENCODING,
+                HeaderValue::from_static(encoding.token()),
+            );
             if headers.contains_key(header::CONTENT_LENGTH) {
                 headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
             }

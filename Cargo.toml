@@ -22,6 +22,7 @@ swagger = []
 multipart = ["dep:multer"]
 tls = ["dep:tokio-rustls", "dep:rustls-pki-types"]
 compression = ["dep:flate2"]
+compression-brotli = ["compression", "dep:brotli"]
 http2 = ["tls", "hyper/http2", "hyper-util/http2"]
 
 [lib]
@@ -45,6 +46,7 @@ multer = { version = "3", optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
 rustls-pki-types = { version = "1", features = ["std"], optional = true }
 flate2 = { version = "1", optional = true }
+brotli = { version = "9", default-features = false, features = ["std"], optional = true }
 
 # Only applies when building this workspace (benches, examples); dependents use
 # their own profiles.
@@ -153,3 +155,7 @@ required-features = ["http2"]
 
 [[test]]
 name = "unix_socket"
+
+[[test]]
+name = "compress_brotli"
+required-features = ["compression-brotli", "test-util"]
