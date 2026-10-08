@@ -39,8 +39,9 @@ type Hook = dyn Fn(&ErrorInfo) -> HttpResponse + Send + Sync;
 /// instead of the default problem-details body.
 ///
 /// Responses your own handlers build (a custom `418`, say) are left alone;
-/// only errors the framework produces are passed to the hook. `Allow` and
-/// `WWW-Authenticate` headers are carried over unless the hook sets them.
+/// only errors the framework produces are passed to the hook. `Allow`,
+/// `WWW-Authenticate` and `Retry-After` headers are carried over unless the
+/// hook sets them.
 /// Register it **first** (outermost) so it also covers errors from the
 /// layers after it, such as [`BearerAuth`]. The OpenAPI document still
 /// describes the default `Problem` schema: turn it off with
@@ -68,7 +69,7 @@ impl Middleware for ErrorFormat {
                 return response;
             };
             let mut mapped = hook(&info);
-            for name in [header::ALLOW, header::WWW_AUTHENTICATE] {
+            for name in [header::ALLOW, header::WWW_AUTHENTICATE, header::RETRY_AFTER] {
                 if let Some(value) = response.headers().get(&name)
                     && !mapped.headers().contains_key(&name)
                 {

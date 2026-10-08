@@ -425,6 +425,40 @@ headers. `allow_any_origin()` cannot be combined with `allow_credentials(true)`
 (it panics; list the origins instead), and `allow_origin` panics on anything
 but `scheme://host[:port]`.
 
+### Rate limiting
+
+```rust
+app.layer(Cors::new().allow_origin("https://app.example"));
+app.layer(
+    RateLimit::new(100, Duration::from_secs(60))   // 100 requests a minute
+        .burst(20)
+        .key_by_header("x-api-key"),
+);
+```
+
+`RateLimit` is a token bucket held in this process: a request that finds the
+bucket empty gets `429` with `Retry-After` and goes no further. By default one
+bucket serves everyone; `key_by_header` / `key_by` give each client its own
+(requests without a key share an anonymous bucket). At most `max_keys`
+(10,000) buckets are kept: idle ones are dropped first and, when the table is
+full of busy keys, new keys share one overflow bucket, so varying the key
+cannot bypass the limit. The middleware does not see the socket, so there is
+no per-address key: behind a proxy key on the header it sets (and only if it
+overwrites what clients send). With several instances each enforces its own
+limit.
+
+### Compression
+
+Enable the `compression` feature and register `Compress::new()`: buffered
+text, JSON, XML, JavaScript and SVG responses of at least 1 KiB are gzipped
+for clients whose `Accept-Encoding` allows it (`min_size` and `level` are
+configurable), with `Content-Encoding`, a corrected `Content-Length` and a weak
+`ETag`. Streaming responses, `HEAD`, bodiless statuses, already-encoded
+responses and other media types pass through, and any response that could
+have been compressed carries `Vary: Accept-Encoding`. Gzip only (no
+brotli/zstd yet); do not use it on endpoints that mix secrets with
+attacker-chosen input over TLS (BREACH).
+
 ### Custom error format
 
 ```rust
@@ -501,7 +535,7 @@ app.get("/export", export).route_layer(audit);  // this route's path and method
 
 ```toml
 [dependencies]
-oas-rs = "0.6"
+oas-rs = "0.7"
 ```
 
 Enable optional features as needed: `swagger` (Swagger UI), `uuid` (UUID
@@ -537,7 +571,7 @@ benchmark on your own hardware for absolute values.
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --features 'uuid test-util swagger multipart tls http2'
+cargo test --workspace --all-targets --features 'uuid test-util swagger multipart tls http2 compression'
 cargo test --doc --workspace
 cargo build --workspace --examples --features 'uuid swagger tls http2'
 ```

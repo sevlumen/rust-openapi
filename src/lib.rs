@@ -26,6 +26,8 @@ mod app;
 mod bearer;
 mod catch_panic;
 mod codec;
+#[cfg(feature = "compression")]
+mod compress;
 mod cors;
 mod error_format;
 mod extract;
@@ -37,6 +39,7 @@ mod multipart;
 mod openapi;
 mod params;
 mod path;
+mod rate_limit;
 mod request_id;
 mod response;
 mod router;
@@ -50,6 +53,8 @@ use app::Operation;
 pub use bearer::{BearerAuth, constant_time_eq};
 pub use catch_panic::CatchPanic;
 pub use codec::*;
+#[cfg(feature = "compression")]
+pub use compress::Compress;
 pub use cors::Cors;
 pub use error_format::{ErrorFormat, ErrorInfo};
 pub use extract::FromRequest;
@@ -74,6 +79,7 @@ use openapi::swagger_html;
 pub use openapi::{ApiKeyLocation, BuildError, OpenApiOptions, SecurityScheme};
 pub use params::*;
 use path::*;
+pub use rate_limit::RateLimit;
 pub use request_id::RequestId;
 pub use response::*;
 use router::{

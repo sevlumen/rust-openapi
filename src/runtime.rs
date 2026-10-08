@@ -669,6 +669,18 @@ impl TestResponse {
             .unwrap_or_default()
     }
 
+    /// The raw body, for responses that are not UTF-8 (compressed ones).
+    pub async fn body_bytes(mut self) -> Vec<u8> {
+        let response = self.response.take().unwrap();
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec()
+    }
+
     pub async fn body_string(mut self) -> String {
         let response = self.response.take().unwrap();
         String::from_utf8(
