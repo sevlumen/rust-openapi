@@ -1,6 +1,6 @@
 use std::fmt::{self, Display};
 
-use crate::{App, Method, normalize_path};
+use crate::{App, Method, SecurityScheme, normalize_path};
 
 #[derive(Clone)]
 pub(crate) struct OpenApiConfig {
@@ -8,6 +8,11 @@ pub(crate) struct OpenApiConfig {
     pub(crate) title: String,
     pub(crate) version: String,
     pub(crate) description: Option<String>,
+    /// Declared schemes in declaration order; redeclaring a name replaces it.
+    pub(crate) security_schemes: Vec<(String, SecurityScheme)>,
+    /// Document-wide security requirements (each entry is an AND group; the
+    /// entries are alternatives).
+    pub(crate) default_security: Vec<Vec<String>>,
 }
 
 #[cfg(any(test, feature = "swagger"))]
@@ -18,6 +23,7 @@ pub(crate) struct SwaggerConfig {
 
 /// An error raised while compiling the application builder into a runtime.
 #[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BuildError {
     RouteConflict {
         path: String,
@@ -30,6 +36,11 @@ pub enum BuildError {
         path: String,
         captures: usize,
         max: usize,
+    },
+    /// A route or the document defaults reference a security scheme that was
+    /// never declared with [`OpenApiOptions::security_scheme`] and friends.
+    UnknownSecurityScheme {
+        name: String,
     },
 }
 
@@ -50,6 +61,9 @@ impl Display for BuildError {
                 formatter,
                 "route {path} has {captures} path captures; the maximum is {max}"
             ),
+            Self::UnknownSecurityScheme { name } => {
+                write!(formatter, "security scheme {name:?} is not declared")
+            }
         }
     }
 }
@@ -88,6 +102,58 @@ impl<S: Send + Sync + 'static> OpenApiOptions<'_, S> {
             .as_mut()
             .expect("OpenAPI options are initialized")
             .version = version.into();
+        self.app.invalidate_openapi_cache();
+        self
+    }
+
+    /// Declares a security scheme under `components.securitySchemes`. Routes
+    /// and [`default_security`](Self::default_security) refer to it by `name`.
+    /// Redeclaring a name replaces the earlier scheme.
+    pub fn security_scheme(self, name: impl Into<String>, scheme: SecurityScheme) -> Self {
+        let name = name.into();
+        let config = self
+            .app
+            .openapi_config
+            .as_mut()
+            .expect("OpenAPI options are initialized");
+        match config.security_schemes.iter_mut().find(|(n, _)| *n == name) {
+            Some(existing) => existing.1 = scheme,
+            None => config.security_schemes.push((name, scheme)),
+        }
+        self.app.invalidate_openapi_cache();
+        self
+    }
+
+    /// Declares an HTTP bearer-token scheme named `name`.
+    pub fn bearer_auth(self, name: impl Into<String>) -> Self {
+        self.security_scheme(name, SecurityScheme::bearer())
+    }
+
+    /// Declares an API-key scheme named `name` that reads `key_name` from
+    /// `location`, e.g. `api_key("TenantId", ApiKeyLocation::Header,
+    /// "X-Tenant-Id")` (an example, not a built-in).
+    pub fn api_key(
+        self,
+        name: impl Into<String>,
+        location: crate::ApiKeyLocation,
+        key_name: impl Into<String>,
+    ) -> Self {
+        self.security_scheme(name, SecurityScheme::api_key(location, key_name))
+    }
+
+    /// Adds a document-wide security requirement: every listed scheme is
+    /// required together. Calling it again adds an alternative requirement.
+    pub fn default_security<I, T>(self, schemes: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        self.app
+            .openapi_config
+            .as_mut()
+            .expect("OpenAPI options are initialized")
+            .default_security
+            .push(schemes.into_iter().map(Into::into).collect());
         self.app.invalidate_openapi_cache();
         self
     }

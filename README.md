@@ -134,6 +134,31 @@ roadmap below.
 Swagger UI is loaded from a pinned `swagger-ui-dist` release on unpkg with
 Subresource Integrity hashes, so it needs network access from the browser.
 
+### Security schemes
+
+Declare the authentication your API expects so the generated document lists
+`components.securitySchemes` and Swagger UI shows its **Authorize** button.
+This only *describes* authentication; `oas-rs` does not check credentials.
+
+```rust
+use oas_rs::ApiKeyLocation;
+
+app.openapi()
+    .bearer_auth("BearerAuth")
+    // `TenantId` / `X-Tenant-Id` are only an *example* of a custom API-key header.
+    .api_key("TenantId", ApiKeyLocation::Header, "X-Tenant-Id")
+    .default_security(["BearerAuth"]); // applies to every route
+
+app.post("/firmwares", upload).security(["BearerAuth", "TenantId"]); // both required
+app.get("/health", health).public(); // no authentication
+```
+
+`.security([...])` requires every listed scheme together; calling it again adds
+an alternative (logical OR). Referencing a scheme that was never declared makes
+`build()` return `BuildError::UnknownSecurityScheme`. For other kinds, use
+`security_scheme(name, SecurityScheme::...)` (`bearer_with_format("JWT")`,
+`basic()`, `api_key(...)`).
+
 ## Installation
 
 ```toml
