@@ -101,7 +101,9 @@ pub use runtime::DEFAULT_HANDSHAKE_TIMEOUT;
 use runtime::RuntimeInner;
 #[cfg(any(test, feature = "test-util"))]
 pub use runtime::TestResponse;
-pub use runtime::{AppRuntime, DEFAULT_HEADER_READ_TIMEOUT, DEFAULT_SHUTDOWN_TIMEOUT};
+pub use runtime::{
+    AppRuntime, DEFAULT_BODY_READ_TIMEOUT, DEFAULT_HEADER_READ_TIMEOUT, DEFAULT_SHUTDOWN_TIMEOUT,
+};
 pub use schema::*;
 pub use sse::{Event, Sse};
 #[cfg(feature = "static-files")]

@@ -188,3 +188,10 @@ required-features = ["static-files", "test-util"]
 [[test]]
 name = "websocket"
 required-features = ["websocket"]
+
+[[test]]
+name = "body_timeout"
+
+[[test]]
+name = "properties"
+required-features = ["test-util"]

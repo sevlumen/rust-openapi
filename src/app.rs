@@ -220,6 +220,7 @@ impl<S: Send + Sync + 'static> App<S> {
         self.install_generated_routes()?;
         Ok(AppRuntime {
             inner: Arc::new(RuntimeInner {
+                body_read_timeout: Some(DEFAULT_BODY_READ_TIMEOUT),
                 state: self.state,
                 plans: self.plans.into_boxed_slice(),
                 capture_names: self
@@ -477,6 +478,9 @@ impl<S: Send + Sync + 'static> App<S> {
         self
     }
 
+    /// The OpenAPI 3.1 document as JSON, exactly what the served endpoint
+    /// returns (routes registered so far). Useful for writing the spec to a
+    /// file or checking it in a test.
     pub fn openapi_document(&self) -> Value {
         let mut paths = Map::new();
         let document_errors = self
@@ -652,10 +656,10 @@ impl<S: Send + Sync + 'static> App<S> {
         document
     }
 
-    /// Temporary compatibility helper for the in-tree tests. Production
-    /// serving is exposed by [`AppRuntime`]; this helper is hidden from the
-    /// normal API surface and will move to `oas-test`.
-    #[doc(hidden)]
+    /// Builds the runtime and runs one in-process request against it, for
+    /// tests (feature `test-util`; no socket is involved, so raw routes and
+    /// anything that needs a connection cannot be exercised this way). Prefer
+    /// [`AppRuntime::oneshot`] when you keep the runtime around.
     #[cfg(any(test, feature = "test-util"))]
     pub async fn oneshot(
         &mut self,

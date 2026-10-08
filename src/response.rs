@@ -9,6 +9,7 @@ use std::{
 };
 
 /// The fixed or streaming response body used by the Hyper adapter.
+#[non_exhaustive]
 pub enum ResponseBody {
     Full(Option<Bytes>),
     Stream(Pin<Box<dyn Stream<Item = Bytes> + Send + 'static>>),
@@ -386,6 +387,22 @@ pub(crate) fn payload_too_large_response() -> HttpResponse {
             }),
         ),
     )
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn request_timeout_response() -> HttpResponse {
+    let mut response = ApiError::new(
+        StatusCode::REQUEST_TIMEOUT,
+        "Request Timeout",
+        "the request body was not received in time",
+    )
+    .into_response();
+    // The unread rest of the body is still on the wire: end the connection.
+    response
+        .headers_mut()
+        .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    response
 }
 
 #[cold]

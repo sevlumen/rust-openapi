@@ -24,6 +24,8 @@ pub(crate) type ErrorObserver = Arc<dyn Fn(&(dyn std::error::Error + 'static)) +
 /// The immutable routing state, shared (by `Arc`) with every connection and
 /// with any middleware chain in flight.
 pub(crate) struct RuntimeInner<S> {
+    /// How long a buffered request body may take to arrive.
+    pub(crate) body_read_timeout: Option<Duration>,
     pub(crate) state: Arc<S>,
     pub(crate) plans: Box<[RoutePlan<S>]>,
     pub(crate) capture_names: Box<[Option<Arc<[String]>>]>,
@@ -56,6 +58,10 @@ impl<S: Send + Sync + 'static> RuntimeInner<S> {
 /// How long [`AppRuntime::serve_listener`] waits for in-flight requests after
 /// the shutdown signal before giving up on the remaining connections.
 pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a buffered request body (JSON, form, multipart extractor) may take
+/// to arrive in full (see [`AppRuntime::body_read_timeout`]).
+pub const DEFAULT_BODY_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long a client may take to send a complete request head before the
 /// connection is closed (see [`AppRuntime::header_read_timeout`]). Hyper also
@@ -274,8 +280,22 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
                 if too_large {
                     return PreparedDispatch::Ready(Some(payload_too_large_response()));
                 }
+                let timeout = self.runtime.body_read_timeout;
                 PreparedDispatch::Buffered(Box::pin(async move {
-                    match Limited::new(body, limit).collect().await {
+                    // A body that is already complete finishes at once and never
+                    // arms the timer.
+                    let collected = match timeout {
+                        Some(timeout) => {
+                            match tokio::time::timeout(timeout, Limited::new(body, limit).collect())
+                                .await
+                            {
+                                Ok(collected) => collected,
+                                Err(_) => return request_timeout_response(),
+                            }
+                        }
+                        None => Limited::new(body, limit).collect().await,
+                    };
+                    match collected {
                         Ok(body) => {
                             runtime
                                 .runtime_ref()
@@ -345,6 +365,27 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
     /// just closed and report a 502.
     pub fn header_read_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.header_read_timeout = timeout;
+        self
+    }
+
+    /// How long a *buffered* request body (a `Json`, `Form` or `Multipart`
+    /// extractor) may take to arrive in full (default
+    /// [`DEFAULT_BODY_READ_TIMEOUT`], 60 s); `None` disables the limit. A body
+    /// that is still incomplete then gets `408 Request Timeout` and the
+    /// connection is closed, so a client cannot hold a handler task and a
+    /// connection slot by sending a header and trickling (or never sending)
+    /// the body. Raw handlers read their own stream: wrap `next_field()` /
+    /// `chunk()` in `tokio::time::timeout` there. The deadline is for the whole
+    /// body, so raise it for routes that take large uploads over slow links.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the runtime is already being served (call it right after
+    /// `build()`).
+    pub fn body_read_timeout(mut self, timeout: Option<Duration>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("body_read_timeout must be set before the runtime is served")
+            .body_read_timeout = timeout;
         self
     }
 
