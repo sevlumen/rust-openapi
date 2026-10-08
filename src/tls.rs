@@ -58,6 +58,17 @@ pub struct TlsConfig {
     config: Arc<rustls::ServerConfig>,
 }
 
+/// The ALPN protocols offered to clients: `h2` first when HTTP/2 is enabled
+/// (only possible with the `http2` feature), then `http/1.1`.
+fn alpn_protocols(http2: bool) -> Vec<Vec<u8>> {
+    #[cfg(feature = "http2")]
+    if http2 {
+        return vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    }
+    let _ = http2;
+    vec![b"http/1.1".to_vec()]
+}
+
 impl TlsConfig {
     /// Reads a PEM certificate chain and a PEM private key (PKCS#8, PKCS#1 or
     /// SEC1) from files.
@@ -89,10 +100,20 @@ impl TlsConfig {
             .with_no_client_auth()
             .with_single_cert(certs, key)
             .map_err(|error| TlsError::with_source("using the certificate and key", error))?;
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        config.alpn_protocols = alpn_protocols(cfg!(feature = "http2"));
         Ok(Self {
             config: Arc::new(config),
         })
+    }
+
+    /// Offer HTTP/2 (`h2`) next to `http/1.1` through ALPN. On by default when
+    /// the `http2` feature is enabled; pass `false` to serve HTTP/1.1 only.
+    #[cfg(feature = "http2")]
+    pub fn enable_http2(mut self, enabled: bool) -> Self {
+        let mut config = (*self.config).clone();
+        config.alpn_protocols = alpn_protocols(enabled);
+        self.config = Arc::new(config);
+        self
     }
 
     pub(crate) fn acceptor(&self) -> TlsAcceptor {

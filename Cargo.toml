@@ -21,6 +21,7 @@ test-util = []
 swagger = []
 multipart = ["dep:multer"]
 tls = ["dep:tokio-rustls", "dep:rustls-pki-types"]
+http2 = ["tls", "hyper/http2", "hyper-util/http2"]
 
 [lib]
 name = "oas_rs"
@@ -53,6 +54,7 @@ panic = "abort"
 strip = true
 
 [dev-dependencies]
+hyper = { version = "1", features = ["client", "http1", "http2"] }
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
 trybuild = "1.0"
 uuid = { version = "1.17", features = ["serde", "v4"] }
@@ -98,3 +100,7 @@ required-features = ["multipart", "test-util"]
 [[test]]
 name = "tls"
 required-features = ["tls"]
+
+[[test]]
+name = "http2"
+required-features = ["http2"]
