@@ -1,0 +1,5 @@
+error: ApiSchema cannot describe different serialize and deserialize names (one schema serves requests and responses): use a single name, or implement ApiSchema by hand
+ --> tests/ui/rename_split_fail.rs:5:13
+  |
+5 |     #[serde(rename(serialize = "fullName", deserialize = "full_name"))]
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

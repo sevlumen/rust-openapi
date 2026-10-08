@@ -5,7 +5,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-08
+
 ### Fixed
+- A `#[serde(flatten)]` struct in a query struct now contributes its fields as
+  OpenAPI query parameters (nested flattens included, repeated names listed
+  once, optional when the flattened field is `Option`); before, the API
+  accepted parameters the document did not publish. The serde fallback keeps
+  a second attempt that turns numeric-looking values into numbers, because
+  serde's `flatten` cannot parse numbers from text.
+- `#[serde(rename(serialize = "a", deserialize = "b"))]` and
+  `rename_all(serialize = .., deserialize = ..)` with different names are now a
+  compile error instead of silently documenting the wrong name (one schema
+  serves requests and responses); equal names are honored. Implement
+  `ApiSchema` by hand if the two directions really differ.
+- WebSocket subprotocol names are validated with the HTTP token rule (`tchar`):
+  `/`, `=`, `(`, `"`, `:`, `@` and the like are rejected at configuration time.
 - `Query<T>` on the serde fallback path (a query struct with a `default`,
   `skip`, `flatten` or non-simple field) coerced every value that looked like
   a number or bool into a JSON number/bool, so a `String` field receiving

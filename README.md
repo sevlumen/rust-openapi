@@ -213,7 +213,9 @@ struct Account {
 Also understood: `transparent`, container `default`, `deny_unknown_fields`,
 `rename_all_fields` and a variant-level `untagged`. `Option<T>` is nullable
 (`oneOf: [T, null]`). Query structs with `skip`, `flatten` or `default` fields
-fall back to serde for parsing and list only the plain fields as parameters.
+fall back to serde for parsing; a `flatten`ed struct's fields are listed as
+parameters too. `rename(serialize = .., deserialize = ..)` with different names
+is a compile error (one schema serves both directions).
 Not interpreted: `alias`, `with`, `serialize_with`/`deserialize_with`,
 `bound`, and generic types (the derive reports an error: implement
 `ApiSchema` by hand). A `flatten`ed externally tagged enum with unit variants

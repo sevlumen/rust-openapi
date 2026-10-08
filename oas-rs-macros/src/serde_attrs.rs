@@ -39,7 +39,39 @@ pub(crate) fn parse(attrs: &[Attribute]) -> syn::Result<SerdeAttrs> {
     for attr in attrs.iter().filter(|attr| attr.path().is_ident("serde")) {
         attr.parse_nested_meta(|meta| {
             let has_value = meta.input.peek(Token![=]);
-            if meta.path.is_ident("rename") && has_value {
+            if (meta.path.is_ident("rename") || meta.path.is_ident("rename_all"))
+                && meta.input.peek(syn::token::Paren)
+            {
+                // `rename(serialize = "a", deserialize = "b")`: one schema cannot
+                // describe two names, so only an equal pair is accepted.
+                let is_rename = meta.path.is_ident("rename");
+                let (mut serialize, mut deserialize) = (None, None);
+                meta.parse_nested_meta(|inner| {
+                    let value = inner.value()?.parse::<LitStr>()?.value();
+                    if inner.path.is_ident("serialize") {
+                        serialize = Some(value);
+                    } else if inner.path.is_ident("deserialize") {
+                        deserialize = Some(value);
+                    }
+                    Ok(())
+                })?;
+                match (serialize, deserialize) {
+                    (Some(a), Some(b)) if a == b => {
+                        if is_rename {
+                            found.rename = Some(a);
+                        } else {
+                            found.rename_all = Some(a);
+                        }
+                    }
+                    _ => {
+                        return Err(meta.error(
+                            "ApiSchema cannot describe different serialize and deserialize names \
+                             (one schema serves requests and responses): use a single name, or \
+                             implement ApiSchema by hand",
+                        ));
+                    }
+                }
+            } else if meta.path.is_ident("rename") && has_value {
                 found.rename = Some(meta.value()?.parse::<LitStr>()?.value());
             } else if meta.path.is_ident("rename_all") && has_value {
                 found.rename_all = Some(meta.value()?.parse::<LitStr>()?.value());

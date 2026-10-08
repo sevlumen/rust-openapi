@@ -71,3 +71,51 @@ async fn bad_numbers_missing_fields_and_bad_percent_encoding_are_bad_requests() 
         assert_eq!(status, 400, "{query}");
     }
 }
+
+#[derive(Deserialize, ApiSchema)]
+struct Paging {
+    page: Option<u32>,
+    size: u32,
+}
+
+#[derive(Deserialize, ApiSchema)]
+struct Filter {
+    q: String,
+    #[serde(flatten)]
+    paging: Paging,
+}
+
+async fn filter(Query(filter): Query<Filter>) -> String {
+    format!(
+        "{}|{:?}|{}",
+        filter.q, filter.paging.page, filter.paging.size
+    )
+}
+
+#[tokio::test]
+async fn flattened_query_structs_parse_numbers_and_are_documented() {
+    let mut app = App::new();
+    app.get("/filter", filter);
+    let doc = app.openapi_document();
+    let parameters = doc["paths"]["/filter"]["get"]["parameters"]
+        .as_array()
+        .unwrap();
+    let names: Vec<&str> = parameters
+        .iter()
+        .map(|parameter| parameter["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["q", "page", "size"]);
+    let required: Vec<bool> = parameters
+        .iter()
+        .map(|parameter| parameter["required"].as_bool().unwrap())
+        .collect();
+    assert_eq!(required, [true, false, true]);
+    assert_eq!(parameters[2]["schema"]["type"], "integer");
+
+    let runtime = app.build().unwrap();
+    let response = runtime
+        .oneshot(Method::GET, "/filter?q=rust&page=2&size=10", &[], None)
+        .await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.body_string().await, "rust|Some(2)|10");
+}

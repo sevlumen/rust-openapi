@@ -233,6 +233,17 @@ fn derive_struct<'a>(
     let mut direct_query_parser = true;
     for (index, field) in fields.enumerate() {
         let serde = serde_attrs::parse(&field.attrs)?;
+        if serde.flatten && !serde.skipped() {
+            // A flattened struct contributes its fields as parameters too (the
+            // serde fallback parses them); names that repeat are listed once.
+            let (flattened, flattened_optional) = option_inner(&field.ty);
+            parameters.push(quote! {
+                __oas_parameters.extend(::oas_rs::__private::query_parameters_from_schema(
+                    &<#flattened as ::oas_rs::ApiSchema>::schema(),
+                    #flattened_optional,
+                ));
+            });
+        }
         if serde.skipped() || serde.flatten || serde.skip_deserializing {
             direct_query_parser = false;
             continue;
@@ -316,6 +327,7 @@ fn derive_struct<'a>(
             fn parameters() -> Vec<#json::Value> {
                 let mut __oas_parameters = Vec::new();
                 #(#parameters)*
+                ::oas_rs::__private::dedup_parameters(&mut __oas_parameters);
                 __oas_parameters
             }
 

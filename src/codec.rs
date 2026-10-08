@@ -10,7 +10,40 @@ pub(crate) fn parse_query<T: DeserializeOwned>(query: &str) -> Result<T, ApiErro
         percent_decode(key)?;
         percent_decode(value)?;
     }
-    serde_urlencoded::from_str(&query.replace('+', "%2B"))
+    match serde_urlencoded::from_str(&query.replace('+', "%2B")) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            // serde's `flatten` buffers values as text and cannot turn them
+            // into numbers, so a flattened struct needs the second attempt
+            // below, where numeric-looking values are real JSON numbers.
+            parse_query_coercing(query).map_err(|_| ApiError::bad_request(error.to_string()))
+        }
+    }
+}
+
+/// Second attempt: numbers and booleans become JSON numbers and booleans.
+fn parse_query_coercing<T: DeserializeOwned>(query: &str) -> Result<T, ApiError> {
+    let mut object = Map::new();
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let key = percent_decode(key)?;
+        let value = percent_decode(value)?;
+        let json_value = match value.as_str() {
+            "true" => Value::Bool(true),
+            "false" => Value::Bool(false),
+            text => {
+                if let Ok(number) = text.parse::<i64>() {
+                    json!(number)
+                } else if let Ok(number) = text.parse::<f64>() {
+                    json!(number)
+                } else {
+                    Value::String(value)
+                }
+            }
+        };
+        object.insert(key, json_value);
+    }
+    serde_json::from_value(Value::Object(object))
         .map_err(|error| ApiError::bad_request(error.to_string()))
 }
 

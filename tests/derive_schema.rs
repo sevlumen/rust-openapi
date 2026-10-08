@@ -491,3 +491,14 @@ fn generated_code_does_not_collide_with_user_constants() {
     assert!(hygiene::HygienicEnum::schema()["oneOf"].is_array());
     assert!(<hygiene::Hygienic as oas_rs::OpenApiQuery>::parse("a=1").is_ok());
 }
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+struct SameRename {
+    #[serde(rename(serialize = "fullName", deserialize = "fullName"))]
+    name: String,
+}
+
+#[test]
+fn a_rename_with_equal_directions_is_honored() {
+    assert!(SameRename::schema()["properties"].get("fullName").is_some());
+}
