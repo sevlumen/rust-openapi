@@ -201,3 +201,30 @@ async fn early_return_on_a_post_with_a_body_does_not_hang_the_connection() {
         .expect("connection hung after an early return");
     assert!(out.starts_with("HTTP/1.1 401"), "{out}");
 }
+
+use oas_rs::{Trace, TraceRecord};
+
+#[tokio::test]
+async fn trace_reports_method_path_status_and_latency() {
+    let records = Arc::new(Mutex::new(Vec::<TraceRecord>::new()));
+    let sink = Arc::clone(&records);
+    let mut app = App::new();
+    app.get("/hello", hello);
+    app.layer(Trace::new(move |record| {
+        sink.lock().unwrap().push(record.clone())
+    }));
+    let runtime = app.build().unwrap();
+
+    runtime.oneshot(Method::GET, "/hello", &[], None).await;
+    runtime.oneshot(Method::GET, "/nope", &[], None).await;
+
+    let records = records.lock().unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        (records[0].method.as_str(), records[0].path.as_str()),
+        ("GET", "/hello")
+    );
+    assert_eq!(records[0].status, 200);
+    assert_eq!(records[1].status, 404);
+    assert!(records[0].elapsed < Duration::from_secs(1));
+}

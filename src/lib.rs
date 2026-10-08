@@ -34,6 +34,7 @@ mod response;
 mod router;
 mod runtime;
 mod schema;
+mod trace;
 pub use app::App;
 use app::Operation;
 pub use codec::*;
@@ -70,6 +71,7 @@ use runtime::RuntimeInner;
 pub use runtime::TestResponse;
 pub use runtime::{AppRuntime, DEFAULT_SHUTDOWN_TIMEOUT};
 pub use schema::*;
+pub use trace::{Trace, TraceRecord};
 
 pub use http::Method;
 pub use oas_rs_macros::ApiSchema;
