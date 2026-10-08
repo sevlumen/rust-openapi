@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `App::body_limit` overrides the body-size limit of one route
+  (`max_body_size` remains global and now says so).
+- `Multipart` / `Field` extractor for `multipart/form-data` behind the new
+  `multipart` feature (uses `multer`), with an OpenAPI request body.
+
 ## [0.2.0] - 2026-10-08
 
 ### Breaking

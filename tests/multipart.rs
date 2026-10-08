@@ -356,3 +356,44 @@ fn multipart_routes_document_a_multipart_request_body() {
         "binary"
     );
 }
+
+// Mirrors the handler in the README "Multipart uploads" section.
+async fn readme_upload(mut form: Multipart) -> Result<oas_rs::Json<serde_json::Value>, ApiError> {
+    let mut stored = Vec::new();
+    while let Some(field) = form.next_field().await? {
+        let file_name = field.file_name().map(str::to_owned);
+        let data = field.bytes().await?;
+        stored.push(serde_json::json!({ "file": file_name, "bytes": data.len() }));
+    }
+    Ok(oas_rs::Json(serde_json::json!(stored)))
+}
+
+#[tokio::test]
+async fn readme_example_works() {
+    let mut app = App::new();
+    app.post("/firmwares", readme_upload)
+        .body_limit(4 * 1024 * 1024);
+    let runtime = app.build().unwrap();
+    let body = multipart_body(
+        "XB",
+        &[Part {
+            name: "firmware",
+            file_name: Some("fw.bin"),
+            content_type: None,
+            data: b"abc",
+        }],
+    );
+    let response = runtime
+        .oneshot(
+            Method::POST,
+            "/firmwares",
+            &[("content-type", "multipart/form-data; boundary=XB")],
+            Some(body),
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.body_string().await,
+        r#"[{"bytes":3,"file":"fw.bin"}]"#
+    );
+}

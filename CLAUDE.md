@@ -41,7 +41,7 @@ Two-phase lifecycle: `App` (mutable builder, `src/app.rs`) → `App::build()` �
 - `src/schema.rs`: `ApiSchema` trait and built-in impls; `OpenApiQuery` is the derive-generated query-parameter/parse hook.
 - `src/codec.rs` / `src/path.rs`: percent-decoding, query parsing, route-template splitting and path normalization.
 - `oas-rs-macros`: the derive generates `ApiSchema` + `OpenApiQuery` impls and a direct (non-serde) query parser when all field types are simple; otherwise it falls back to serde. Generated code refers to the runtime through `::oas_rs::__private` (`#[doc(hidden)]`), so anything the macro needs must be re-exported there. Serde `rename` / `rename_all` handling lives in `oas-rs-macros/src/serde_attrs.rs`; unit enums are supported, data-carrying enums are not.
-- Cargo features: `swagger` (Swagger UI page, loaded from a pinned unpkg release with SRI hashes — update the hashes in `swagger_html` if the version changes), `uuid`, `test-util` (exposes `TestResponse`/in-process dispatch used by tests and benches).
+- Cargo features: `multipart` (`Multipart`/`Field` extractor backed by `multer`; the body is buffered up to the route's limit, so memory per upload is about 3x `body_limit`), `swagger` (Swagger UI page, loaded from a pinned unpkg release with SRI hashes — update the hashes in `swagger_html` if the version changes), `uuid`, `test-util` (exposes `TestResponse`/in-process dispatch used by tests and benches).
 
 ## Conventions specific to this repo
 
