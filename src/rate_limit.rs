@@ -23,6 +23,8 @@ struct State {
     overflow: Bucket,
     /// When idle buckets were last swept out of a full table.
     last_sweep: Instant,
+    /// The most buckets this shard keeps.
+    cap: usize,
 }
 
 struct Limiter {
@@ -36,22 +38,23 @@ struct Limiter {
     /// keys rarely contend on one lock. A small `max_keys` keeps a single
     /// shard (its exact cap matters more than the contention then).
     shards: Box<[Mutex<State>]>,
-    /// The most buckets one shard keeps.
-    shard_cap: usize,
 }
 
 /// Tables of at least this many keys are split into [`SHARDS`] shards.
 const SHARD_THRESHOLD: usize = 1024;
 const SHARDS: usize = 16;
 
-fn build_shards(max_keys: usize, burst: f64) -> (Box<[Mutex<State>]>, usize) {
+fn build_shards(max_keys: usize, burst: f64) -> Box<[Mutex<State>]> {
     let count = if max_keys >= SHARD_THRESHOLD {
         SHARDS
     } else {
         1
     };
-    let shards = (0..count)
-        .map(|_| {
+    // The caps add up to exactly `max_keys`: the first `max_keys % count`
+    // shards take one more than the rest.
+    let (base, extra) = (max_keys / count, max_keys % count);
+    (0..count)
+        .map(|index| {
             Mutex::new(State {
                 buckets: HashMap::new(),
                 overflow: Bucket {
@@ -59,10 +62,10 @@ fn build_shards(max_keys: usize, burst: f64) -> (Box<[Mutex<State>]>, usize) {
                     last: Instant::now(),
                 },
                 last_sweep: Instant::now(),
+                cap: base + usize::from(index < extra),
             })
         })
-        .collect();
-    (shards, max_keys.div_ceil(count))
+        .collect()
 }
 
 /// A token-bucket rate limiter: `limit` requests per `per`, with a burst
@@ -79,7 +82,8 @@ fn build_shards(max_keys: usize, burst: f64) -> (Box<[Mutex<State>]>, usize) {
 /// The key table is split into 16 independently locked shards once
 /// `max_keys` is 1,024 or more (the default is 10,000), so requests for
 /// different keys rarely wait on each other; the cap then applies per shard
-/// (`max_keys / 16` each, with one overflow bucket per shard).
+/// (the shard caps add up to exactly `max_keys`, and each shard has its own
+/// overflow bucket).
 ///
 /// To bound memory, at most [`max_keys`](Self::max_keys) buckets are kept
 /// (each is a fixed-size entry under a hash of the key, however long the key
@@ -93,9 +97,11 @@ fn build_shards(max_keys: usize, burst: f64) -> (Box<[Mutex<State>]>, usize) {
 /// browsers can read the `429` and preflights are not counted. `Retry-After`
 /// is the wait rounded up to whole seconds.
 ///
-/// There is no built-in key for the peer address (the middleware does not see
-/// the socket); behind a proxy key on the header it sets, and only trust
-/// that header if the proxy overwrites what clients send.
+/// To key on the client address use
+/// [`key_by_peer_ip`](Self::key_by_peer_ip) (it needs
+/// `AppRuntime::connect_info(true)`); behind a proxy every client shares the
+/// proxy's address, so key on the header it sets instead, and only trust that
+/// header if the proxy overwrites what clients send.
 #[derive(Clone)]
 pub struct RateLimit {
     limiter: Arc<Limiter>,
@@ -109,7 +115,7 @@ impl RateLimit {
         assert!(limit >= 1, "the rate limit must be at least 1 request");
         assert!(!per.is_zero(), "the rate limit period must not be zero");
         let burst = f64::from(limit);
-        let (shards, shard_cap) = build_shards(DEFAULT_MAX_KEYS, burst);
+        let shards = build_shards(DEFAULT_MAX_KEYS, burst);
         Self {
             limiter: Arc::new(Limiter {
                 rate: burst / per.as_secs_f64(),
@@ -118,14 +124,13 @@ impl RateLimit {
                 key: Arc::new(|_| None),
                 hasher: RandomState::new(),
                 shards,
-                shard_cap,
             }),
         }
     }
 
     fn edit(self, change: impl FnOnce(&mut Limiter)) -> Self {
         let old = &*self.limiter;
-        let (shards, shard_cap) = build_shards(old.max_keys, old.burst);
+        let shards = build_shards(old.max_keys, old.burst);
         let mut limiter = Limiter {
             rate: old.rate,
             burst: old.burst,
@@ -133,14 +138,11 @@ impl RateLimit {
             key: Arc::clone(&old.key),
             hasher: RandomState::new(),
             shards,
-            shard_cap,
         };
         change(&mut limiter);
         // `max_keys` or `burst` may have changed: size the table for the final
         // values.
-        let (shards, shard_cap) = build_shards(limiter.max_keys, limiter.burst);
-        limiter.shards = shards;
-        limiter.shard_cap = shard_cap;
+        limiter.shards = build_shards(limiter.max_keys, limiter.burst);
         Self {
             limiter: Arc::new(limiter),
         }
@@ -217,7 +219,7 @@ impl Limiter {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let known = state.buckets.contains_key(&id);
-        if !known && state.buckets.len() >= self.shard_cap {
+        if !known && state.buckets.len() >= state.cap {
             // Sweeping is O(table), so a full table is swept at most once per
             // token interval (and at least a second apart): a flood of new keys
             // cannot make every request rescan it under the lock.
@@ -236,7 +238,7 @@ impl Limiter {
                 });
             }
         }
-        let overflow = !known && state.buckets.len() >= self.shard_cap;
+        let overflow = !known && state.buckets.len() >= state.cap;
         let mut bucket = if overflow {
             state.overflow
         } else {
@@ -282,6 +284,38 @@ impl Middleware for RateLimit {
                     .insert(header::RETRY_AFTER, HeaderValue::from(seconds));
                 response
             }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tracked(limit: &RateLimit) -> usize {
+        limit
+            .limiter
+            .shards
+            .iter()
+            .map(|shard| shard.lock().unwrap().buckets.len())
+            .sum()
+    }
+
+    #[test]
+    fn max_keys_is_an_exact_ceiling_across_shards() {
+        let now = Instant::now();
+        for max_keys in [1024, 1025, 1039, 2000, 10_000] {
+            let limit = RateLimit::new(1, Duration::from_secs(3600)).max_keys(max_keys);
+            for index in 0..(max_keys * 3) {
+                let _ = limit.limiter.take(&format!("key-{index}"), now);
+            }
+            let kept = tracked(&limit);
+            assert!(kept <= max_keys, "max_keys {max_keys} kept {kept}");
+            // ... and the table is used (not left mostly empty by the split).
+            assert!(
+                kept * 10 >= max_keys * 9,
+                "max_keys {max_keys} kept only {kept}"
+            );
         }
     }
 }

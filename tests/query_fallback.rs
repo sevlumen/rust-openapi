@@ -119,3 +119,97 @@ async fn flattened_query_structs_parse_numbers_and_are_documented() {
     assert_eq!(response.status(), 200);
     assert_eq!(response.body_string().await, "rust|Some(2)|10");
 }
+
+#[derive(Deserialize, ApiSchema)]
+struct Size {
+    size: u32,
+    #[serde(default)]
+    exact: bool,
+}
+
+#[derive(Deserialize, ApiSchema)]
+struct Sized {
+    q: String,
+    #[serde(flatten)]
+    paging: Size,
+}
+
+async fn sized(Query(query): Query<Sized>) -> String {
+    format!("{}|{}|{}", query.q, query.paging.size, query.paging.exact)
+}
+
+#[tokio::test]
+async fn a_string_field_next_to_a_flattened_number_keeps_its_text() {
+    let mut app = App::new();
+    app.get("/sized", sized);
+    let runtime = app.build().unwrap();
+    for (query, expected) in [
+        ("q=123&size=10", "123|10|false"),
+        ("q=true&size=1&exact=true", "true|1|true"),
+        ("q=007&size=3", "007|3|false"),
+        ("q=1e3&size=4&exact=false", "1e3|4|false"),
+    ] {
+        let response = runtime
+            .oneshot(Method::GET, &format!("/sized?{query}"), &[], None)
+            .await;
+        assert_eq!(response.status(), 200, "{query}");
+        assert_eq!(response.body_string().await, expected, "{query}");
+    }
+    let bad = runtime
+        .oneshot(Method::GET, "/sized?q=a&size=ten", &[], None)
+        .await;
+    assert_eq!(bad.status(), 400);
+}
+
+#[derive(Deserialize, ApiSchema)]
+struct Inner {
+    a: u32,
+}
+
+#[derive(Deserialize, ApiSchema)]
+struct Mid {
+    #[serde(flatten)]
+    inner: Inner,
+    b: String,
+}
+
+#[derive(Deserialize, ApiSchema)]
+struct Outer {
+    #[serde(flatten)]
+    mid: Option<Mid>,
+    c: u32,
+}
+
+async fn outer(Query(query): Query<Outer>) -> String {
+    match query.mid {
+        Some(mid) => format!("{}|{}|{}", mid.inner.a, mid.b, query.c),
+        None => format!("none|{}", query.c),
+    }
+}
+
+#[tokio::test]
+async fn nested_optional_flattens_are_documented_as_optional_parameters() {
+    let mut app = App::new();
+    app.get("/outer", outer);
+    let doc = app.openapi_document();
+    let parameters = doc["paths"]["/outer"]["get"]["parameters"]
+        .as_array()
+        .unwrap();
+    let find = |name: &str| {
+        parameters
+            .iter()
+            .find(|parameter| parameter["name"] == name)
+            .unwrap_or_else(|| panic!("parameter {name} is missing: {parameters:?}"))
+    };
+    assert_eq!(find("c")["required"], true);
+    // Inside an optional flatten nothing is required.
+    assert_eq!(find("a")["required"], false);
+    assert_eq!(find("b")["required"], false);
+    assert_eq!(parameters.len(), 3);
+
+    let runtime = app.build().unwrap();
+    let full = runtime
+        .oneshot(Method::GET, "/outer?a=1&b=x&c=3", &[], None)
+        .await;
+    assert_eq!(full.body_string().await, "1|x|3");
+}
