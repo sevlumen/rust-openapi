@@ -5,6 +5,29 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `AppRuntime::header_read_timeout` (default 30 s, `None` disables),
+  `AppRuntime::max_connections` (default unlimited) and
+  `AppRuntime::on_connection_error`, for plain HTTP and for TLS (including
+  handshake failures and HTTP/2 connection errors).
+- `CatchPanic` middleware: a handler panic becomes a `500` problem-details
+  response instead of a dropped connection; `CatchPanic::with_hook` receives
+  the panic message.
+
+- `RequestId` middleware: keeps a usable `X-Request-Id` or generates one, exposes
+  it to handlers and copies it onto every response (including 404/405).
+- `constant_time_eq` and `BearerAuth::static_token` for comparing a shared
+  bearer token without a timing side channel.
+- `AppRuntime::http2_max_concurrent_streams` (feature `http2`): lowers the
+  per-connection stream cap (Hyper's default is 200); streams over it are
+  refused with `REFUSED_STREAM`.
+
+### Changed
+- **Behavior:** a client now has 30 seconds to send a complete request head,
+  and an idle keep-alive connection is closed after the same time. Call
+  `header_read_timeout(None)` to keep the old behavior.
+- `tokio`'s `sync` feature is now enabled for the connection limit.
+
 ## [0.5.0] - 2026-10-08
 
 ### Added

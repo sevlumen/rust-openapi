@@ -24,6 +24,7 @@ use std::{
 
 mod app;
 mod bearer;
+mod catch_panic;
 mod codec;
 mod extract;
 mod group;
@@ -34,6 +35,7 @@ mod multipart;
 mod openapi;
 mod params;
 mod path;
+mod request_id;
 mod response;
 mod router;
 mod runtime;
@@ -43,7 +45,8 @@ mod tls;
 mod trace;
 pub use app::App;
 use app::Operation;
-pub use bearer::BearerAuth;
+pub use bearer::{BearerAuth, constant_time_eq};
+pub use catch_panic::CatchPanic;
 pub use codec::*;
 pub use extract::FromRequest;
 pub use extract::{Header, HeaderSpec, Path, Query, State};
@@ -67,6 +70,7 @@ use openapi::swagger_html;
 pub use openapi::{ApiKeyLocation, BuildError, OpenApiOptions, SecurityScheme};
 pub use params::*;
 use path::*;
+pub use request_id::RequestId;
 pub use response::*;
 use router::{
     BodyMode, CaptureMode, CaptureProvider, CaptureSet, DynamicCaptures, DynamicRouteTrie,
@@ -81,7 +85,7 @@ pub use runtime::DEFAULT_HANDSHAKE_TIMEOUT;
 use runtime::RuntimeInner;
 #[cfg(any(test, feature = "test-util"))]
 pub use runtime::TestResponse;
-pub use runtime::{AppRuntime, DEFAULT_SHUTDOWN_TIMEOUT};
+pub use runtime::{AppRuntime, DEFAULT_HEADER_READ_TIMEOUT, DEFAULT_SHUTDOWN_TIMEOUT};
 pub use schema::*;
 #[cfg(feature = "tls")]
 pub use tls::{TlsConfig, TlsError};

@@ -5,9 +5,18 @@ pub struct AppRuntime<S = ()> {
     pub(crate) inner: Arc<RuntimeInner<S>>,
     pub(crate) shutdown_timeout: Duration,
     pub(crate) tcp_nodelay: bool,
+    pub(crate) header_read_timeout: Option<Duration>,
+    pub(crate) max_connections: Option<usize>,
+    pub(crate) connection_error_observer: Option<ErrorObserver>,
+    #[cfg(feature = "http2")]
+    pub(crate) http2_max_concurrent_streams: Option<u32>,
     #[cfg(feature = "tls")]
     pub(crate) handshake_timeout: Duration,
 }
+
+/// Called with each connection-level error (see
+/// [`AppRuntime::on_connection_error`]).
+pub(crate) type ErrorObserver = Arc<dyn Fn(&(dyn std::error::Error + 'static)) + Send + Sync>;
 
 /// The immutable routing state, shared (by `Arc`) with every connection and
 /// with any middleware chain in flight.
@@ -44,6 +53,11 @@ impl<S: Send + Sync + 'static> RuntimeInner<S> {
 /// How long [`AppRuntime::serve_listener`] waits for in-flight requests after
 /// the shutdown signal before giving up on the remaining connections.
 pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a client may take to send a complete request head before the
+/// connection is closed (see [`AppRuntime::header_read_timeout`]). Hyper also
+/// applies it while a keep-alive connection waits for its next request.
+pub const DEFAULT_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a TLS client may take to finish the handshake before the
 /// connection is dropped (see `AppRuntime::handshake_timeout`).
@@ -268,6 +282,57 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         self
     }
 
+    /// How long a client may take to send a complete request head (default
+    /// [`DEFAULT_HEADER_READ_TIMEOUT`]); `None` disables the limit. A slow
+    /// client is disconnected, which also closes an idle keep-alive connection
+    /// that sends nothing for that long. Applies to HTTP/1.1, plain or over
+    /// TLS. It does not cover reading a request body, and HTTP/2 connections
+    /// are not covered at all.
+    ///
+    /// Behind a proxy or load balancer, set it higher than the proxy's idle
+    /// timeout toward this server (for example nginx `keepalive_timeout`
+    /// 75 s, AWS ALB 60 s), or the proxy may reuse a connection this server
+    /// just closed and report a 502.
+    pub fn header_read_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.header_read_timeout = timeout;
+        self
+    }
+
+    /// Caps the number of open connections (default: unlimited). While the
+    /// cap is reached the server stops accepting; further clients wait in the
+    /// operating system's listen backlog until a connection closes. Shutdown
+    /// is not delayed by the wait.
+    ///
+    /// Idle keep-alive connections hold their slot until
+    /// [`header_read_timeout`](Self::header_read_timeout) closes them, so do
+    /// not combine a limit with `header_read_timeout(None)`: enough idle
+    /// clients would stop the server from accepting anyone.
+    ///
+    /// Limits above the semaphore maximum are clamped.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `limit` is `Some(0)`: nothing could ever be served.
+    pub fn max_connections(mut self, limit: Option<usize>) -> Self {
+        assert!(limit != Some(0), "max_connections must be at least 1");
+        self.max_connections = limit;
+        self
+    }
+
+    /// Calls `observer` with every error that ends a connection: malformed
+    /// requests, header timeouts, I/O failures, failed or timed-out TLS
+    /// handshakes (an `io::Error`) and HTTP/2 connection errors. A client
+    /// that disconnects mid-request also shows up here. Hyper errors can be
+    /// told apart with `downcast_ref::<hyper::Error>()`. The default is to
+    /// ignore them. A panic in the observer ends that connection's task.
+    pub fn on_connection_error(
+        mut self,
+        observer: impl Fn(&(dyn std::error::Error + 'static)) + Send + Sync + 'static,
+    ) -> Self {
+        self.connection_error_observer = Some(Arc::new(observer));
+        self
+    }
+
     #[cfg(any(test, feature = "test-util"))]
     fn runtime_ref(&self) -> RuntimeRef<'_, S> {
         self.inner.runtime_ref()
@@ -413,6 +478,40 @@ enum AcceptAction {
     Fatal,
 }
 
+/// Holds one of the `max_connections` slots until dropped.
+pub(crate) type ConnectionSlot = tokio::sync::OwnedSemaphorePermit;
+
+pub(crate) fn connection_limit(limit: Option<usize>) -> Option<Arc<tokio::sync::Semaphore>> {
+    limit.map(|limit| {
+        Arc::new(tokio::sync::Semaphore::new(
+            limit.min(tokio::sync::Semaphore::MAX_PERMITS),
+        ))
+    })
+}
+
+/// An HTTP/1.1 connection builder with the header timeout applied. Hyper's
+/// timeouts do nothing without a timer, so one is installed whenever a
+/// timeout is set.
+pub(crate) fn http1_builder(
+    header_read_timeout: Option<Duration>,
+) -> hyper::server::conn::http1::Builder {
+    let mut builder = hyper::server::conn::http1::Builder::new();
+    if header_read_timeout.is_some() {
+        builder.timer(hyper_util::rt::TokioTimer::new());
+    }
+    builder.header_read_timeout(header_read_timeout);
+    builder
+}
+
+pub(crate) fn report_connection_error(
+    observer: &Option<ErrorObserver>,
+    error: &(dyn std::error::Error + 'static),
+) {
+    if let Some(observer) = observer {
+        observer(error);
+    }
+}
+
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 fn classify_accept_error(error: &std::io::Error) -> AcceptAction {
@@ -440,14 +539,28 @@ fn classify_accept_error(error: &std::io::Error) -> AcceptAction {
 /// a broken listener is returned as an error. When `nodelay` is set the
 /// accepted socket gets `TCP_NODELAY` (a failure to set it is ignored: the
 /// connection still works, just with the operating system default).
+///
+/// With a connection `limit`, a slot is taken before accepting and handed back
+/// with the stream: hold it as long as the connection lives. While every slot
+/// is taken this waits (racing `shutdown`) and accepts nothing.
 pub(crate) async fn accept_next<F>(
     listener: &tokio::net::TcpListener,
     shutdown: &mut Pin<&mut F>,
     nodelay: bool,
-) -> Result<Option<tokio::net::TcpStream>, std::io::Error>
+    limit: Option<&Arc<tokio::sync::Semaphore>>,
+) -> Result<Option<(tokio::net::TcpStream, Option<ConnectionSlot>)>, std::io::Error>
 where
     F: Future<Output = ()>,
 {
+    let slot = match limit {
+        Some(semaphore) => tokio::select! {
+            _ = shutdown.as_mut() => return Ok(None),
+            permit = Arc::clone(semaphore).acquire_owned() => {
+                Some(permit.expect("the connection semaphore is never closed"))
+            }
+        },
+        None => None,
+    };
     loop {
         tokio::select! {
             _ = shutdown.as_mut() => return Ok(None),
@@ -456,7 +569,7 @@ where
                     if nodelay {
                         let _ = stream.set_nodelay(true);
                     }
-                    return Ok(Some(stream));
+                    return Ok(Some((stream, slot)));
                 }
                 Err(error) => match classify_accept_error(&error) {
                     AcceptAction::Retry => continue,
@@ -482,20 +595,29 @@ where
 {
     let shutdown_timeout = runtime.shutdown_timeout;
     let nodelay = runtime.tcp_nodelay;
+    let header_read_timeout = runtime.header_read_timeout;
+    let limit = connection_limit(runtime.max_connections);
+    let observer = runtime.connection_error_observer;
     let runtime = runtime.inner;
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
     tokio::pin!(shutdown);
-    while let Some(stream) = accept_next(&listener, &mut shutdown, nodelay).await? {
+    while let Some((stream, slot)) =
+        accept_next(&listener, &mut shutdown, nodelay, limit.as_ref()).await?
+    {
         let connection = ConnectionRuntime::new(Arc::clone(&runtime));
         let io = hyper_util::rt::TokioIo::new(stream);
         let service = hyper::service::service_fn(move |request: Request<Incoming>| {
             let prepared = connection.prepare(request);
             async move { Ok::<_, Infallible>(prepared.await) }
         });
-        let connection = hyper::server::conn::http1::Builder::new().serve_connection(io, service);
+        let connection = http1_builder(header_read_timeout).serve_connection(io, service);
         let connection = graceful.watch(connection);
+        let observer = observer.clone();
         tokio::spawn(async move {
-            let _ = connection.await;
+            let _slot = slot;
+            if let Err(error) = connection.await {
+                report_connection_error(&observer, &error);
+            }
         });
     }
     let _ = tokio::time::timeout(shutdown_timeout, graceful.shutdown()).await;
@@ -577,7 +699,7 @@ mod accept_tests {
             let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
             let shutdown = std::future::pending::<()>();
             tokio::pin!(shutdown);
-            let accepted = accept_next(&listener, &mut shutdown, enabled)
+            let (accepted, _) = accept_next(&listener, &mut shutdown, enabled, None)
                 .await
                 .unwrap()
                 .expect("a connection");

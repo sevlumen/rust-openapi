@@ -56,8 +56,16 @@ struct Server {
 }
 
 async fn start(app: App, http2: bool) -> Server {
+    start_with(app, http2, |runtime| runtime).await
+}
+
+async fn start_with(
+    app: App,
+    http2: bool,
+    configure: impl FnOnce(oas_rs::AppRuntime) -> oas_rs::AppRuntime,
+) -> Server {
     let id = identity();
-    let runtime = app.build().unwrap();
+    let runtime = configure(app.build().unwrap());
     let tls = TlsConfig::from_pem(id.cert_pem.as_bytes(), id.key_pem.as_bytes())
         .unwrap()
         .enable_http2(http2);
@@ -321,4 +329,49 @@ async fn an_idle_h2_connection_does_not_block_shutdown() {
         .unwrap();
     assert!(returned_at.duration_since(shutdown_at) < Duration::from_secs(2));
     drop(sender);
+}
+
+#[tokio::test]
+async fn max_concurrent_streams_refuses_streams_over_the_limit() {
+    let mut app = App::new();
+    app.get("/slow", slow);
+    let server = start_with(app, true, |runtime| {
+        runtime.http2_max_concurrent_streams(Some(2))
+    })
+    .await;
+    let sender = h2_client(&server).await;
+    let mut tasks = Vec::new();
+    for _ in 0..4 {
+        let mut sender = sender.clone();
+        tasks.push(tokio::spawn(async move {
+            match sender.send_request(get("/slow")).await {
+                Ok(response) => Some(text(response).await.0),
+                Err(_) => None,
+            }
+        }));
+    }
+    let mut served = 0;
+    let mut refused = 0;
+    for task in tasks {
+        match task.await.unwrap() {
+            Some(200) => served += 1,
+            Some(other) => panic!("unexpected status {other}"),
+            None => refused += 1,
+        }
+    }
+    assert_eq!(served, 2, "exactly the allowed streams are served");
+    assert_eq!(refused, 2, "the streams over the limit are refused");
+    // The connection itself is still usable afterwards.
+    let mut sender = sender.clone();
+    let (status, _, _) = text(sender.send_request(get("/slow")).await.unwrap()).await;
+    assert_eq!(status, 200);
+}
+
+#[test]
+#[should_panic(expected = "at least 1")]
+fn zero_concurrent_streams_is_rejected() {
+    let _ = App::new()
+        .build()
+        .unwrap()
+        .http2_max_concurrent_streams(Some(0));
 }

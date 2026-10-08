@@ -79,6 +79,46 @@ let runtime = app.build()?.shutdown_timeout(std::time::Duration::from_secs(10));
 runtime.serve_listener(listener, async { tokio::signal::ctrl_c().await.ok(); }).await?;
 ```
 
+### Connection limits and timeouts
+
+```rust
+let runtime = app
+    .build()?
+    .header_read_timeout(Some(Duration::from_secs(10))) // default 30 s; None disables
+    .max_connections(Some(10_000))                      // default: unlimited
+    .on_connection_error(|error| eprintln!("connection: {error}"));
+```
+
+- `header_read_timeout` disconnects a client that takes too long to send its
+  request head (slowloris). Hyper also applies it while a keep-alive
+  connection waits for its next request, so an idle connection that sends
+  nothing for that long is closed, so behind a proxy set it above the proxy's
+  idle timeout toward this server (nginx `keepalive_timeout` 75 s, AWS ALB
+  60 s) or the proxy may reuse a connection just closed and answer 502. It
+  applies to HTTP/1.1, plain or over TLS; it does not cover reading a request
+  body, and HTTP/2 connections have no such timeout yet.
+- `http2_max_concurrent_streams(Some(n))` (feature `http2`) lowers the 200
+  streams one h2 connection may have open; excess streams are refused with
+  `REFUSED_STREAM`. Each open stream can buffer up to its route's body limit,
+  so this bounds the memory one client can pin.
+- `max_connections` stops accepting while the cap is reached. Waiting clients
+  sit in the operating system's listen backlog; shutdown is not delayed. Over
+  TLS the handshake counts toward the cap. Idle keep-alive connections keep
+  their slot until `header_read_timeout` closes them: do not combine a limit
+  with `header_read_timeout(None)`.
+- `on_connection_error` sees every error that ends a connection (malformed
+  requests, timeouts, I/O failures, failed or timed-out TLS handshakes,
+  HTTP/2 connection errors); a client that disconnects mid-request appears
+  there too. It is not called for handler errors.
+
+`CatchPanic` turns a panic in a handler into a `500` problem-details response
+and keeps the connection serving (`app.layer(CatchPanic::new())`, or
+`CatchPanic::with_hook(|message| ...)` to log the message, which is never sent
+to the client). It needs unwinding, so it does nothing under
+`panic = "abort"`. A panic can poison a `std::sync::Mutex` that later requests
+use, and a handler that panicked before reading the request body may make
+Hyper close the connection after the `500`.
+
 ## Routing
 
 Use `get`, `post`, `put`, `patch`, `delete`, `head`, and `options`. Static
@@ -328,6 +368,13 @@ Register a layer that answers preflights before `BearerAuth`, or list the
 paths in `exempt_paths`. `Trace::new(|record| ...)` receives the method, path,
 status and elapsed time of every request.
 
+`RequestId::new()` keeps a usable `X-Request-Id` (1 to 128 characters of
+`A-Z a-z 0-9 - _ . :`) or generates a unique, non-secret one, shows it to
+handlers (read it with a `HeaderSpec` for `x-request-id`) and sets it on every
+response. Register it first so the id exists for the layers after it.
+For a single shared token use `BearerAuth::static_token("...")`; for your own
+validator compare secrets with `constant_time_eq(a, b)`.
+
 ### Scoped middleware
 
 A layer can apply to part of the API only. Layers still run before routing, so
@@ -431,7 +478,7 @@ version) before committing.
 
 ## Roadmap
 
-Planned after `0.1`: `ApiSchema` support for data-carrying enums and more
+Planned: `ApiSchema` support for data-carrying enums and more
 serde attributes,
 splitting `src/lib.rs` into modules, middleware, TLS, and the full HTTP
 acceptance benchmark matrix.
