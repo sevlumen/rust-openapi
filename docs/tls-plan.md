@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - No new dependency in the default feature set; everything TLS is behind feature `tls` (optional deps `tokio-rustls`, `rustls-pki-types`).
-- `tokio-rustls` is used with `default-features = false, features = ["ring", "tls12"]` (no `aws-lc-rs`, no C toolchain). `rcgen` (dev-dependency) must use `default-features = false, features = ["crypto", "ring", "pem"]` so dev builds do not pull `aws-lc-rs`.
+- `tokio-rustls` is used with `default-features = false, features = ["ring", "tls12"]` (no `aws-lc-rs`; note `ring` itself compiles a little C, so a C compiler is still needed at build time). `rcgen` (dev-dependency) must use `default-features = false, features = ["crypto", "ring", "pem"]` so dev builds do not pull `aws-lc-rs`.
 - rustls/ring types never appear in the public API (`TlsConfig`, `TlsError` wrap them).
 - MSRV 1.88. `cargo deny check` must pass with default features and `--all-features` (add the minimal `deny.toml` license allowances the new tree needs, each with a comment).
 - Default path gate: `plaintext` ~250 ns/op with exactly 3 allocations/op; plain-TCP loopback throughput unchanged within noise (before/after on the same session).

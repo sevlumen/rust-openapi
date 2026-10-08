@@ -162,8 +162,9 @@ an alternative (logical OR). Referencing a scheme that was never declared makes
 
 ## TLS
 
-Enable the `tls` feature to serve HTTPS directly, with a pure-Rust stack
-(`rustls` with the `ring` crypto provider; no OpenSSL or C toolchain):
+Enable the `tls` feature to serve HTTPS directly with `rustls` and the `ring`
+crypto provider (no OpenSSL dependency; `ring` compiles a small amount of C, so
+a C compiler must be available at build time):
 
 ```rust
 use oas_rs::TlsConfig;
@@ -183,8 +184,9 @@ runtime
 - The certificate file may contain a chain; the private key may be PKCS#8,
   PKCS#1 or SEC1 PEM (parsed by `rustls-pki-types`). A missing file, malformed
   PEM or a key that does not match the certificate returns a `TlsError`.
-- TLS 1.2 and 1.3 with rustls' safe defaults; HTTP/1.1 only (no HTTP/2/ALPN
-  negotiation) and no client certificates.
+- TLS 1.2 and 1.3 with rustls' safe defaults; HTTP/1.1 only: ALPN advertises
+  only `http/1.1`, so a client that offers only `h2` is rejected during the
+  handshake. No client certificates.
 - The handshake runs per connection, so a slow client never blocks accepting
   others, and a failed or timed-out handshake closes only that connection.
 - Shutdown behaves like `serve_listener`: stop accepting, let in-flight
@@ -292,7 +294,8 @@ oas-rs = "0.2"
 ```
 
 Enable optional features as needed: `swagger` (Swagger UI), `uuid` (UUID
-extraction and schema support), `test-util` (in-process `oneshot` testing).
+extraction and schema support), `multipart` (`multipart/form-data` uploads),
+`tls` (HTTPS via `serve_tls`), `test-util` (in-process `oneshot` testing).
 The minimum supported Rust version is 1.88.
 
 ## Performance
