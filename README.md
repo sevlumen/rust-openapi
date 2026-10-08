@@ -523,12 +523,16 @@ version) and a disallowed origin `403`. Browsers do not apply CORS to
 WebSockets, so list the allowed origins with `allow_origin` for
 cookie-authenticated endpoints (a request with no `Origin` header, which is not
 a browser, is not blocked by that check). `protocols([...])` negotiates a
-subprotocol; messages above `max_message_size` (1 MiB by default) end the
-session; pings are answered automatically. Limits: HTTP/1.1 only (no RFC 8441
-over HTTP/2), no `permessage-deflate`, and after the upgrade the connection
-belongs to your handler task: graceful shutdown does not wait for it, so watch
-your own shutdown signal if sessions must be closed politely. The route is not
-described in the OpenAPI document (add `.summary(..)` / a note yourself).
+subprotocol (the server's first preference the client also offered);
+messages above `max_message_size` (1 MiB by default) end the session; pings are
+answered automatically; `idle_timeout(..)` ends a silent session. Limits:
+HTTP/1.1 only (no RFC 8441 over HTTP/2), no `permessage-deflate`, and after the
+upgrade the connection belongs to your handler task: graceful shutdown does not
+wait for it (watch your own shutdown signal if sessions must be closed
+politely), `header_read_timeout` no longer applies, and a panic in the handler
+is not seen by `CatchPanic`. An open session keeps its `max_connections` slot.
+The route appears in the OpenAPI document as a `101` response; its `400`,
+`403` and `426` rejections are not listed.
 
 ## Middleware
 

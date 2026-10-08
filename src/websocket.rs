@@ -53,6 +53,11 @@ impl std::error::Error for WebSocketError {
 }
 
 impl WebSocketError {
+    /// The idle timeout ([`WebSocketUpgrade::idle_timeout`]) expired.
+    pub fn is_timeout(&self) -> bool {
+        matches!(&self.0, tungstenite::Error::Io(error) if error.kind() == std::io::ErrorKind::TimedOut)
+    }
+
     /// The session ended normally (the close handshake completed or the
     /// connection was closed).
     pub fn is_closed(&self) -> bool {
@@ -74,8 +79,8 @@ impl From<WireMessage> for Message {
                 code: u16::from(frame.code),
                 reason: frame.reason.as_str().to_owned(),
             })),
-            // Raw frames are never produced when reading.
-            WireMessage::Frame(_) => Message::Binary(Bytes::new()),
+            // `tungstenite` never yields raw frames when reading.
+            WireMessage::Frame(_) => unreachable!("raw frames are not produced when reading"),
         }
     }
 }
@@ -99,6 +104,7 @@ impl From<Message> for WireMessage {
 /// [`WebSocketUpgrade::on_upgrade`].
 pub struct WebSocket {
     inner: WebSocketStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>,
+    idle: Option<Duration>,
 }
 
 impl WebSocket {
@@ -106,10 +112,18 @@ impl WebSocket {
     /// answered automatically (they are still returned); an error ends the
     /// session.
     pub async fn recv(&mut self) -> Option<Result<Message, WebSocketError>> {
-        self.inner
-            .next()
-            .await
-            .map(|result| result.map(Message::from).map_err(WebSocketError))
+        let next = match self.idle {
+            Some(idle) => match tokio::time::timeout(idle, self.inner.next()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    return Some(Err(WebSocketError(tungstenite::Error::Io(
+                        std::io::Error::new(std::io::ErrorKind::TimedOut, "websocket idle timeout"),
+                    ))));
+                }
+            },
+            None => self.inner.next().await,
+        };
+        next.map(|result| result.map(Message::from).map_err(WebSocketError))
     }
 
     pub async fn send(&mut self, message: Message) -> Result<(), WebSocketError> {
@@ -179,7 +193,12 @@ impl ResponseMetadata for WebSocketResponse {
 ///   default) end the session.
 /// - After the upgrade the connection belongs to the handler task: graceful
 ///   shutdown does not wait for it, so watch your own shutdown signal if open
-///   sessions must be closed politely.
+///   sessions must be closed politely. The session keeps its
+///   `max_connections` slot until the handler ends. `header_read_timeout` no
+///   longer applies, so use [`idle_timeout`](Self::idle_timeout) (each session
+///   also holds a 128 KiB read buffer).
+/// - A panic in the handler stays on its own task (`CatchPanic` does not see
+///   it): the socket is simply dropped.
 /// - HTTP/1.1 only (no RFC 8441 WebSockets over HTTP/2) and no
 ///   `permessage-deflate`.
 pub struct WebSocketUpgrade {
@@ -187,6 +206,28 @@ pub struct WebSocketUpgrade {
     protocols: Vec<String>,
     origins: Vec<String>,
     max_message_size: usize,
+    idle_timeout: Option<Duration>,
+}
+
+/// A subprotocol name is an HTTP token: no spaces, commas or controls.
+fn validate_protocol(protocol: &str) {
+    assert!(
+        !protocol.is_empty()
+            && protocol
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic() && byte != b',' && byte != b';'),
+        "invalid WebSocket subprotocol name {protocol:?}"
+    );
+}
+
+/// A client key is 16 random bytes in base64: 24 characters ending in `==`.
+fn valid_key(key: &HeaderValue) -> bool {
+    let key = key.as_bytes();
+    key.len() == 24
+        && key.ends_with(b"==")
+        && key[..22]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/'))
 }
 
 impl WebSocketUpgrade {
@@ -196,26 +237,48 @@ impl WebSocketUpgrade {
             protocols: Vec::new(),
             origins: Vec::new(),
             max_message_size: DEFAULT_MAX_MESSAGE,
+            idle_timeout: None,
         }
     }
 
-    /// Accepts connections from this `Origin` (compared exactly, for example
-    /// `https://app.example`). Once any origin is listed, a request whose
-    /// `Origin` header is present but not listed gets `403`.
+    /// Accepts connections from this `Origin`, compared exactly: lowercase
+    /// scheme and host, no trailing slash (`https://app.example`), as browsers
+    /// send it. Once any origin is listed, a request whose `Origin` header is
+    /// present but not listed gets `403`.
     pub fn allow_origin(mut self, origin: impl Into<String>) -> Self {
         self.origins.push(origin.into());
         self
     }
 
-    /// The subprotocols the server speaks, in order of preference over the
-    /// client's list; the first one the client offered is selected. When none
-    /// matches the session is still accepted without a subprotocol.
+    /// The subprotocols the server speaks, most preferred first: the first of
+    /// them that the client also offered is selected, whatever order the
+    /// client listed them in. When none matches the session is still accepted
+    /// without a subprotocol (a conforming client then closes it).
+    ///
+    /// # Panics
+    ///
+    /// Panics if a name is not a valid token (empty, or containing spaces,
+    /// commas or control characters).
     pub fn protocols<I, T>(mut self, protocols: I) -> Self
     where
         I: IntoIterator<Item = T>,
         T: Into<String>,
     {
         self.protocols = protocols.into_iter().map(Into::into).collect();
+        self.protocols
+            .iter()
+            .for_each(|name| validate_protocol(name));
+        self
+    }
+
+    /// Ends the session when no message arrives for this long:
+    /// [`WebSocket::recv`] then returns an error for which
+    /// [`WebSocketError::is_timeout`] is true. Without it a silent peer holds
+    /// the session forever (hyper's header timeout does not apply after the
+    /// upgrade). Send pings from the client, or have the handler ping, to keep
+    /// a quiet session alive.
+    pub fn idle_timeout(mut self, timeout: Duration) -> Self {
+        self.idle_timeout = Some(timeout);
         self
     }
 
@@ -240,6 +303,7 @@ impl WebSocketUpgrade {
             protocols,
             origins,
             max_message_size,
+            idle_timeout,
         } = self;
         let headers = request.headers();
         let contains = |name: header::HeaderName, token: &str| {
@@ -251,6 +315,7 @@ impl WebSocketUpgrade {
                 .any(|part| part.trim().eq_ignore_ascii_case(token))
         };
         if request.method() != Method::GET
+            || request.version() != http::Version::HTTP_11
             || !contains(header::CONNECTION, "upgrade")
             || !contains(header::UPGRADE, "websocket")
         {
@@ -275,10 +340,12 @@ impl WebSocketUpgrade {
         }
         let Some(key) = headers
             .get("sec-websocket-key")
-            .filter(|value| !value.is_empty())
+            .filter(|value| valid_key(value))
             .cloned()
         else {
-            return rejection(ApiError::bad_request("missing Sec-WebSocket-Key"));
+            return rejection(ApiError::bad_request(
+                "missing or invalid Sec-WebSocket-Key",
+            ));
         };
         if !origins.is_empty()
             && let Some(origin) = headers.get(header::ORIGIN)
@@ -292,26 +359,40 @@ impl WebSocketUpgrade {
                 "this origin may not open a WebSocket here",
             ));
         }
-        let chosen_protocol = headers
+        let offered: Vec<&str> = headers
             .get_all("sec-websocket-protocol")
             .iter()
             .filter_map(|value| value.to_str().ok())
             .flat_map(|value| value.split(','))
             .map(str::trim)
-            .find(|offered| protocols.iter().any(|ours| ours == offered))
-            .map(str::to_owned);
+            .collect();
+        let chosen_protocol = protocols
+            .iter()
+            .find(|ours| offered.contains(&ours.as_str()))
+            .cloned();
+        // The connection's slot, so the session keeps counting toward
+        // `max_connections` after the HTTP connection has been handed over.
+        let permit = request
+            .extensions()
+            .get::<crate::runtime::ConnectionPermit>()
+            .cloned();
         let accept = derive_accept_key(key.as_bytes());
         let on_upgrade: OnUpgrade = hyper::upgrade::on(&mut request);
         let config = WebSocketConfig::default()
             .max_message_size(Some(max_message_size))
             .max_frame_size(Some(max_message_size));
         tokio::spawn(async move {
+            let _permit = permit;
             let Ok(upgraded) = on_upgrade.await else {
                 return;
             };
             let io = hyper_util::rt::TokioIo::new(upgraded);
             let inner = WebSocketStream::from_raw_socket(io, Role::Server, Some(config)).await;
-            handler(WebSocket { inner }).await;
+            handler(WebSocket {
+                inner,
+                idle: idle_timeout,
+            })
+            .await;
         });
         let mut builder = Response::builder()
             .status(StatusCode::SWITCHING_PROTOCOLS)
@@ -331,4 +412,32 @@ impl WebSocketUpgrade {
 
 fn rejection(error: ApiError) -> WebSocketResponse {
     WebSocketResponse(error.into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "subprotocol")]
+    fn a_subprotocol_name_with_a_space_is_rejected() {
+        validate_protocol("bad protocol");
+    }
+
+    #[test]
+    fn plain_tokens_are_valid_subprotocols() {
+        validate_protocol("chat");
+        validate_protocol("v2.json-patch");
+    }
+
+    #[test]
+    fn keys_must_be_sixteen_bytes_of_base64() {
+        assert!(valid_key(&HeaderValue::from_static(
+            "dGhlIHNhbXBsZSBub25jZQ=="
+        )));
+        assert!(!valid_key(&HeaderValue::from_static("abc")));
+        assert!(!valid_key(&HeaderValue::from_static(
+            "dGhlIHNhbXBsZSBub25jZQ!!"
+        )));
+    }
 }

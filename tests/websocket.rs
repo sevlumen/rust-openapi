@@ -272,3 +272,149 @@ async fn an_open_websocket_does_not_hold_up_server_shutdown() {
         .expect("serve_listener did not return")
         .unwrap();
 }
+
+#[tokio::test]
+async fn an_http_1_0_handshake_is_refused() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (addr, stop, _server) = serve(app_with(|upgrade| upgrade)).await;
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(
+            b"GET /ws HTTP/1.0\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let mut out = String::new();
+    let _ = tokio::time::timeout(Duration::from_secs(3), stream.read_to_string(&mut out)).await;
+    assert!(out.contains(" 400 "), "{out}");
+    let _ = stop.send(());
+}
+
+#[tokio::test]
+async fn a_malformed_key_is_refused() {
+    let (addr, stop, _server) = serve(app_with(|upgrade| upgrade)).await;
+    let plain = plain_get(
+        addr,
+        "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: abc\r\nSec-WebSocket-Version: 13\r\n",
+    )
+    .await;
+    assert!(plain.starts_with("HTTP/1.1 400"), "{plain}");
+    let _ = stop.send(());
+}
+
+#[tokio::test]
+async fn the_servers_subprotocol_preference_wins() {
+    let (addr, stop, _server) = serve(app_with(|upgrade| upgrade.protocols(["chat", "v2"]))).await;
+    for offered in ["v2, chat", "chat, v2"] {
+        let (_client, response) = connect(addr, &[("sec-websocket-protocol", offered)])
+            .await
+            .unwrap();
+        assert_eq!(
+            response.headers().get("sec-websocket-protocol").unwrap(),
+            "chat",
+            "{offered}"
+        );
+    }
+    let _ = stop.send(());
+}
+
+#[tokio::test]
+async fn error_format_keeps_the_version_header_of_a_426() {
+    let mut app = app_with(|upgrade| upgrade);
+    app.layer(oas_rs::ErrorFormat::new(|info: &oas_rs::ErrorInfo| {
+        info.respond(serde_json::json!({ "error": info.detail }))
+    }));
+    let (addr, stop, _server) = serve(app).await;
+    let response = plain_get(
+        addr,
+        "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 8\r\n",
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 426"), "{response}");
+    assert!(
+        response
+            .to_ascii_lowercase()
+            .contains("sec-websocket-version: 13"),
+        "{response}"
+    );
+    assert!(response.contains("\"error\""), "{response}");
+    let _ = stop.send(());
+}
+
+#[tokio::test]
+async fn an_open_websocket_keeps_its_connection_slot() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut app = app_with(|upgrade| upgrade);
+    app.get("/health", health);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let runtime = app.build().unwrap().max_connections(Some(1));
+    let (stop, stopped) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let _ = runtime
+            .serve_listener(listener, async {
+                let _ = stopped.await;
+            })
+            .await;
+    });
+    let (client, _) = connect(addr, &[]).await.unwrap();
+    // The only slot belongs to the open WebSocket: a second client waits.
+    let mut second = TcpStream::connect(addr).await.unwrap();
+    second
+        .write_all(b"GET /health HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut out = String::new();
+    let waited =
+        tokio::time::timeout(Duration::from_millis(400), second.read_to_string(&mut out)).await;
+    assert!(
+        waited.is_err(),
+        "a connection over the limit was served: {out}"
+    );
+    // Closing the WebSocket frees the slot.
+    drop(client);
+    let served =
+        tokio::time::timeout(Duration::from_secs(3), second.read_to_string(&mut out)).await;
+    assert!(served.is_ok() && out.starts_with("HTTP/1.1 200"), "{out}");
+    let _ = stop.send(());
+}
+
+async fn health() -> &'static str {
+    "ok"
+}
+
+#[tokio::test]
+async fn an_idle_timeout_ends_a_silent_session() {
+    let (addr, stop, _server) = serve(app_with(|upgrade| {
+        upgrade.idle_timeout(Duration::from_millis(200))
+    }))
+    .await;
+    let (mut client, _) = connect(addr, &[]).await.unwrap();
+    let ended = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(message) = client.next().await {
+            if message.is_err() {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(ended.is_ok(), "a silent session was kept open");
+    let _ = stop.send(());
+}
+
+#[test]
+fn the_handshake_route_is_documented_as_101() {
+    let mut app = App::new();
+    app.raw(
+        Method::GET,
+        "/ws",
+        |request: Request<Incoming>| async move {
+            WebSocketUpgrade::new(request).on_upgrade(|_socket| async {})
+        },
+    );
+    let doc = app.openapi_document();
+    assert_eq!(
+        doc["paths"]["/ws"]["get"]["responses"]["101"]["description"],
+        "Switching Protocols"
+    );
+}

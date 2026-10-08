@@ -45,7 +45,10 @@ All notable changes to this project are documented here. The format follows
 - `serde_urlencoded` is now a dependency (it backs `Form`).
 - Feature `websocket`: `WebSocketUpgrade` / `WebSocket` / `Message` (handshake
   validation, origin allow-list, subprotocol negotiation, message size limit,
-  automatic pongs) over `tokio-tungstenite`.
+  automatic pongs, idle timeout) over `tokio-tungstenite`; an open session keeps
+  its `max_connections` slot.
+- `ErrorFormat` also carries `Sec-WebSocket-Version` over to its replacement.
+- `pub use bytes::Bytes` (it appears in public types).
 
 ### Changed (internal)
 - The accept loop tracks connections with a shutdown signal and a completion

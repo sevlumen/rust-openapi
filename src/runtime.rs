@@ -79,7 +79,18 @@ pub(crate) struct ConnectionRuntime<S> {
     runtime: Arc<RuntimeInner<S>>,
     /// The peer address to attach to each request (only when enabled).
     peer: Option<std::net::SocketAddr>,
+    /// The `max_connections` slot of this connection, shared with whatever
+    /// outlives the HTTP connection (an upgraded WebSocket).
+    #[cfg_attr(not(feature = "websocket"), allow(dead_code))]
+    permit: Option<Arc<ConnectionSlot>>,
 }
+
+/// The connection's slot, placed in the request extensions so a WebSocket
+/// handler can keep it for as long as the session lasts.
+#[cfg(feature = "websocket")]
+#[derive(Clone)]
+#[allow(dead_code)] // held only to keep the slot alive
+pub(crate) struct ConnectionPermit(pub(crate) Arc<ConnectionSlot>);
 
 /// The remote address of the connection a request arrived on, stored in the
 /// request extensions when [`AppRuntime::connect_info`] is on.
@@ -124,7 +135,16 @@ impl Future for PreparedDispatch {
 
 impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
     pub(crate) fn new(runtime: Arc<RuntimeInner<S>>, peer: Option<std::net::SocketAddr>) -> Self {
-        Self { runtime, peer }
+        Self {
+            runtime,
+            peer,
+            permit: None,
+        }
+    }
+
+    pub(crate) fn with_permit(mut self, permit: Option<Arc<ConnectionSlot>>) -> Self {
+        self.permit = permit;
+        self
     }
 
     pub(crate) fn runtime_ref(&self) -> RuntimeRef<'_, S> {
@@ -134,6 +154,12 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
     pub(crate) fn prepare(&self, mut request: Request<Incoming>) -> PreparedDispatch {
         if let Some(peer) = self.peer {
             request.extensions_mut().insert(PeerAddr(peer));
+        }
+        #[cfg(feature = "websocket")]
+        if let Some(permit) = &self.permit {
+            request
+                .extensions_mut()
+                .insert(ConnectionPermit(Arc::clone(permit)));
         }
         if !self
             .runtime
@@ -735,8 +761,10 @@ where
         slot,
     }) = accept_next(&listener, &mut shutdown, nodelay, limit.as_ref()).await?
     {
+        let slot = slot.map(Arc::new);
         let connection =
-            ConnectionRuntime::new(Arc::clone(&runtime), peer.filter(|_| connect_info));
+            ConnectionRuntime::new(Arc::clone(&runtime), peer.filter(|_| connect_info))
+                .with_permit(slot.clone());
         let service = hyper::service::service_fn(move |request: Request<Incoming>| {
             let prepared = connection.prepare(request);
             async move { Ok::<_, Infallible>(prepared.await) }

@@ -4,7 +4,7 @@ use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use tokio_rustls::{TlsAcceptor, rustls};
 
 use crate::runtime::{
-    Accepted, accept_next, connection_limit, http1_builder, report_connection_error,
+    Accepted, accept_next, connection_limit, drive, http1_builder, report_connection_error,
 };
 use crate::*;
 
@@ -200,8 +200,10 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         {
             let observer = observer.clone();
             let acceptor = acceptor.clone();
+            let slot = slot.map(Arc::new);
             let connection =
-                ConnectionRuntime::new(Arc::clone(&runtime), peer.filter(|_| connect_info));
+                ConnectionRuntime::new(Arc::clone(&runtime), peer.filter(|_| connect_info))
+                    .with_permit(slot.clone());
             let mut stop = signal.subscribe();
             let done = done_tx.clone();
             tokio::spawn(async move {
@@ -245,15 +247,10 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
                     if let Some(limit) = max_streams {
                         builder.max_concurrent_streams(limit);
                     }
-                    let conn = builder.serve_connection(io, service);
-                    tokio::pin!(conn);
-                    let result = tokio::select! {
-                        result = conn.as_mut() => result,
-                        _ = stop.changed() => {
-                            conn.as_mut().graceful_shutdown();
-                            conn.await
-                        }
-                    };
+                    let result = drive(builder.serve_connection(io, service), &mut stop, |conn| {
+                        conn.graceful_shutdown()
+                    })
+                    .await;
                     if let Err(error) = result {
                         report_connection_error(&observer, &error);
                     }
@@ -262,14 +259,7 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
                 let conn = http1_builder(header_read_timeout).serve_connection(io, service);
                 #[cfg(feature = "websocket")]
                 let conn = conn.with_upgrades();
-                tokio::pin!(conn);
-                let result = tokio::select! {
-                    result = conn.as_mut() => result,
-                    _ = stop.changed() => {
-                        conn.as_mut().graceful_shutdown();
-                        conn.await
-                    }
-                };
+                let result = drive(conn, &mut stop, |conn| conn.graceful_shutdown()).await;
                 if let Err(error) = result {
                     report_connection_error(&observer, &error);
                 }

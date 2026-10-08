@@ -4,7 +4,7 @@
 //! document is assembled when routes are registered and is only serialized when
 //! the explicitly registered OpenAPI endpoint is requested.
 
-use bytes::Bytes;
+pub use bytes::Bytes;
 use http::{HeaderValue, Request, Response, StatusCode, header};
 use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper::body::Incoming;

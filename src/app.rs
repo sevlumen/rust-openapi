@@ -556,6 +556,7 @@ impl<S: Send + Sync + 'static> App<S> {
                         StatusCode::NO_CONTENT => "No Content",
                         StatusCode::NOT_MODIFIED => "Not Modified",
                         StatusCode::CREATED => "Created",
+                        StatusCode::SWITCHING_PROTOCOLS => "Switching Protocols",
                         _ => "Success",
                     }
                     .to_owned(),
