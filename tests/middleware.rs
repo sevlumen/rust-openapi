@@ -129,3 +129,75 @@ async fn no_layers_behaves_as_before() {
     assert_eq!(response.status(), 200);
     assert_eq!(response.body_string().await, "hello");
 }
+
+use std::time::Duration;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::oneshot,
+};
+
+async fn serve(app: App) -> (std::net::SocketAddr, oneshot::Sender<()>) {
+    let runtime = app.build().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        runtime
+            .serve_listener(listener, async {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    (addr, tx)
+}
+
+async fn raw(addr: std::net::SocketAddr, request: &str) -> String {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut out = String::new();
+    stream.read_to_string(&mut out).await.unwrap();
+    out
+}
+
+#[tokio::test]
+async fn chain_runs_on_a_real_connection() {
+    let mut app = App::new();
+    app.get("/", hello);
+    app.layer(|request: Request<RequestBody>, next: Next| async move {
+        let mut response = next.run(request).await;
+        response
+            .headers_mut()
+            .insert("x-layer", HeaderValue::from_static("tcp"));
+        response
+    });
+    let (addr, _stop) = serve(app).await;
+    let out = raw(
+        addr,
+        "GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+    assert!(out.to_ascii_lowercase().contains("x-layer: tcp"), "{out}");
+    assert!(out.ends_with("hello"), "{out}");
+}
+
+#[tokio::test]
+async fn early_return_on_a_post_with_a_body_does_not_hang_the_connection() {
+    let mut app = App::new();
+    app.post("/", hello);
+    app.layer(|_request: Request<RequestBody>, _next: Next| async {
+        ApiError::new(http::StatusCode::UNAUTHORIZED, "Unauthorized", "no").into_response()
+    });
+    let (addr, _stop) = serve(app).await;
+    let body = "x".repeat(10_000);
+    let request = format!(
+        "POST / HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let out = tokio::time::timeout(Duration::from_secs(3), raw(addr, &request))
+        .await
+        .expect("connection hung after an early return");
+    assert!(out.starts_with("HTTP/1.1 401"), "{out}");
+}
