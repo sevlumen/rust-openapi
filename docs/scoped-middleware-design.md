@@ -57,14 +57,22 @@ app.get("/export", export).route_layer(mw);  // this route only: its path and me
   slashes, so a scope matches at least everything the router can route to
   (`//admin/x` and `/admin//x` included): a scope can never be narrower than
   routing, which would turn an auth layer into a bypass.
-- Matching uses the raw (not percent-decoded) path, like static routing. A
-  request such as `/%61dmin/x` neither matches the `/admin` scope nor a static
-  `/admin/x` route; it can only reach a top-level dynamic route such as
-  `/{section}/x`, which is not in the group. The documentation says so, and
-  recommends a global layer with explicit checks for sensitive prefixes when
-  top-level dynamic routes exist.
+- Matching compares raw segments first. A segment that contains `%` is also
+  compared after percent-decoding, because a `{capture}` route decodes its
+  segment: `/api/%61dmin/x` reaches `/api/{section}/x` as `admin` and must run
+  an `/api/admin` scope (found in review: at any depth where the router has a
+  capture and the scope has a literal, not only at the top level). Matching is
+  case-sensitive like routing; undecodable segments never match; a decoded `/`
+  makes the value differ from the literal. The scope can only be widened by the
+  decoding, never narrowed.
+- A malformed scope pattern (`{id`, `{}`, `x{id}`) panics at registration, like
+  a route template, so a typo cannot silently disable an authentication layer.
 - A route scope matches the pattern exactly (same number of segments) and the
-  method.
+  method. Because layers run before routing it cannot know which route will be
+  chosen: it also covers requests that a more specific static sibling route
+  serves (`GET /items/new` under a layer on `GET /items/{id}`), and `HEAD`
+  matches a `GET` route scope even when a `HEAD` route exists. For auth this
+  fails closed; for audit or rate limiting it can fire on the sibling.
 - `OPTIONS` (automatic preflight) does not match a method-scoped route layer;
   a prefix scope does match it.
 
@@ -102,9 +110,10 @@ test: for every path variant the router serves (`//admin/x`, `/admin//x`,
 
 ## Risks
 
-- Scope by raw path (above) can differ from the route a request finally reaches
-  when top-level dynamic routes or unusual encodings are involved; documented
-  with the mitigation.
+- Scope by path can differ from the route a request finally reaches (a
+  captured route serving a literal-looking segment, a static sibling under a
+  route scope); the matching rules above are designed so a scope is never
+  narrower than routing, and the over-application cases are documented.
 - A new public type (`Group`) with many forwarding methods must stay in step
   with `App`'s registration methods; a test lists them.
 

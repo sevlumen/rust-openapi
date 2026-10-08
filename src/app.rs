@@ -333,10 +333,17 @@ impl<S: Send + Sync + 'static> App<S> {
         self
     }
 
-    /// Scopes a layer to the last registered route: its path pattern and method
-    /// (a `HEAD` request also matches a `GET` route). Other methods on the same
-    /// path are not affected, and automatic `OPTIONS` answers do not match a
-    /// method-scoped layer. Does nothing if no route has been registered yet.
+    /// Scopes a layer to the last registered route's path **pattern** and
+    /// method (a `HEAD` request also matches a `GET` route). Layers run before
+    /// routing, so it cannot tell which route will be chosen: it also covers
+    /// requests a more specific sibling route would serve (a layer on
+    /// `GET /items/{id}` runs for `GET /items/new`), and `HEAD` matches a `GET`
+    /// route's layer even when an explicit `HEAD` route exists. Other methods on
+    /// the same path are not affected, and automatic `OPTIONS` answers do not
+    /// match a method-scoped layer.
+    ///
+    /// **Does nothing if no route has been registered yet**: call it right
+    /// after registering the route.
     pub fn route_layer(&mut self, middleware: impl Middleware) -> &mut Self {
         if let Some(index) = self.last_route {
             let metadata = &self.metadata[index];
@@ -355,8 +362,14 @@ impl<S: Send + Sync + 'static> App<S> {
     /// `prefix`, which may contain `{capture}` segments. A prefix matches whole
     /// segments (`/admin` covers `/admin` and `/admin/x`, not `/administrator`)
     /// and also covers paths with no route under it (a `404`), so an
-    /// authentication layer does not reveal which routes exist. Matching uses
-    /// the raw, undecoded path.
+    /// authentication layer does not reveal which routes exist. A segment
+    /// containing `%` is also compared percent-decoded (a `{capture}` route
+    /// decodes its segment), matching is case-sensitive, and a scope is never
+    /// narrower than what the router serves.
+    ///
+    /// # Panics
+    ///
+    /// If `prefix` is malformed (`{id`, `{}`, `x{id}`), like a route template.
     pub fn layer_for(&mut self, prefix: &str, middleware: impl Middleware) -> &mut Self {
         self.middleware.push(ScopedLayer {
             scope: Scope::Prefix(Scope::parse(prefix)),

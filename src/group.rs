@@ -2,13 +2,13 @@ use crate::*;
 
 /// Joins a group prefix and a route path without doubled or missing slashes.
 fn join(prefix: &str, path: &str) -> String {
-    let prefix = prefix.trim_end_matches('/');
-    let path = path.trim_start_matches('/');
+    let prefix = prefix.trim_matches('/');
+    let path = path.trim_matches('/');
     match (prefix.is_empty(), path.is_empty()) {
         (true, true) => "/".to_owned(),
         (true, false) => format!("/{path}"),
-        (false, true) => prefix.to_owned(),
-        (false, false) => format!("{prefix}/{path}"),
+        (false, true) => format!("/{prefix}"),
+        (false, false) => format!("/{prefix}/{path}"),
     }
 }
 
@@ -16,9 +16,10 @@ fn join(prefix: &str, path: &str) -> String {
 /// the group apply only to requests under that prefix. Obtain one with
 /// [`App::group`].
 ///
-/// Every method returns the group itself, so a chain such as
-/// `g.get("/a", h).get("/b", h2)` keeps the prefix for both routes; returning
-/// the `App` instead would silently drop the prefix for the second one.
+/// Every registration and per-route method returns the group itself, so a
+/// chain such as `g.get("/a", h).get("/b", h2)` keeps the prefix for both
+/// routes; returning the `App` instead would silently drop the prefix for the
+/// second one. (`group` returns the closure's result, like [`App::group`].)
 pub struct Group<'a, S = ()> {
     pub(crate) app: &'a mut App<S>,
     pub(crate) prefix: String,

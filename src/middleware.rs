@@ -121,13 +121,21 @@ pub(crate) enum Scope {
 }
 
 impl Scope {
+    /// Parses a scope pattern with the same rules as a route template: a
+    /// segment is either a literal or a whole `{name}`. Anything else (`{id`,
+    /// `{}`, `x{id}`) panics instead of becoming a literal that never matches,
+    /// which would silently switch an authentication layer off.
     pub(crate) fn parse(pattern: &str) -> Arc<[ScopeSegment]> {
         PathParts::new(pattern)
             .map(|part| {
-                if part.value.starts_with('{') && part.value.ends_with('}') && part.value.len() > 2
-                {
+                if part.value.starts_with('{') && part.value.ends_with('}') {
+                    assert!(part.value.len() > 2, "invalid scope pattern: {pattern:?}");
                     ScopeSegment::Any
                 } else {
+                    assert!(
+                        !part.value.contains('{') && !part.value.contains('}'),
+                        "invalid scope pattern: {pattern:?}"
+                    );
                     ScopeSegment::Literal(part.value.into())
                 }
             })
@@ -151,6 +159,14 @@ impl Scope {
     }
 }
 
+/// Whether a percent-encoded request segment decodes to the literal. A
+/// `{capture}` route decodes its segment, so `/api/%61dmin/x` can reach a
+/// `/api/{section}/x` handler as `admin`; the scope has to cover it too. Only
+/// segments containing `%` are decoded, and an undecodable one never matches.
+fn decoded_equals(segment: &str, literal: &str) -> bool {
+    segment.contains('%') && percent_decode(segment).is_ok_and(|decoded| decoded == literal)
+}
+
 /// Compares path segments with the router's own splitter (repeated slashes are
 /// ignored), so a scope matches at least everything the router can route to.
 fn segments_match(pattern: &[ScopeSegment], path: &str, exact: bool) -> bool {
@@ -161,6 +177,7 @@ fn segments_match(pattern: &[ScopeSegment], path: &str, exact: bool) -> bool {
         };
         if let ScopeSegment::Literal(literal) = segment
             && part.value != &**literal
+            && !decoded_equals(part.value, literal)
         {
             return false;
         }

@@ -354,18 +354,28 @@ app.get("/export", export).route_layer(audit);  // this route's path and method
   layer does not reveal which routes exist.
 - Segments are split like the router does (repeated slashes are ignored), so a
   scope is never narrower than routing.
-- `route_layer` matches the route's path pattern and method (a `HEAD` request
-  matches a `GET` route); other methods on the same path, and automatic
-  `OPTIONS` answers, are not affected.
+- `route_layer` is scoped by the route's path **pattern** and method, because
+  layers run before routing: it also covers requests that a more specific sibling
+  route would serve (a layer on `GET /items/{id}` runs for `GET /items/new` even
+  though `/items/new` is its own route), and a `HEAD` request matches a `GET`
+  route's layer even when an explicit `HEAD` route exists. Other methods on the
+  same path, and automatic `OPTIONS` answers, are not affected. Call it right
+  after registering the route (with no route registered it does nothing).
+- A malformed scope pattern (`/admin/{id`, `{}`, `x{id}`) panics when the layer
+  is registered, like a malformed route template, instead of silently never
+  matching.
 - Layers run in registration order, global and scoped interleaved; a scoped
   layer is skipped for requests outside its scope. A request that no layer
-  covers skips the middleware chain completely (same cost as an app without
-  middleware); a matching scoped layer costs about as much as a global one.
-- **Caveat:** matching uses the raw, undecoded path, like static routing. A
-  request such as `/%61dmin/x` does not match an `/admin` scope, and does not
-  match a static `/admin/x` route either; it can only reach a top-level dynamic
-  route such as `/{section}/x`. If you have top-level dynamic routes, protect
-  sensitive prefixes with a global layer that checks the path explicitly.
+  covers skips the middleware chain completely (nearly the same cost as an app
+  without middleware: about 7 ns per scoped layer to check its scope); a
+  matching scoped layer costs about as much as a global one.
+- Percent-encoding: a segment that contains `%` is also compared after
+  decoding, because a `{capture}` route decodes its segment (`/api/%61dmin/x`
+  reaches `/api/{section}/x` as `admin`). So an `/api/admin` scope covers that
+  request. Matching stays case-sensitive (`Admin` is a different section, like
+  in routing), a segment that does not decode never matches, and a decoded `/`
+  (`%2F`) makes the value differ from the literal. Your handler still receives
+  the decoded value, so validate it when it is security relevant.
 
 ## Installation
 

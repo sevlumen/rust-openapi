@@ -185,6 +185,8 @@ async fn odd_request_targets_never_reach_a_guarded_route_over_tcp() {
     let mut app = App::new();
     app.get("/admin/x", ok);
     app.get("/admin/{id}", ok);
+    // A top-level capture route lets `/%61dmin/x` reach a handler by decoding.
+    app.get("/{section}/x", ok);
     app.layer_for("/admin", auth);
     let runtime = app.build().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -209,6 +211,8 @@ async fn odd_request_targets_never_reach_a_guarded_route_over_tcp() {
         "/admin/%78",
         "/%61dmin/x",
         "/admin/.%2e/admin/x",
+        "http://h/admin/x",
+        "http://h//admin/x",
     ] {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         stream
@@ -433,4 +437,83 @@ async fn requests_outside_every_scope_behave_exactly_as_without_the_layer() {
 
     status(&layered, Method::GET, "/admin/users").await;
     assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+/// A percent-encoded literal segment must still match the scope, otherwise a
+/// `{capture}` route at that position (which decodes the segment) would be
+/// reachable around an authentication layer.
+#[tokio::test]
+async fn percent_encoded_segments_match_literal_scope_segments() {
+    let mut app = App::new();
+    app.get("/api/{section}/x", ok);
+    app.get("/{top}/y", ok);
+    app.layer_for("/api/admin", auth);
+    app.layer_for("/secret", auth);
+    let runtime = app.build().unwrap();
+
+    assert_eq!(status(&runtime, Method::GET, "/api/admin/x").await, 401);
+    assert_eq!(status(&runtime, Method::GET, "/api/%61dmin/x").await, 401); // %61 = a
+    assert_eq!(status(&runtime, Method::GET, "/api/%41dmin/x").await, 200); // "Admin" is another section
+    assert_eq!(status(&runtime, Method::GET, "/api/user/x").await, 200);
+    assert_eq!(status(&runtime, Method::GET, "/%73ecret/y").await, 401); // top-level capture too
+    // An undecodable sequence never panics and does not match the scope (the
+    // router itself does not serve it).
+    assert_ne!(status(&runtime, Method::GET, "/api/%zzmin/x").await, 401);
+}
+
+#[test]
+#[should_panic(expected = "invalid")]
+fn a_scope_with_an_unclosed_brace_panics_like_a_route_template() {
+    let mut app = App::new();
+    app.layer_for("/admin/{id", auth);
+}
+
+#[test]
+#[should_panic(expected = "invalid")]
+fn a_scope_with_an_empty_capture_panics() {
+    let mut app = App::new();
+    app.layer_for("/admin/{}", auth);
+}
+
+#[test]
+#[should_panic(expected = "invalid")]
+fn a_scope_with_a_partial_capture_panics() {
+    let mut app = App::new();
+    app.layer_for("/admin/x{id}", auth);
+}
+
+/// `route_layer` is scoped by the route's path *pattern* and method because
+/// layers run before routing. This pins the documented over-application.
+#[tokio::test]
+async fn route_layer_also_covers_requests_a_more_specific_sibling_would_serve() {
+    let mut app = App::new();
+    app.get("/items/{id}", ok).route_layer(auth);
+    app.get("/items/new", ok);
+    app.get("/x", ok).route_layer(auth);
+    app.head("/x", ok);
+    let runtime = app.build().unwrap();
+    // `/items/new` matches the pattern `/items/{id}`, so the layer runs even
+    // though the static sibling route serves it.
+    assert_eq!(status(&runtime, Method::GET, "/items/new").await, 401);
+    // A HEAD request matches a GET route scope even when an explicit HEAD route exists.
+    assert_eq!(status(&runtime, Method::HEAD, "/x").await, 401);
+}
+
+#[tokio::test]
+async fn a_group_prefix_without_a_leading_slash_still_registers_reachable_routes() {
+    let mut app = App::new();
+    app.group("admin", |g| {
+        g.layer(auth);
+        g.get("x", ok);
+        g.group("v1", |g| {
+            g.get("/y", ok);
+        });
+    });
+    let runtime = app.build().unwrap();
+    assert_eq!(status(&runtime, Method::GET, "/admin/x").await, 401);
+    assert_eq!(status(&runtime, Method::GET, "/admin/v1/y").await, 401);
+    let with_token = runtime
+        .oneshot(Method::GET, "/admin/x", &[("x-token", "yes")], None)
+        .await;
+    assert_eq!(with_token.status(), 200);
 }
