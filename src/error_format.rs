@@ -69,7 +69,12 @@ impl Middleware for ErrorFormat {
                 return response;
             };
             let mut mapped = hook(&info);
-            for name in [header::ALLOW, header::WWW_AUTHENTICATE, header::RETRY_AFTER] {
+            for name in [
+                header::ALLOW,
+                header::WWW_AUTHENTICATE,
+                header::RETRY_AFTER,
+                header::HeaderName::from_static("sec-websocket-version"),
+            ] {
                 if let Some(value) = response.headers().get(&name)
                     && !mapped.headers().contains_key(&name)
                 {
