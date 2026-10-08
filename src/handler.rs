@@ -131,6 +131,14 @@ pub trait Handler<S, Args>: Send + Sync + 'static {
         OpenApiRequest::default()
     }
 
+    /// Like [`openapi_request`](Self::openapi_request), but named schemas go
+    /// into `registry` and are referenced with `$ref`. Override it when you
+    /// override `openapi_request` and want `$ref`s.
+    fn openapi_request_with(registry: &mut SchemaRegistry) -> OpenApiRequest {
+        let _ = registry;
+        Self::openapi_request()
+    }
+
     fn call(&self, request: &mut Request<Bytes>, params: &Params, state: &Arc<S>) -> HandlerFuture;
 
     fn zero_handler(&self) -> Option<ErasedZeroHandler> {
@@ -213,6 +221,10 @@ where
         E1::openapi_request()
     }
 
+    fn openapi_request_with(registry: &mut SchemaRegistry) -> OpenApiRequest {
+        E1::openapi_request_with(registry)
+    }
+
     fn call(&self, request: &mut Request<Bytes>, params: &Params, state: &Arc<S>) -> HandlerFuture {
         let value = match E1::from_request(request, params, state) {
             Ok(value) => value,
@@ -250,6 +262,12 @@ macro_rules! impl_extractor_handler {
             fn openapi_request() -> OpenApiRequest {
                 let mut metadata = <$first as FromRequest<S>>::openapi_request();
                 $(metadata.merge(<$rest as FromRequest<S>>::openapi_request());)*
+                metadata
+            }
+
+            fn openapi_request_with(registry: &mut SchemaRegistry) -> OpenApiRequest {
+                let mut metadata = <$first as FromRequest<S>>::openapi_request_with(registry);
+                $(metadata.merge(<$rest as FromRequest<S>>::openapi_request_with(registry));)*
                 metadata
             }
 

@@ -4,7 +4,102 @@ use crate::*;
 /// reflection. Applications can implement this trait for their own scalar
 /// path types.
 pub trait ApiSchema {
+    /// The complete, self-contained schema (nested types inlined).
     fn schema() -> Value;
+
+    /// The schema for use inside an OpenAPI document: a type that has a name
+    /// registers its definition with `registry` and returns a `$ref` to it.
+    /// The default returns [`schema`](Self::schema), so a hand-written impl
+    /// keeps being inlined.
+    ///
+    /// A wrapper type (`Box`, a map, your own `Page<T>`) must forward to the
+    /// inner type's `schema_with`, not `schema()`: calling `schema()` expands
+    /// the inner type in place, which duplicates it in the document and never
+    /// terminates for a type that contains itself.
+    fn schema_with(registry: &mut SchemaRegistry) -> Value {
+        let _ = registry;
+        Self::schema()
+    }
+}
+
+/// Collects the named schemas of an OpenAPI document (`components.schemas`).
+///
+/// Used by `#[derive(ApiSchema)]`; a hand-written [`ApiSchema`] impl can call
+/// [`define`](Self::define) from its own `schema_with` to get a `$ref` too.
+pub struct SchemaRegistry {
+    inline: bool,
+    definitions: std::collections::BTreeMap<String, Value>,
+    owners: HashMap<String, &'static str>,
+    conflicts: Vec<String>,
+    /// Types being inlined right now (recursion guard in inline mode).
+    stack: Vec<&'static str>,
+}
+
+impl SchemaRegistry {
+    pub(crate) fn document() -> Self {
+        Self {
+            inline: false,
+            definitions: Default::default(),
+            owners: HashMap::new(),
+            conflicts: Vec::new(),
+            stack: Vec::new(),
+        }
+    }
+
+    /// A registry that never produces `$ref`s: every type is expanded in
+    /// place. A type that contains itself is cut off with a plain object.
+    pub fn inline() -> Self {
+        Self {
+            inline: true,
+            ..Self::document()
+        }
+    }
+
+    /// Returns the schema for type `T` under `name`. In a document registry
+    /// it records `build`'s result once and returns a `$ref`; a second,
+    /// different type with the same name is reported as a conflict. Types are
+    /// told apart by `std::any::type_name`, and `name` should consist of
+    /// letters, digits, `.`, `-` and `_` (OpenAPI component names).
+    pub fn define<T: ?Sized>(
+        &mut self,
+        name: &str,
+        build: impl FnOnce(&mut SchemaRegistry) -> Value,
+    ) -> Value {
+        let owner = std::any::type_name::<T>();
+        if self.inline {
+            if self.stack.contains(&owner) {
+                return json!({ "type": "object" });
+            }
+            self.stack.push(owner);
+            let schema = build(self);
+            self.stack.pop();
+            return schema;
+        }
+        match self.owners.get(name) {
+            Some(existing) if *existing != owner => {
+                if !self.conflicts.iter().any(|conflict| conflict == name) {
+                    self.conflicts.push(name.to_owned());
+                }
+            }
+            Some(_) => {}
+            None => {
+                self.owners.insert(name.to_owned(), owner);
+                // `owners` above already stops a type that contains itself.
+                self.definitions.insert(name.to_owned(), Value::Null);
+                let schema = build(self);
+                self.definitions.insert(name.to_owned(), schema);
+            }
+        }
+        json!({ "$ref": format!("#/components/schemas/{name}") })
+    }
+
+    pub(crate) fn definitions(&self) -> &std::collections::BTreeMap<String, Value> {
+        &self.definitions
+    }
+
+    pub(crate) fn conflicts(&self) -> &[String] {
+        &self.conflicts
+    }
 }
 
 #[doc(hidden)]
@@ -87,17 +182,29 @@ impl<T: ApiSchema> ApiSchema for Option<T> {
     fn schema() -> Value {
         T::schema()
     }
+
+    fn schema_with(registry: &mut SchemaRegistry) -> Value {
+        T::schema_with(registry)
+    }
 }
 
 impl<T: ApiSchema> ApiSchema for Vec<T> {
     fn schema() -> Value {
         json!({ "type": "array", "items": T::schema() })
     }
+
+    fn schema_with(registry: &mut SchemaRegistry) -> Value {
+        json!({ "type": "array", "items": T::schema_with(registry) })
+    }
 }
 
 impl<T: ApiSchema + ?Sized> ApiSchema for &T {
     fn schema() -> Value {
         T::schema()
+    }
+
+    fn schema_with(registry: &mut SchemaRegistry) -> Value {
+        T::schema_with(registry)
     }
 }
 
@@ -132,17 +239,29 @@ impl<T: ApiSchema + ?Sized> ApiSchema for Box<T> {
     fn schema() -> Value {
         T::schema()
     }
+
+    fn schema_with(registry: &mut SchemaRegistry) -> Value {
+        T::schema_with(registry)
+    }
 }
 
 impl<V: ApiSchema> ApiSchema for std::collections::HashMap<String, V> {
     fn schema() -> Value {
         json!({ "type": "object", "additionalProperties": V::schema() })
     }
+
+    fn schema_with(registry: &mut SchemaRegistry) -> Value {
+        json!({ "type": "object", "additionalProperties": V::schema_with(registry) })
+    }
 }
 
 impl<V: ApiSchema> ApiSchema for std::collections::BTreeMap<String, V> {
     fn schema() -> Value {
         json!({ "type": "object", "additionalProperties": V::schema() })
+    }
+
+    fn schema_with(registry: &mut SchemaRegistry) -> Value {
+        json!({ "type": "object", "additionalProperties": V::schema_with(registry) })
     }
 }
 

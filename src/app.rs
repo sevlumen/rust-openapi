@@ -13,6 +13,8 @@ pub struct App<S = ()> {
     pub(crate) openapi_bytes: Option<Bytes>,
     pub(crate) route_error: Option<BuildError>,
     pub(crate) middleware: Vec<ScopedLayer>,
+    /// Named schemas of the routes registered so far (`components.schemas`).
+    pub(crate) schemas: SchemaRegistry,
     #[cfg(any(test, feature = "swagger"))]
     pub(crate) swagger_config: Option<SwaggerConfig>,
     #[cfg(any(test, feature = "swagger"))]
@@ -33,6 +35,7 @@ impl App<()> {
             openapi_bytes: None,
             route_error: None,
             middleware: Vec::new(),
+            schemas: SchemaRegistry::document(),
             #[cfg(any(test, feature = "swagger"))]
             swagger_config: None,
             #[cfg(any(test, feature = "swagger"))]
@@ -57,6 +60,7 @@ impl App<()> {
             openapi_bytes: self.openapi_bytes,
             route_error: self.route_error,
             middleware: self.middleware,
+            schemas: SchemaRegistry::document(),
             #[cfg(any(test, feature = "swagger"))]
             swagger_config: self.swagger_config,
             #[cfg(any(test, feature = "swagger"))]
@@ -156,6 +160,31 @@ impl<S: Send + Sync + 'static> App<S> {
     /// registration methods remain available on the builder type.
     /// Every scheme referenced by the document defaults or a route must have
     /// been declared; otherwise Swagger UI's Authorize button would be broken.
+    fn validate_schemas(&self) -> Result<(), BuildError> {
+        if let Some(name) = self.schemas.conflicts().first() {
+            return Err(BuildError::SchemaNameConflict { name: name.clone() });
+        }
+        let documents_errors = self
+            .openapi_config
+            .as_ref()
+            .is_none_or(|config| config.document_errors);
+        let default_secured = self
+            .openapi_config
+            .as_ref()
+            .is_some_and(|config| !config.default_security.is_empty());
+        if documents_errors
+            && self.schemas.definitions().contains_key("Problem")
+            && self.metadata.iter().any(|metadata| {
+                !metadata.builtin && !framework_errors(metadata, default_secured).is_empty()
+            })
+        {
+            return Err(BuildError::SchemaNameConflict {
+                name: "Problem".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     fn validate_security(&self) -> Result<(), BuildError> {
         let Some(config) = &self.openapi_config else {
             return Ok(());
@@ -183,6 +212,7 @@ impl<S: Send + Sync + 'static> App<S> {
         if let Some(error) = self.route_error.take() {
             return Err(error);
         }
+        self.validate_schemas()?;
         self.validate_security()?;
         self.prepare_openapi();
         #[cfg(any(test, feature = "swagger"))]
@@ -537,34 +567,13 @@ impl<S: Send + Sync + 'static> App<S> {
             let mut responses = Map::new();
             responses.insert(status, Value::Object(response));
             if document_errors {
-                let has_input = !metadata.operation.request.parameters.is_empty()
-                    || metadata.operation.request.request_body.is_some()
-                    || metadata
-                        .segments
-                        .iter()
-                        .any(|segment| matches!(segment, Segment::Capture(_)));
-                let mut errors: Vec<(&str, &str)> = Vec::new();
-                if has_input {
-                    errors.push(("400", "Bad Request"));
-                }
-                if metadata.operation.request.request_body.is_some() {
-                    errors.push(("413", "Payload Too Large"));
-                }
-                let secured = match &metadata.operation.security {
-                    Some(requirements) => !requirements.is_empty(),
-                    None => default_secured,
-                };
-                if secured {
-                    errors.push(("401", "Unauthorized"));
-                }
-                errors.sort();
-                for (code, description) in errors {
+                for (code, description) in framework_errors(metadata, default_secured) {
                     uses_problem = true;
                     responses.insert(
                         code.to_owned(),
                         json!({
                             "description": description,
-                            "content": { "application/problem+json": {
+                            "content": { "application/json": {
                                 "schema": { "$ref": PROBLEM_REF }
                             } }
                         }),
@@ -600,8 +609,19 @@ impl<S: Send + Sync + 'static> App<S> {
             "paths": paths,
         });
         let mut components = Map::new();
+        let mut schemas: Map<String, Value> = self
+            .schemas
+            .definitions()
+            .iter()
+            .map(|(name, schema)| (name.clone(), schema.clone()))
+            .collect();
         if uses_problem {
-            components.insert("schemas".to_owned(), json!({ "Problem": problem_schema() }));
+            schemas
+                .entry("Problem".to_owned())
+                .or_insert_with(problem_schema);
+        }
+        if !schemas.is_empty() {
+            components.insert("schemas".to_owned(), Value::Object(schemas));
         }
         if let Some(config) = config {
             if !config.security_schemes.is_empty() {
@@ -824,8 +844,10 @@ impl<S: Send + Sync + 'static> App<S> {
                 operation_id: None,
                 security: None,
                 response_status: <H::Response as ResponseMetadata>::status_code(),
-                response_schema: <H::Response as ResponseMetadata>::response_schema(),
-                request: H::openapi_request(),
+                response_schema: <H::Response as ResponseMetadata>::response_schema_with(
+                    &mut self.schemas,
+                ),
+                request: H::openapi_request_with(&mut self.schemas),
             },
         });
         self.openapi_bytes = None;
@@ -878,7 +900,9 @@ impl<S: Send + Sync + 'static> App<S> {
                 operation_id: None,
                 security: None,
                 response_status: <H::Response as ResponseMetadata>::status_code(),
-                response_schema: <H::Response as ResponseMetadata>::response_schema(),
+                response_schema: <H::Response as ResponseMetadata>::response_schema_with(
+                    &mut self.schemas,
+                ),
                 request: OpenApiRequest::default(),
             },
         });
@@ -1078,6 +1102,38 @@ pub(crate) struct Operation {
     pub(crate) security: Option<Vec<Vec<String>>>,
 }
 
+/// The error responses the framework itself can produce for a route, from
+/// what the route declares: `400` for typed parameters or a JSON body, `413`
+/// and `415` for a body, `401` for declared security (not for a layer that
+/// enforces it without `.security(..)`). Raw routes and custom extractors
+/// declare nothing, so they get none.
+fn framework_errors(
+    metadata: &RouteMetadata,
+    default_secured: bool,
+) -> Vec<(&'static str, &'static str)> {
+    let request = &metadata.operation.request;
+    let mut errors = Vec::new();
+    if !request.parameters.is_empty()
+        || !request.path_schemas.is_empty()
+        || request.request_body.is_some()
+    {
+        errors.push(("400", "Bad Request"));
+    }
+    if request.request_body.is_some() {
+        errors.push(("413", "Payload Too Large"));
+        errors.push(("415", "Unsupported Media Type"));
+    }
+    let secured = match &metadata.operation.security {
+        Some(requirements) => !requirements.is_empty(),
+        None => default_secured,
+    };
+    if secured {
+        errors.push(("401", "Unauthorized"));
+    }
+    errors.sort();
+    errors
+}
+
 const PROBLEM_REF: &str = "#/components/schemas/Problem";
 
 /// The body of every error the framework produces (see `ApiError`).
@@ -1086,7 +1142,7 @@ fn problem_schema() -> Value {
         "type": "object",
         "required": ["type", "title", "status", "detail"],
         "properties": {
-            "type": { "type": "string", "example": "about:blank" },
+            "type": { "type": "string", "examples": ["about:blank"] },
             "title": { "type": "string" },
             "status": { "type": "integer" },
             "detail": { "type": "string" }

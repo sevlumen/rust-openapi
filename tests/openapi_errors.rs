@@ -28,8 +28,7 @@ fn document(configure: impl FnOnce(&mut App)) -> Value {
 const PROBLEM_REF: &str = "#/components/schemas/Problem";
 
 fn error_ref(doc: &Value, path: &str, method: &str, status: &str) -> Option<Value> {
-    doc["paths"][path][method]["responses"][status]["content"]["application/problem+json"]["schema"]
-        ["$ref"]
+    doc["paths"][path][method]["responses"][status]["content"]["application/json"]["schema"]["$ref"]
         .as_str()
         .map(|reference| json!(reference))
 }
@@ -116,4 +115,78 @@ fn error_documentation_can_be_turned_off() {
         .unwrap();
     assert_eq!(responses.keys().collect::<Vec<_>>(), ["200"]);
     assert!(doc["components"]["schemas"].get("Problem").is_none());
+}
+
+#[test]
+fn a_path_capture_without_an_extractor_documents_no_400() {
+    let doc = document(|app| {
+        app.get("/items/{id}", plain);
+    });
+    assert!(doc["paths"]["/items/{id}"]["get"]["responses"]["400"].is_null());
+    assert!(doc.get("components").is_none());
+}
+
+#[test]
+fn body_routes_document_415() {
+    let doc = document(|app| {
+        app.post("/items", create);
+    });
+    assert!(doc["paths"]["/items"]["post"]["responses"]["415"].is_object());
+}
+
+#[tokio::test]
+async fn documented_media_type_matches_what_the_server_sends() {
+    let mut app = App::new();
+    app.post("/items", create);
+    let doc = app.openapi_document();
+    let runtime = app.build().unwrap();
+    for (status, body, content_type) in [
+        ("400", Some("{bad"), "application/json"),
+        ("415", Some("{}"), "text/plain"),
+    ] {
+        let response = runtime
+            .oneshot(
+                oas_rs::Method::POST,
+                "/items",
+                &[("content-type", content_type)],
+                body.map(|text| bytes::Bytes::from_static(text.as_bytes())),
+            )
+            .await;
+        assert_eq!(response.status().as_u16().to_string(), status);
+        let sent = response.header("content-type").unwrap().to_owned();
+        let documented = doc["paths"]["/items"]["post"]["responses"][status]["content"]
+            .as_object()
+            .unwrap();
+        assert!(documented.contains_key(&sent), "{status}: {sent}");
+    }
+}
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+struct Problem {
+    mine: String,
+}
+
+async fn my_problem() -> Json<Problem> {
+    unreachable!()
+}
+
+#[test]
+fn a_user_type_named_problem_only_conflicts_when_errors_are_documented() {
+    let mut quiet = App::new();
+    quiet.get("/p", my_problem);
+    assert!(quiet.build().is_ok(), "no route documents framework errors");
+
+    let mut noisy = App::new();
+    noisy.get("/p", my_problem);
+    noisy.post("/items", create);
+    assert!(matches!(
+        noisy.build().err(),
+        Some(oas_rs::BuildError::SchemaNameConflict { .. })
+    ));
+
+    let mut off = App::new();
+    off.openapi().document_errors(false);
+    off.get("/p", my_problem);
+    off.post("/items", create);
+    assert!(off.build().is_ok());
 }

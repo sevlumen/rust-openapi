@@ -44,6 +44,13 @@ pub enum BuildError {
     UnknownSecurityScheme {
         name: String,
     },
+    /// Two different types produce the same schema name (for example two
+    /// structs called `Item` in different modules, or a type called
+    /// `Problem` while error documentation is on). Rename one with
+    /// `#[api_schema(name = "...")]`.
+    SchemaNameConflict {
+        name: String,
+    },
 }
 
 impl Display for BuildError {
@@ -62,6 +69,11 @@ impl Display for BuildError {
             } => write!(
                 formatter,
                 "route {path} has {captures} path captures; the maximum is {max}"
+            ),
+            Self::SchemaNameConflict { name } => write!(
+                formatter,
+                "two different types are named `{name}` in the OpenAPI schemas; \
+                 rename one with #[api_schema(name = \"...\")]"
             ),
             Self::UnknownSecurityScheme { name } => {
                 write!(formatter, "security scheme {name:?} is not declared")

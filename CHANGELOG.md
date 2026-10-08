@@ -22,7 +22,19 @@ All notable changes to this project are documented here. The format follows
   per-connection stream cap (Hyper's default is 200); streams over it are
   refused with `REFUSED_STREAM`.
 
+- Named schemas go under `components.schemas` and are referenced with `$ref`:
+  `ApiSchema::schema_with(&mut SchemaRegistry)` (default: `schema()`),
+  `SchemaRegistry`, `#[api_schema(name = "...")]` and
+  `BuildError::SchemaNameConflict`. Hand-written `ApiSchema` impls keep
+  working and stay inline.
+- Routes document the errors the framework returns (`400`, `413`, `415`, `401`) with
+  a shared `Problem` schema; `OpenApiOptions::document_errors(false)` turns it
+  off.
+
 ### Changed
+- **OpenAPI document shape:** schemas of derived types are `$ref`s into
+  `components.schemas` instead of inline objects, and error responses are
+  added. Clients that compare the document byte for byte will see a change.
 - **Behavior:** a client now has 30 seconds to send a complete request head,
   and an idle keep-alive connection is closed after the same time. Call
   `header_read_timeout(None)` to keep the old behavior.

@@ -10,6 +10,13 @@ pub trait FromRequest<S>: Sized + Send + 'static {
         OpenApiRequest::default()
     }
 
+    /// Like [`openapi_request`](Self::openapi_request), but named schemas go
+    /// into `registry` and are referenced with `$ref`.
+    fn openapi_request_with(registry: &mut SchemaRegistry) -> OpenApiRequest {
+        let _ = registry;
+        Self::openapi_request()
+    }
+
     fn from_request(
         request: &mut Request<Bytes>,
         params: &Params,
@@ -90,12 +97,16 @@ where
     const NEEDS_BODY: bool = true;
 
     fn openapi_request() -> OpenApiRequest {
+        <Self as FromRequest<S>>::openapi_request_with(&mut SchemaRegistry::inline())
+    }
+
+    fn openapi_request_with(registry: &mut SchemaRegistry) -> OpenApiRequest {
         OpenApiRequest {
             request_body: Some(json!({
                 "required": true,
                 "content": {
                     "application/json": {
-                        "schema": T::schema()
+                        "schema": T::schema_with(registry)
                     }
                 }
             })),
@@ -186,7 +197,11 @@ where
     const NEEDS_BODY: bool = T::NEEDS_BODY;
 
     fn openapi_request() -> OpenApiRequest {
-        let mut metadata = T::openapi_request();
+        <Self as FromRequest<S>>::openapi_request_with(&mut SchemaRegistry::inline())
+    }
+
+    fn openapi_request_with(registry: &mut SchemaRegistry) -> OpenApiRequest {
+        let mut metadata = T::openapi_request_with(registry);
         for parameter in &mut metadata.parameters {
             if let Some(object) = parameter.as_object_mut() {
                 object.insert("required".to_owned(), Value::Bool(false));
