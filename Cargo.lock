@@ -448,7 +448,7 @@ dependencies = [
 
 [[package]]
 name = "oas-rs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "futures-core",
@@ -471,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "oas-rs-macros"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quote",
  "syn 2.0.119",

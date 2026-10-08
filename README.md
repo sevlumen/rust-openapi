@@ -2,7 +2,7 @@
 
 Typed HTTP routing on Hyper + Tokio with startup-generated OpenAPI 3.1
 metadata. The V1 release line is Cargo `0.1.0`; the public API and HTTP
-semantics follow semver within the `0.2` line. Licensed under the MIT License.
+semantics follow semver within the `0.3` line. Licensed under the MIT License.
 
 ## Quick start
 
@@ -290,7 +290,7 @@ status and elapsed time of every request.
 
 ```toml
 [dependencies]
-oas-rs = "0.2"
+oas-rs = "0.3"
 ```
 
 Enable optional features as needed: `swagger` (Swagger UI), `uuid` (UUID
