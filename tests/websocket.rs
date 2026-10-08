@@ -150,8 +150,7 @@ async fn only_allowed_origins_may_connect_when_a_list_is_set() {
     .await;
     let denied = connect(addr, &[("origin", "https://evil.example")])
         .await
-        .err()
-        .expect("a foreign origin must be refused");
+        .expect_err("a foreign origin must be refused");
     match denied {
         tungstenite::Error::Http(response) => assert_eq!(response.status(), 403),
         other => panic!("unexpected error: {other:?}"),
@@ -251,8 +250,7 @@ async fn layers_run_before_the_upgrade() {
     let (addr, stop, _server) = serve(app).await;
     let denied = connect(addr, &[])
         .await
-        .err()
-        .expect("authentication must run first");
+        .expect_err("authentication must run first");
     match denied {
         tungstenite::Error::Http(response) => assert_eq!(response.status(), 401),
         other => panic!("unexpected error: {other:?}"),
