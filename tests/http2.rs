@@ -289,3 +289,36 @@ async fn middleware_runs_over_h2() {
     let (status, _, body) = text(sender.send_request(request).await.unwrap()).await;
     assert_eq!((status, body.as_str()), (200, "hello"));
 }
+
+#[tokio::test]
+async fn shutdown_lets_an_in_flight_h2_stream_finish() {
+    let mut app = App::new();
+    app.get("/slow", slow);
+    let mut server = start(app, true).await;
+    let mut sender = h2_client(&server).await;
+    let request =
+        tokio::spawn(async move { text(sender.send_request(get("/slow")).await.unwrap()).await });
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let shutdown_at = Instant::now();
+    server.stop.take().unwrap().send(()).unwrap();
+    let (status, _, body) = request.await.unwrap();
+    assert_eq!((status, body.as_str()), (200, "done"));
+    let returned_at = server.done.await.unwrap();
+    assert!(returned_at.duration_since(shutdown_at) >= Duration::from_millis(100));
+}
+
+#[tokio::test]
+async fn an_idle_h2_connection_does_not_block_shutdown() {
+    let mut server = start(app_with_hello(), true).await;
+    let mut sender = h2_client(&server).await;
+    let (status, _, _) = text(sender.send_request(get("/")).await.unwrap()).await;
+    assert_eq!(status, 200);
+    let shutdown_at = Instant::now();
+    server.stop.take().unwrap().send(()).unwrap();
+    let returned_at = tokio::time::timeout(Duration::from_secs(5), server.done)
+        .await
+        .expect("an idle h2 connection blocked shutdown")
+        .unwrap();
+    assert!(returned_at.duration_since(shutdown_at) < Duration::from_secs(2));
+    drop(sender);
+}
