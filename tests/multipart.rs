@@ -342,3 +342,17 @@ async fn upload_over_a_real_tcp_connection() {
     );
     let _ = stop.send(());
 }
+
+#[test]
+fn multipart_routes_document_a_multipart_request_body() {
+    let mut app = App::new();
+    app.openapi().title("t").version("1");
+    app.post("/firmwares", summarize);
+    let doc = app.openapi_document();
+    let body = &doc["paths"]["/firmwares"]["post"]["requestBody"];
+    assert_eq!(body["required"], true);
+    assert_eq!(
+        body["content"]["multipart/form-data"]["schema"]["additionalProperties"]["format"],
+        "binary"
+    );
+}
