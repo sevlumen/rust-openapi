@@ -37,8 +37,7 @@ fn loads_a_pem_pair_from_files() {
 fn rejects_a_mismatched_key_and_certificate() {
     let (a, b) = (identity(), identity());
     let error: TlsError = TlsConfig::from_pem(a.cert_pem.as_bytes(), b.key_pem.as_bytes())
-        .err()
-        .expect("mismatched pair must be rejected");
+        .expect_err("mismatched pair must be rejected");
     assert!(!error.to_string().is_empty());
 }
 

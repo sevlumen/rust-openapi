@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `serve_tls`, `TlsConfig` (`from_pem`, `from_pem_files`), `TlsError` and
+  `AppRuntime::handshake_timeout` behind the new `tls` feature (`tokio-rustls`
+  with the `ring` provider; HTTP/1.1, TLS 1.2/1.3).
 - `App::body_limit` overrides the body-size limit of one route
   (`max_body_size` remains global and now says so).
 - `Multipart` / `Field` extractor for `multipart/form-data` behind the new

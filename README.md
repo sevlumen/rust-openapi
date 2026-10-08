@@ -160,6 +160,40 @@ an alternative (logical OR). Referencing a scheme that was never declared makes
 `security_scheme(name, SecurityScheme::...)` (`bearer_with_format("JWT")`,
 `basic()`, `api_key(...)`).
 
+## TLS
+
+Enable the `tls` feature to serve HTTPS directly, with a pure-Rust stack
+(`rustls` with the `ring` crypto provider; no OpenSSL or C toolchain):
+
+```rust
+use oas_rs::TlsConfig;
+use std::time::Duration;
+
+let tls = TlsConfig::from_pem_files("cert.pem", "key.pem")?; // or TlsConfig::from_pem(cert_bytes, key_bytes)
+let runtime = app
+    .build()?
+    .handshake_timeout(Duration::from_secs(10)) // default 10 s
+    .shutdown_timeout(Duration::from_secs(30)); // default 30 s
+let listener = tokio::net::TcpListener::bind("0.0.0.0:8443").await?;
+runtime
+    .serve_tls(listener, tls, async { tokio::signal::ctrl_c().await.ok(); })
+    .await?;
+```
+
+- The certificate file may contain a chain; the private key may be PKCS#8,
+  PKCS#1 or SEC1 PEM (parsed by `rustls-pki-types`). A missing file, malformed
+  PEM or a key that does not match the certificate returns a `TlsError`.
+- TLS 1.2 and 1.3 with rustls' safe defaults; HTTP/1.1 only (no HTTP/2/ALPN
+  negotiation) and no client certificates.
+- The handshake runs per connection, so a slow client never blocks accepting
+  others, and a failed or timed-out handshake closes only that connection.
+- Shutdown behaves like `serve_listener`: stop accepting, let in-flight
+  requests finish, bounded by `shutdown_timeout`; idle keep-alive connections
+  are closed and half-finished handshakes are dropped.
+- On a loopback benchmark, steady-state TLS throughput was about 9% below plain
+  TCP; with short connections the handshake dominates (see
+  `docs/tls-design.md`). Reuse connections where you can.
+
 ## Multipart uploads
 
 Enable the `multipart` feature to accept `multipart/form-data` (for example
@@ -289,7 +323,7 @@ benchmark on your own hardware for absolute values.
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --features 'uuid test-util swagger multipart'
+cargo test --workspace --all-targets --features 'uuid test-util swagger multipart tls'
 cargo test --doc --workspace
 cargo build --workspace --examples --features 'uuid swagger'
 ```
