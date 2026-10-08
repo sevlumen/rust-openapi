@@ -76,3 +76,7 @@ required-features = ["uuid", "swagger"]
 [[test]]
 name = "middleware"
 required-features = ["test-util"]
+
+[[test]]
+name = "body_limit"
+required-features = ["test-util"]

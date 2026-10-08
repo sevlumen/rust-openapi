@@ -96,8 +96,9 @@ let mut app = App::new().with_state(Database::new());
 app.get("/users/{id}", get_user);
 ```
 
-Buffered JSON/body extractors have a default 1 MiB limit. Configure it with
-`app.max_body_size(bytes)` before route registration. Raw handlers receive
+Buffered JSON/body extractors have a default 1 MiB limit. `app.max_body_size(bytes)`
+changes it for every buffered route; `app.post(...).body_limit(bytes)` overrides
+it for the route just registered. Raw handlers receive
 Hyper's streaming `Incoming` body directly and own their upload limit and
 cancellation policy.
 
