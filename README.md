@@ -55,6 +55,20 @@ runtime.listen("0.0.0.0:8080").await?;
 `AppRuntime::serve_listener` accepts an already-bound Tokio listener and a
 shutdown future. The default OpenAPI endpoint is `/openapi.json`.
 
+### Graceful shutdown
+
+When the shutdown future completes, the server stops accepting connections,
+closes idle keep-alive connections, and waits for in-flight requests to finish
+before `serve_listener` returns. The wait is bounded by
+`AppRuntime::shutdown_timeout` (default 30 seconds); connections still busy
+after that are abandoned. Transient `accept` errors (aborted connections,
+out of file descriptors) no longer stop the server.
+
+```rust
+let runtime = app.build()?.shutdown_timeout(std::time::Duration::from_secs(10));
+runtime.serve_listener(listener, async { tokio::signal::ctrl_c().await.ok(); }).await?;
+```
+
 ## Routing
 
 Use `get`, `post`, `put`, `patch`, `delete`, `head`, and `options`. Static

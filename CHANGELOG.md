@@ -5,6 +5,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Graceful shutdown: `serve_listener` waits for in-flight requests after the
+  shutdown signal, bounded by `AppRuntime::shutdown_timeout` (default 30 s).
+
+### Fixed
+- A transient `accept` error (for example `EMFILE`) no longer terminates the
+  whole server.
+
 ## [0.1.0] - 2026-10-08
 
 First public release.
