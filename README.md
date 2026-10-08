@@ -365,9 +365,53 @@ app.post("/firmwares", upload)
   path without sanitizing it.
 - Drop (or consume with `bytes()`/`text()`) the previous `Field` before calling
   `next_field()` again; holding it is a handler bug and returns `500`.
-- Uploads are buffered, not streamed: budget about 3x the route's `body_limit`
-  of memory per concurrent upload. For very large files use a raw handler.
+- Uploads through the `Multipart` extractor are buffered: budget about 3x the
+  route's `body_limit` of memory per concurrent upload. For large files stream
+  instead (below).
 - The route is documented in OpenAPI as a `multipart/form-data` request body.
+  Add the fields with `.multipart_fields([MultipartField::file("firmware")
+  .required().content_type("application/octet-stream"),
+  MultipartField::text("version").required()])` (it documents only; it does
+  not validate).
+
+### Streaming uploads
+
+A raw handler gets the connection's body unbuffered; `Multipart::from_stream`
+turns it into a `Multipart` whose parts are read as they arrive, so memory is
+about one chunk however large the file (for a well-formed body; a body that
+never reaches a boundary, or whose part headers never end, is refused with
+`400` after 256 KiB rather than buffered):
+
+```rust
+use hyper::body::Incoming;
+
+app.raw(Method::POST, "/videos", |request: Request<Incoming>| async move {
+    let mut form = Multipart::from_stream(request, 2 * 1024 * 1024 * 1024)?; // 2 GiB
+    let mut total = 0;
+    while let Some(mut field) = form.next_field().await? {
+        while let Some(chunk) = field.chunk().await? {
+            total += chunk.len(); // write `chunk` to a file instead
+        }
+    }
+    Ok::<_, ApiError>(total.to_string())
+})
+.multipart_fields([MultipartField::file("video").required()]);
+```
+
+The limit is yours to choose (raw routes have no `body_limit`): a larger
+declared `Content-Length` is refused with `413` before reading, and a chunked
+body is cut off with `413` as soon as it passes the limit. Authentication
+layers run before the handler, so register them first.
+
+- An early answer (any `?` above) ends the connection. A client that is still
+  sending usually sees a reset instead of the `413`/`400`; clients that send
+  `Expect: 100-continue` (curl does for large bodies) read it reliably.
+- There is no body read timeout: wrap `next_field()` and `chunk()` in
+  `tokio::time::timeout`, otherwise a stalled upload holds its connection (and a
+  `max_connections` slot) indefinitely.
+- Streamed `Field::text` decodes UTF-8; the buffered extractor honours the
+  part's `charset`.
+- `oneshot` cannot call raw routes: test them over `serve_listener`.
 
 ## Middleware
 
@@ -615,8 +659,7 @@ version) before committing.
 
 ## Roadmap
 
-Planned: streaming multipart uploads, documented multipart fields, h2c and
-other listener options, brotli/zstd compression, and the full HTTP
+Planned: h2c and other listener options, brotli/zstd compression, and the full HTTP
 acceptance benchmark matrix.
 
 ## Contributing and license
