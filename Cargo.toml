@@ -19,6 +19,7 @@ default = []
 uuid = ["dep:uuid"]
 test-util = []
 swagger = []
+multipart = ["dep:multer"]
 
 [lib]
 name = "oas_rs"
@@ -37,6 +38,7 @@ serde_json = "1.0"
 tokio = { version = "1.45", features = ["macros", "net", "rt-multi-thread", "time"] }
 oas-rs-macros = { version = "=0.2.0", path = "oas-rs-macros" }
 uuid = { version = "1.17", optional = true, features = ["serde", "v4"] }
+multer = { version = "3", optional = true }
 
 # Only applies when building this workspace (benches, examples); dependents use
 # their own profiles.
@@ -76,3 +78,11 @@ required-features = ["uuid", "swagger"]
 [[test]]
 name = "middleware"
 required-features = ["test-util"]
+
+[[test]]
+name = "body_limit"
+required-features = ["test-util"]
+
+[[test]]
+name = "multipart"
+required-features = ["multipart", "test-util"]

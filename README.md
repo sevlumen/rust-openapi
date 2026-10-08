@@ -96,8 +96,9 @@ let mut app = App::new().with_state(Database::new());
 app.get("/users/{id}", get_user);
 ```
 
-Buffered JSON/body extractors have a default 1 MiB limit. Configure it with
-`app.max_body_size(bytes)` before route registration. Raw handlers receive
+Buffered JSON/body extractors have a default 1 MiB limit. `app.max_body_size(bytes)`
+changes it for every buffered route; `app.post(...).body_limit(bytes)` overrides
+it for the route just registered. Raw handlers receive
 Hyper's streaming `Incoming` body directly and own their upload limit and
 cancellation policy.
 
@@ -158,6 +159,45 @@ an alternative (logical OR). Referencing a scheme that was never declared makes
 `build()` return `BuildError::UnknownSecurityScheme`. For other kinds, use
 `security_scheme(name, SecurityScheme::...)` (`bearer_with_format("JWT")`,
 `basic()`, `api_key(...)`).
+
+## Multipart uploads
+
+Enable the `multipart` feature to accept `multipart/form-data` (for example
+firmware uploads). The body is buffered up to the route's size limit, then read
+part by part:
+
+```rust
+use oas_rs::{ApiError, Json, Multipart};
+
+async fn upload(mut form: Multipart) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut stored = Vec::new();
+    while let Some(field) = form.next_field().await? {
+        let file_name = field.file_name().map(str::to_owned);
+        let data = field.bytes().await?; // inside the route's body limit
+        stored.push(serde_json::json!({ "file": file_name, "bytes": data.len() }));
+    }
+    Ok(Json(serde_json::json!(stored)))
+}
+
+app.openapi().bearer_auth("BearerAuth"); // declare the scheme used below
+app.post("/firmwares", upload)
+    .body_limit(4 * 1024 * 1024) // this route only
+    .security(["BearerAuth"]);
+```
+
+- `app.max_body_size(bytes)` changes the limit of **every** buffered route
+  (including earlier `.body_limit(...)` overrides, so call it before the
+  routes); `.body_limit(bytes)` overrides it for the route just registered.
+- A body over the limit returns `413`, a non-multipart `Content-Type` returns
+  `415`, a missing boundary or malformed body returns `400`.
+- `Field::file_name` returns the client-supplied name as sent (only a
+  backslash-escaped quote `\"` is unescaped); never use it as a filesystem
+  path without sanitizing it.
+- Drop (or consume with `bytes()`/`text()`) the previous `Field` before calling
+  `next_field()` again; holding it is a handler bug and returns `500`.
+- Uploads are buffered, not streamed: budget about 3x the route's `body_limit`
+  of memory per concurrent upload. For very large files use a raw handler.
+- The route is documented in OpenAPI as a `multipart/form-data` request body.
 
 ## Middleware
 
@@ -249,7 +289,7 @@ benchmark on your own hardware for absolute values.
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --features 'uuid test-util swagger'
+cargo test --workspace --all-targets --features 'uuid test-util swagger multipart'
 cargo test --doc --workspace
 cargo build --workspace --examples --features 'uuid swagger'
 ```

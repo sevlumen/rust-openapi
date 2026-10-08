@@ -115,10 +115,11 @@ impl<S: Send + Sync + 'static> App<S> {
         }
     }
 
-    /// Set the maximum body size collected by buffered typed extractors.
+    /// Set the maximum body size collected by buffered typed extractors for
+    /// **every** buffered route: those already registered and those registered
+    /// later. Use [`body_limit`](Self::body_limit) to change one route only.
     ///
-    /// The value is copied into each buffered route plan during registration;
-    /// raw `Incoming` handlers remain streaming and are not affected.
+    /// Raw `Incoming` handlers remain streaming and are not affected.
     pub fn max_body_size(&mut self, limit: usize) -> &mut Self {
         let limit = encode_body_limit(limit);
         self.max_body_size = limit;
@@ -126,6 +127,24 @@ impl<S: Send + Sync + 'static> App<S> {
             if matches!(plan.body_mode, BodyMode::Buffered) {
                 plan.body_limit = limit;
             }
+        }
+        self
+    }
+
+    /// Sets the body-size limit of the last registered route, overriding the
+    /// application-wide limit for that route only. It has no effect on routes
+    /// without a buffered body (raw handlers, handlers that read no body).
+    ///
+    /// Call it right after registering the route. A later call to
+    /// [`max_body_size`](Self::max_body_size) resets every buffered route,
+    /// including this one.
+    pub fn body_limit(&mut self, limit: usize) -> &mut Self {
+        let limit = encode_body_limit(limit);
+        if let Some(index) = self.last_route
+            && let Some(plan) = self.plans.get_mut(index)
+            && matches!(plan.body_mode, BodyMode::Buffered)
+        {
+            plan.body_limit = limit;
         }
         self
     }

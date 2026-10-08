@@ -28,6 +28,8 @@ mod codec;
 mod extract;
 mod handler;
 mod middleware;
+#[cfg(feature = "multipart")]
+mod multipart;
 mod openapi;
 mod params;
 mod path;
@@ -48,6 +50,8 @@ pub use handler::{Handler, RawHandler};
 use handler::{HandlerFutureKind, INLINE_FUTURE_SIZE, InlineFuture};
 use middleware::Host;
 pub use middleware::{Middleware, Next, RequestBody};
+#[cfg(feature = "multipart")]
+pub use multipart::{Field, Multipart};
 use openapi::OpenApiConfig;
 #[cfg(any(test, feature = "swagger"))]
 use openapi::SwaggerConfig;
