@@ -447,6 +447,18 @@ no per-address key: behind a proxy key on the header it sets (and only if it
 overwrites what clients send). With several instances each enforces its own
 limit.
 
+### Compression
+
+Enable the `compression` feature and register `Compress::new()`: buffered
+text, JSON, XML, JavaScript and SVG responses of at least 1 KiB are gzipped
+for clients whose `Accept-Encoding` allows it (`min_size` and `level` are
+configurable), with `Content-Encoding`, a corrected `Content-Length` and a weak
+`ETag`. Streaming responses, `HEAD`, bodiless statuses, already-encoded
+responses and other media types pass through, and any response that could
+have been compressed carries `Vary: Accept-Encoding`. Gzip only (no
+brotli/zstd yet); do not use it on endpoints that mix secrets with
+attacker-chosen input over TLS (BREACH).
+
 ### Custom error format
 
 ```rust
@@ -559,7 +571,7 @@ benchmark on your own hardware for absolute values.
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --features 'uuid test-util swagger multipart tls http2'
+cargo test --workspace --all-targets --features 'uuid test-util swagger multipart tls http2 compression'
 cargo test --doc --workspace
 cargo build --workspace --examples --features 'uuid swagger tls http2'
 ```

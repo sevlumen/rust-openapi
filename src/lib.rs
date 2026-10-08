@@ -26,6 +26,8 @@ mod app;
 mod bearer;
 mod catch_panic;
 mod codec;
+#[cfg(feature = "compression")]
+mod compress;
 mod cors;
 mod error_format;
 mod extract;
@@ -51,6 +53,8 @@ use app::Operation;
 pub use bearer::{BearerAuth, constant_time_eq};
 pub use catch_panic::CatchPanic;
 pub use codec::*;
+#[cfg(feature = "compression")]
+pub use compress::Compress;
 pub use cors::Cors;
 pub use error_format::{ErrorFormat, ErrorInfo};
 pub use extract::FromRequest;

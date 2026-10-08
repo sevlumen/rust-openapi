@@ -10,6 +10,10 @@ All notable changes to this project are documented here. The format follows
   credentials, exposed headers, `Vary`.
 - `TestResponse::header_all` (test-util) for headers that repeat.
 - `Headers` extractor exposing the request's `HeaderMap`.
+- `Compress` middleware (feature `compression`, gzip via `flate2`'s pure-Rust
+  backend): content negotiation with quality values, size threshold, `Vary`,
+  weak `ETag`, blocking-pool compression for large bodies.
+- `TestResponse::body_bytes` (test-util).
 - `RateLimit` middleware: token bucket per key (header or custom), `429` with
   `Retry-After`, bounded memory.
 - `ErrorFormat` middleware and `ErrorInfo`: rewrite framework-generated error
