@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`oas-rs` is a small typed HTTP framework on Hyper + Tokio that generates OpenAPI 3.1 at startup. Cargo workspace of two crates: `oas-rs` (root) and `oas-rs-macros` (proc-macro, `#[derive(ApiSchema)]`). MSRV is 1.88, edition 2024. The public API and HTTP semantics follow semver within the `0.3` line (see `CHANGELOG.md`).
+`oas-rs` is a small typed HTTP framework on Hyper + Tokio that generates OpenAPI 3.1 at startup. Cargo workspace of two crates: `oas-rs` (root) and `oas-rs-macros` (proc-macro, `#[derive(ApiSchema)]`). MSRV is 1.88, edition 2024. The public API and HTTP semantics follow semver within the `0.4` line (see `CHANGELOG.md`).
 
 ## Commands
 

@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-08
+
 ### Added
 - `AppRuntime::tcp_nodelay(bool)` to control `TCP_NODELAY` on accepted
   connections.
