@@ -18,6 +18,12 @@ All notable changes to this project are documented here. The format follows
   and variant-level `#[serde(untagged)]` are understood by the derive;
   `ApiSchema` does not support generic types (clear compile error).
 
+- `Multipart::from_stream` and `Field::chunk`: streaming multipart uploads
+  from a raw handler with a whole-body limit (declared lengths are refused
+  early, chunked bodies are cut off at the limit).
+- `App::multipart_fields` / `MultipartField`: document the form fields of a
+  `multipart/form-data` route (buffered or raw) in the OpenAPI document.
+
 ### Changed
 - **Schema changes for existing derives** (they now match what serde writes):
   `#[serde(default)]` and `skip_serializing_if` fields are no longer

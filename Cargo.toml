@@ -142,3 +142,7 @@ required-features = ["compression", "test-util"]
 [[test]]
 name = "derive_schema"
 required-features = ["test-util"]
+
+[[test]]
+name = "multipart_stream"
+required-features = ["multipart"]

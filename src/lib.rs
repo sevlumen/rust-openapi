@@ -67,7 +67,7 @@ use handler::{HandlerFutureKind, INLINE_FUTURE_SIZE, InlineFuture};
 use middleware::{Host, Scope, ScopedLayer};
 pub use middleware::{Middleware, Next, RequestBody};
 #[cfg(feature = "multipart")]
-pub use multipart::{Field, Multipart};
+pub use multipart::{Field, Multipart, MultipartField};
 use openapi::OpenApiConfig;
 #[cfg(any(test, feature = "swagger"))]
 use openapi::SwaggerConfig;
