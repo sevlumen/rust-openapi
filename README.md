@@ -441,6 +441,55 @@ layers run before the handler, so register them first.
   part's `charset`.
 - `oneshot` cannot call raw routes: test them over `serve_listener`.
 
+## Web building blocks
+
+**Response helpers.** `ResponseExt` adds headers, a status or cookies to any
+response, and `Redirect`, `Html` and `SetCookie` cover the common cases:
+
+```rust
+use oas_rs::{Html, Redirect, ResponseExt, SameSite, SetCookie};
+
+async fn login() -> impl oas_rs::IntoResponse {
+    Redirect::see_other("/home")
+        .with_cookie(SetCookie::new("sid", "abc").path("/").http_only().secure().same_site(SameSite::Lax))
+}
+async fn page() -> Html<&'static str> { Html("<h1>hi</h1>") }
+```
+
+`SetCookie::new` panics on a name or value a cookie may not contain
+(percent-encode values first). Several `with_cookie` calls send several
+`Set-Cookie` headers. `Redirect` appears in the OpenAPI document as `302`
+whatever constructor is used.
+
+**Cookies and forms.** The `Cookies` extractor reads every `Cookie` header
+(`cookies.get("sid")`; malformed pairs are skipped, values are not
+percent-decoded). `Form<T>` decodes an `application/x-www-form-urlencoded`
+body (`+` is a space) into a type that derives `ApiSchema` and `Deserialize`,
+and documents the form in OpenAPI; other media types get `415`.
+
+**Peer address.** `runtime.connect_info(true)` (off by default: it adds a
+request extension) enables the `ConnectInfo(addr)` extractor, `peer_addr(&request)`
+in middleware and `RateLimit::key_by_peer_ip()`. Behind a proxy the peer is the
+proxy; key on a header it sets instead. Unix sockets and in-process requests
+have no address.
+
+**Server-sent events.** Return `Sse::new(stream)` where the stream yields
+`Event::data("...")` (optionally `.event("name")`, `.id("1")`, `.retry(..)`);
+`.keep_alive(Duration)` sends `: keep-alive` comments in the silences. The
+connection stays open until the stream ends or the client leaves.
+
+**Static files** (feature `static-files`). `app.layer(ServeDir::new("/assets",
+"./public"))` serves `GET`/`HEAD` for files under the prefix, falling through to
+your routes for everything else. It sends `Content-Type`, `Content-Length`, a
+weak `ETag` and `Last-Modified` (`304` on conditional requests), streams large
+files, serves `index.html` for directories and refuses `..`, hidden files and
+symlinks that leave the directory. No `Range` requests, directory listings or
+precompressed variants. `.cache_control("public, max-age=3600")`,
+`.index_file("start.html")` and `.allow_dotfiles(true)` configure it.
+
+WebSocket is not provided: it needs connection-upgrade support that the server
+loop does not have.
+
 ## Middleware
 
 Register global layers with `App::layer`. A layer is an `async fn` (or any type
@@ -675,7 +724,7 @@ benchmark on your own hardware for absolute values.
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --features 'uuid test-util swagger multipart tls http2 compression compression-brotli'
+cargo test --workspace --all-targets --features 'uuid test-util swagger multipart tls http2 compression compression-brotli static-files'
 cargo test --doc --workspace
 cargo build --workspace --examples --features 'uuid swagger tls http2'
 ```
@@ -689,7 +738,7 @@ version) before committing.
 
 ## Roadmap
 
-Planned: HTTP/3, zstd compression, and the full HTTP
+Planned: WebSocket (needs connection-upgrade support), HTTP/3, zstd compression, and the full HTTP
 acceptance benchmark matrix.
 
 ## Contributing and license

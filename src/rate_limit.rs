@@ -142,6 +142,14 @@ impl RateLimit {
         })
     }
 
+    /// Limits each client IP address separately, ignoring the port. Needs
+    /// [`AppRuntime::connect_info`](crate::AppRuntime::connect_info)`(true)`;
+    /// without it every request lands in the anonymous bucket. Behind a proxy
+    /// all clients share the proxy's address: key on a header instead.
+    pub fn key_by_peer_ip(self) -> Self {
+        self.key_by(|request| crate::peer_addr(request).map(|peer| peer.ip().to_string()))
+    }
+
     /// Limits each distinct key separately; `None` means the anonymous bucket.
     pub fn key_by(
         self,

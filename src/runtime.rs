@@ -7,6 +7,7 @@ pub struct AppRuntime<S = ()> {
     pub(crate) tcp_nodelay: bool,
     pub(crate) header_read_timeout: Option<Duration>,
     pub(crate) max_connections: Option<usize>,
+    pub(crate) connect_info: bool,
     pub(crate) connection_error_observer: Option<ErrorObserver>,
     #[cfg(feature = "http2")]
     pub(crate) http2_max_concurrent_streams: Option<u32>,
@@ -76,7 +77,14 @@ pub(crate) struct RuntimeRef<'a, S> {
 
 pub(crate) struct ConnectionRuntime<S> {
     runtime: Arc<RuntimeInner<S>>,
+    /// The peer address to attach to each request (only when enabled).
+    peer: Option<std::net::SocketAddr>,
 }
+
+/// The remote address of the connection a request arrived on, stored in the
+/// request extensions when [`AppRuntime::connect_info`] is on.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PeerAddr(pub(crate) std::net::SocketAddr);
 
 pub(crate) enum PreparedDispatch {
     Ready(Option<HttpResponse>),
@@ -115,15 +123,18 @@ impl Future for PreparedDispatch {
 }
 
 impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
-    pub(crate) fn new(runtime: Arc<RuntimeInner<S>>) -> Self {
-        Self { runtime }
+    pub(crate) fn new(runtime: Arc<RuntimeInner<S>>, peer: Option<std::net::SocketAddr>) -> Self {
+        Self { runtime, peer }
     }
 
     pub(crate) fn runtime_ref(&self) -> RuntimeRef<'_, S> {
         self.runtime.runtime_ref()
     }
 
-    pub(crate) fn prepare(&self, request: Request<Incoming>) -> PreparedDispatch {
+    pub(crate) fn prepare(&self, mut request: Request<Incoming>) -> PreparedDispatch {
+        if let Some(peer) = self.peer {
+            request.extensions_mut().insert(PeerAddr(peer));
+        }
         if !self
             .runtime
             .has_matching_layer(request.method(), request.uri().path())
@@ -332,6 +343,16 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         self
     }
 
+    /// Makes the peer's socket address available to handlers and middleware:
+    /// the [`ConnectInfo`] extractor, and [`RateLimit::key_by_peer_ip`]. Off by
+    /// default because it adds an extension to every request. Behind a proxy
+    /// the peer is the proxy; use a header it sets instead. Unix sockets have
+    /// no address, and in-process (`oneshot`) requests none either.
+    pub fn connect_info(mut self, enabled: bool) -> Self {
+        self.connect_info = enabled;
+        self
+    }
+
     /// Calls `observer` with every error that ends a connection: malformed
     /// requests, header timeouts, I/O failures, failed or timed-out TLS
     /// handshakes (an `io::Error`) and HTTP/2 connection errors. A client
@@ -533,7 +554,10 @@ enum AcceptAction {
 pub(crate) trait Listener {
     type Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static;
 
-    fn accept(&self) -> impl Future<Output = std::io::Result<Self::Io>> + Send;
+    /// The next connection and, where there is one, the peer's socket address.
+    fn accept(
+        &self,
+    ) -> impl Future<Output = std::io::Result<(Self::Io, Option<std::net::SocketAddr>)>> + Send;
 
     /// `TCP_NODELAY` where it exists; a no-op otherwise.
     fn set_nodelay(_io: &Self::Io) {}
@@ -542,10 +566,10 @@ pub(crate) trait Listener {
 impl Listener for tokio::net::TcpListener {
     type Io = tokio::net::TcpStream;
 
-    async fn accept(&self) -> std::io::Result<Self::Io> {
+    async fn accept(&self) -> std::io::Result<(Self::Io, Option<std::net::SocketAddr>)> {
         tokio::net::TcpListener::accept(self)
             .await
-            .map(|(stream, _)| stream)
+            .map(|(stream, peer)| (stream, Some(peer)))
     }
 
     fn set_nodelay(io: &Self::Io) {
@@ -558,11 +582,18 @@ impl Listener for tokio::net::TcpListener {
 impl Listener for tokio::net::UnixListener {
     type Io = tokio::net::UnixStream;
 
-    async fn accept(&self) -> std::io::Result<Self::Io> {
+    async fn accept(&self) -> std::io::Result<(Self::Io, Option<std::net::SocketAddr>)> {
         tokio::net::UnixListener::accept(self)
             .await
-            .map(|(stream, _)| stream)
+            .map(|(stream, _)| (stream, None))
     }
+}
+
+/// One accepted connection.
+pub(crate) struct Accepted<Io> {
+    pub(crate) io: Io,
+    pub(crate) peer: Option<std::net::SocketAddr>,
+    pub(crate) slot: Option<ConnectionSlot>,
 }
 
 /// Holds one of the `max_connections` slots until dropped.
@@ -635,7 +666,7 @@ pub(crate) async fn accept_next<L, F>(
     shutdown: &mut Pin<&mut F>,
     nodelay: bool,
     limit: Option<&Arc<tokio::sync::Semaphore>>,
-) -> Result<Option<(L::Io, Option<ConnectionSlot>)>, std::io::Error>
+) -> Result<Option<Accepted<L::Io>>, std::io::Error>
 where
     L: Listener,
     F: Future<Output = ()>,
@@ -653,11 +684,11 @@ where
         tokio::select! {
             _ = shutdown.as_mut() => return Ok(None),
             accepted = listener.accept() => match accepted {
-                Ok(stream) => {
+                Ok((io, peer)) => {
                     if nodelay {
-                        L::set_nodelay(&stream);
+                        L::set_nodelay(&io);
                     }
-                    return Ok(Some((stream, slot)));
+                    return Ok(Some(Accepted { io, peer, slot }));
                 }
                 Err(error) => match classify_accept_error(&error) {
                     AcceptAction::Retry => continue,
@@ -688,6 +719,7 @@ where
     let nodelay = runtime.tcp_nodelay;
     let header_read_timeout = runtime.header_read_timeout;
     let limit = connection_limit(runtime.max_connections);
+    let connect_info = runtime.connect_info;
     let observer = runtime.connection_error_observer;
     let runtime = runtime.inner;
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
@@ -695,10 +727,14 @@ where
     #[cfg(feature = "http2")]
     let (stop, _) = tokio::sync::watch::channel(());
     tokio::pin!(shutdown);
-    while let Some((stream, slot)) =
-        accept_next(&listener, &mut shutdown, nodelay, limit.as_ref()).await?
+    while let Some(Accepted {
+        io: stream,
+        peer,
+        slot,
+    }) = accept_next(&listener, &mut shutdown, nodelay, limit.as_ref()).await?
     {
-        let connection = ConnectionRuntime::new(Arc::clone(&runtime));
+        let connection =
+            ConnectionRuntime::new(Arc::clone(&runtime), peer.filter(|_| connect_info));
         let service = hyper::service::service_fn(move |request: Request<Incoming>| {
             let prepared = connection.prepare(request);
             async move { Ok::<_, Infallible>(prepared.await) }
@@ -970,10 +1006,11 @@ mod accept_tests {
             let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
             let shutdown = std::future::pending::<()>();
             tokio::pin!(shutdown);
-            let (accepted, _) = accept_next(&listener, &mut shutdown, enabled, None)
-                .await
-                .unwrap()
-                .expect("a connection");
+            let Accepted { io: accepted, .. } =
+                accept_next(&listener, &mut shutdown, enabled, None)
+                    .await
+                    .unwrap()
+                    .expect("a connection");
             assert_eq!(accepted.nodelay().unwrap(), enabled);
         }
     }

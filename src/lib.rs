@@ -45,9 +45,13 @@ mod response;
 mod router;
 mod runtime;
 mod schema;
+mod sse;
+#[cfg(feature = "static-files")]
+mod static_files;
 #[cfg(feature = "tls")]
 mod tls;
 mod trace;
+mod web;
 pub use app::App;
 use app::Operation;
 pub use bearer::{BearerAuth, constant_time_eq};
@@ -58,7 +62,7 @@ pub use compress::Compress;
 pub use cors::Cors;
 pub use error_format::{ErrorFormat, ErrorInfo};
 pub use extract::FromRequest;
-pub use extract::{Header, HeaderSpec, Headers, Path, Query, State};
+pub use extract::{ConnectInfo, Header, HeaderSpec, Headers, Path, Query, State, peer_addr};
 pub use group::Group;
 use handler::{BoxFuture, HandlerFuture};
 pub use handler::{Handler, RawHandler};
@@ -97,9 +101,13 @@ use runtime::RuntimeInner;
 pub use runtime::TestResponse;
 pub use runtime::{AppRuntime, DEFAULT_HEADER_READ_TIMEOUT, DEFAULT_SHUTDOWN_TIMEOUT};
 pub use schema::*;
+pub use sse::{Event, Sse};
+#[cfg(feature = "static-files")]
+pub use static_files::ServeDir;
 #[cfg(feature = "tls")]
 pub use tls::{TlsConfig, TlsError};
 pub use trace::{Trace, TraceRecord};
+pub use web::{Cookies, Form, Headered, Html, Redirect, ResponseExt, SameSite, SetCookie};
 
 pub use http::Method;
 pub use oas_rs_macros::ApiSchema;
@@ -279,7 +287,7 @@ mod tests {
         let mut app = App::new();
         app.get("/zero", || async { "OK" });
         let runtime = app.build().expect("test app builds").inner;
-        let connection = ConnectionRuntime::new(Arc::clone(&runtime));
+        let connection = ConnectionRuntime::new(Arc::clone(&runtime), None);
 
         assert_eq!(Arc::strong_count(&runtime), 2);
         let _first = connection.runtime_ref();

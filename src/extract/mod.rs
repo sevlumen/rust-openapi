@@ -246,6 +246,39 @@ pub struct Query<T>(pub T);
 #[derive(Clone, Debug)]
 pub struct Header<T>(pub T);
 
+/// The remote address of the connection the request arrived on. Needs
+/// [`AppRuntime::connect_info`](crate::AppRuntime::connect_info)`(true)`;
+/// otherwise the extractor fails the request with a `500` that says so (a
+/// setup mistake, not a client error). Behind a proxy this is the proxy's
+/// address. Unix-socket connections and `oneshot` requests have none.
+#[derive(Clone, Copy, Debug)]
+pub struct ConnectInfo(pub std::net::SocketAddr);
+
+/// The peer address recorded for `request`, if
+/// [`AppRuntime::connect_info`](crate::AppRuntime::connect_info) is on.
+pub fn peer_addr<B>(request: &Request<B>) -> Option<std::net::SocketAddr> {
+    request
+        .extensions()
+        .get::<crate::runtime::PeerAddr>()
+        .map(|peer| peer.0)
+}
+
+impl<S: Send + Sync + 'static> FromRequest<S> for ConnectInfo {
+    fn from_request(
+        request: &mut Request<Bytes>,
+        _params: &Params,
+        _state: &Arc<S>,
+    ) -> Result<Self, ApiError> {
+        peer_addr(request).map(ConnectInfo).ok_or_else(|| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error",
+                "ConnectInfo needs AppRuntime::connect_info(true) and a TCP listener",
+            )
+        })
+    }
+}
+
 /// All request headers, for code that reads many or dynamic headers. Cloning
 /// the map allocates a few times per request that extracts it, so prefer
 /// [`Header`] for one or two known headers. It documents no OpenAPI
