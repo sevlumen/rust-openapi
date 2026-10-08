@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`oas-rs` is a small typed HTTP framework on Hyper + Tokio that generates OpenAPI 3.1 at startup. Cargo workspace of two crates: `oas-rs` (root) and `oas-rs-macros` (proc-macro, `#[derive(ApiSchema)]`). MSRV is 1.88, edition 2024. The public API and HTTP semantics follow semver within the `0.2` line (see `CHANGELOG.md`).
+`oas-rs` is a small typed HTTP framework on Hyper + Tokio that generates OpenAPI 3.1 at startup. Cargo workspace of two crates: `oas-rs` (root) and `oas-rs-macros` (proc-macro, `#[derive(ApiSchema)]`). MSRV is 1.88, edition 2024. The public API and HTTP semantics follow semver within the `0.3` line (see `CHANGELOG.md`).
 
 ## Commands
 
@@ -20,10 +20,10 @@ Without Docker, the same steps (feature flags matter — many tests/benches/exam
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --features "uuid test-util swagger multipart"
+cargo test --workspace --all-targets --features "uuid test-util swagger multipart tls"
 cargo test --doc --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
-cargo test --features "uuid test-util swagger multipart" percent_decode   # single test by name filter
+cargo test --features "uuid test-util swagger multipart tls" percent_decode   # single test by name filter
 cargo test --test derive                                         # single integration test file
 cargo bench --bench router --features uuid,test-util,swagger     # microbenchmark (release profile)
 cargo +nightly miri test --lib inline_future --                  # CI gate for the unsafe inline-future code
@@ -41,7 +41,7 @@ Two-phase lifecycle: `App` (mutable builder, `src/app.rs`) → `App::build()` �
 - `src/schema.rs`: `ApiSchema` trait and built-in impls; `OpenApiQuery` is the derive-generated query-parameter/parse hook.
 - `src/codec.rs` / `src/path.rs`: percent-decoding, query parsing, route-template splitting and path normalization.
 - `oas-rs-macros`: the derive generates `ApiSchema` + `OpenApiQuery` impls and a direct (non-serde) query parser when all field types are simple; otherwise it falls back to serde. Generated code refers to the runtime through `::oas_rs::__private` (`#[doc(hidden)]`), so anything the macro needs must be re-exported there. Serde `rename` / `rename_all` handling lives in `oas-rs-macros/src/serde_attrs.rs`; unit enums are supported, data-carrying enums are not.
-- Cargo features: `multipart` (`Multipart`/`Field` extractor backed by `multer`; the body is buffered up to the route's limit, so memory per upload is about 3x `body_limit`), `swagger` (Swagger UI page, loaded from a pinned unpkg release with SRI hashes — update the hashes in `swagger_html` if the version changes), `uuid`, `test-util` (exposes `TestResponse`/in-process dispatch used by tests and benches).
+- Cargo features: `tls` (`serve_tls`; the accept loop is shared via `runtime::accept_next`, but the TLS path tracks connections with a `watch` shutdown signal plus an `mpsc` completion channel instead of `GracefulShutdown::watch`, because the handshake happens inside the per-connection task before a connection object exists), `multipart` (`Multipart`/`Field` extractor backed by `multer`; the body is buffered up to the route's limit, so memory per upload is about 3x `body_limit`), `swagger` (Swagger UI page, loaded from a pinned unpkg release with SRI hashes — update the hashes in `swagger_html` if the version changes), `uuid`, `test-util` (exposes `TestResponse`/in-process dispatch used by tests and benches).
 
 ## Conventions specific to this repo
 

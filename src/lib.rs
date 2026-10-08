@@ -37,6 +37,8 @@ mod response;
 mod router;
 mod runtime;
 mod schema;
+#[cfg(feature = "tls")]
+mod tls;
 mod trace;
 pub use app::App;
 use app::Operation;
@@ -72,11 +74,15 @@ use router::{
 #[cfg(test)]
 use router::{DynamicRouteNode, NodeId};
 use runtime::ConnectionRuntime;
+#[cfg(feature = "tls")]
+pub use runtime::DEFAULT_HANDSHAKE_TIMEOUT;
 use runtime::RuntimeInner;
 #[cfg(any(test, feature = "test-util"))]
 pub use runtime::TestResponse;
 pub use runtime::{AppRuntime, DEFAULT_SHUTDOWN_TIMEOUT};
 pub use schema::*;
+#[cfg(feature = "tls")]
+pub use tls::{TlsConfig, TlsError};
 pub use trace::{Trace, TraceRecord};
 
 pub use http::Method;

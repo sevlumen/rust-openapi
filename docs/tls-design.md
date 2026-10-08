@@ -1,12 +1,13 @@
 # TLS design for oas-rs
 
-Status: draft for review. Target release: 0.3.0.
+Status: implemented (see Results at the end). Target release: 0.3.0.
 
 ## Goal
 
 Let an application serve HTTPS directly (`serve_tls`) with the same graceful
-shutdown and accept-error handling as plain `serve_listener`, using a pure-Rust
-TLS stack, with no cost for applications that do not enable the feature.
+shutdown and accept-error handling as plain `serve_listener`, using `rustls` (no
+OpenSSL; its `ring` provider compiles a little C, so a C compiler is needed at
+build time), with no cost for applications that do not enable the feature.
 
 Non-goals: HTTP/2 and ALPN negotiation (the server is HTTP/1.1 only), client
 certificates (mTLS), certificate hot-reload, ACME, TLS 1.0/1.1.
@@ -45,17 +46,24 @@ safe defaults.
 
 ## Architecture
 
-- `serve_runtime` is generalized over a connection wrapper: a function turning
-  an accepted `TcpStream` into the IO type given to Hyper. Plain TCP wraps with
-  `TokioIo`; TLS performs the handshake and wraps the TLS stream. The accept
-  loop, graceful shutdown (`GracefulShutdown::watch`), accept-error
-  classification and `shutdown_timeout` are shared, not duplicated.
+- The accept loop (shutdown select, accept-error classification, backoff) is
+  extracted into `runtime::accept_next` and shared by `serve_listener` and
+  `serve_tls`. The plain path is otherwise unchanged and keeps hyper-util's
+  `GracefulShutdown`.
+- hyper-util's `GracefulShutdown::watch` needs an already-built connection,
+  which does not exist while the TLS handshake is still running inside the
+  per-connection task. The TLS path therefore tracks connections with a
+  `tokio::sync::watch` shutdown signal (each task subscribes before it is
+  spawned) plus an `mpsc` completion channel (each task holds a sender; shutdown
+  waits for the receiver to see all senders dropped, bounded by
+  `shutdown_timeout`). On the signal, a task still handshaking is dropped and an
+  established connection gets `graceful_shutdown()`.
 - The handshake runs inside the per-connection task, never in the accept loop,
   so a slow or stalled client cannot block other connections. It is bounded by
-  `handshake_timeout` (slowloris protection). A failed or timed-out handshake
-  closes only that connection.
-- The zero-TLS path keeps its current monomorphized code; the generalization
-  must not add a branch or allocation per request.
+  `handshake_timeout` (slowloris protection for the handshake phase). A failed
+  or timed-out handshake closes only that connection.
+- The zero-TLS path adds no branch or allocation per request (verified by the
+  benchmark results below).
 
 ## Testing
 
@@ -84,3 +92,32 @@ SEC1). With the feature disabled the default build is unchanged.
   (rustls, ring, webpki). The `ring` license (ISC/OpenSSL-style terms) may need
   an explicit allow entry in `deny.toml`.
 - MSRV: the chosen rustls version must support Rust 1.88.
+
+## Results (measured 2026-10-08, Docker Linux, Rust 1.88, release profile)
+
+Default-path gate, microbenchmark (`benches/router.rs`), mean of 3 runs each:
+
+| Case | features without `tls` | with `multipart,tls` |
+|---|---|---|
+| `plaintext` | 258.3 ns, 3 allocations | 260.7 ns, 3 allocations |
+| `static_route_count` (1 route) | 258.5 ns, 3 allocations | 261.0 ns, 3 allocations |
+
+Both are within run-to-run noise (about +/-5%): the feature adds nothing to the
+request path of plain connections.
+
+Plain TCP loopback before/after extracting the shared accept loop (16
+connections, 3 s, mean of 3 alternating runs): keep-alive 220,800 vs 219,900
+req/s (-0.4%), short connections 59,400 vs 60,400 req/s (+1.8%), i.e. unchanged.
+
+TLS loopback (same harness, TLS 1.3, `ring`, self-signed ECDSA P-256
+certificate (the `rcgen` default; RSA-2048 handshakes are considerably slower),
+mean of 3 alternating runs against plain TCP from the same session):
+
+| Scenario | plain TCP | TLS | TLS vs plain |
+|---|---|---|---|
+| Keep-alive (handshake once per connection) | 219,600 req/s | 200,700 req/s | -8.6% |
+| Short connections (one handshake per request) | 60,200 conn/s | 12,900 handshakes+requests/s | about 21% |
+
+Steady-state TLS costs about 9% throughput on this loopback setup; short
+connections are dominated by the handshake (key exchange and certificate
+signing), which is why keep-alive and session reuse matter for TLS clients.

@@ -2,7 +2,7 @@
 
 Typed HTTP routing on Hyper + Tokio with startup-generated OpenAPI 3.1
 metadata. The V1 release line is Cargo `0.1.0`; the public API and HTTP
-semantics follow semver within the `0.2` line. Licensed under the MIT License.
+semantics follow semver within the `0.3` line. Licensed under the MIT License.
 
 ## Quick start
 
@@ -160,6 +160,42 @@ an alternative (logical OR). Referencing a scheme that was never declared makes
 `security_scheme(name, SecurityScheme::...)` (`bearer_with_format("JWT")`,
 `basic()`, `api_key(...)`).
 
+## TLS
+
+Enable the `tls` feature to serve HTTPS directly with `rustls` and the `ring`
+crypto provider (no OpenSSL dependency; `ring` compiles a small amount of C, so
+a C compiler must be available at build time):
+
+```rust
+use oas_rs::TlsConfig;
+use std::time::Duration;
+
+let tls = TlsConfig::from_pem_files("cert.pem", "key.pem")?; // or TlsConfig::from_pem(cert_bytes, key_bytes)
+let runtime = app
+    .build()?
+    .handshake_timeout(Duration::from_secs(10)) // default 10 s
+    .shutdown_timeout(Duration::from_secs(30)); // default 30 s
+let listener = tokio::net::TcpListener::bind("0.0.0.0:8443").await?;
+runtime
+    .serve_tls(listener, tls, async { tokio::signal::ctrl_c().await.ok(); })
+    .await?;
+```
+
+- The certificate file may contain a chain; the private key may be PKCS#8,
+  PKCS#1 or SEC1 PEM (parsed by `rustls-pki-types`). A missing file, malformed
+  PEM or a key that does not match the certificate returns a `TlsError`.
+- TLS 1.2 and 1.3 with rustls' safe defaults; HTTP/1.1 only: ALPN advertises
+  only `http/1.1`, so a client that offers only `h2` is rejected during the
+  handshake. No client certificates.
+- The handshake runs per connection, so a slow client never blocks accepting
+  others, and a failed or timed-out handshake closes only that connection.
+- Shutdown behaves like `serve_listener`: stop accepting, let in-flight
+  requests finish, bounded by `shutdown_timeout`; idle keep-alive connections
+  are closed and half-finished handshakes are dropped.
+- On a loopback benchmark, steady-state TLS throughput was about 9% below plain
+  TCP; with short connections the handshake dominates (see
+  `docs/tls-design.md`). Reuse connections where you can.
+
 ## Multipart uploads
 
 Enable the `multipart` feature to accept `multipart/form-data` (for example
@@ -254,11 +290,12 @@ status and elapsed time of every request.
 
 ```toml
 [dependencies]
-oas-rs = "0.2"
+oas-rs = "0.3"
 ```
 
 Enable optional features as needed: `swagger` (Swagger UI), `uuid` (UUID
-extraction and schema support), `test-util` (in-process `oneshot` testing).
+extraction and schema support), `multipart` (`multipart/form-data` uploads),
+`tls` (HTTPS via `serve_tls`), `test-util` (in-process `oneshot` testing).
 The minimum supported Rust version is 1.88.
 
 ## Performance
@@ -289,7 +326,7 @@ benchmark on your own hardware for absolute values.
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --features 'uuid test-util swagger multipart'
+cargo test --workspace --all-targets --features 'uuid test-util swagger multipart tls'
 cargo test --doc --workspace
 cargo build --workspace --examples --features 'uuid swagger'
 ```
