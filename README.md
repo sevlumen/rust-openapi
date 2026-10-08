@@ -120,55 +120,16 @@ roadmap below.
 Swagger UI is loaded from a pinned `swagger-ui-dist` release on unpkg with
 Subresource Integrity hashes, so it needs network access from the browser.
 
-## Distribution through the Quangt registry
-
-Released crates are distributed through the static sparse registry at
-`storage.quangt.com`. A consuming project configures the registry once:
-
-```toml
-# .cargo/config.toml
-[registries.quangt]
-index = "sparse+https://storage.quangt.com/cargo/index/"
-```
-
-Then it can depend on the release without a path checkout:
+## Installation
 
 ```toml
 [dependencies]
-oas-rs = { version = "=0.1.0", registry = "quangt" }
+oas-rs = "0.1"
 ```
 
-The proc-macro crate is published to the same registry and is resolved
-automatically as an internal dependency. Public dependencies such as Hyper,
-Tokio, Serde, and Bytes continue to come from crates.io. The release artifacts
-and sparse index files can be prepared with:
-
-```powershell
-cargo package -p oas-rs-macros --registry quangt --locked
-pwsh -File .\scripts\generate-sparse-index.ps1 -CrateNames oas-rs-macros
-# Upload the macro crate and its index entry to R2 before packaging oas-rs.
-cargo package -p oas-rs --registry quangt --locked
-pwsh -File .\scripts\generate-sparse-index.ps1 -CrateNames oas-rs
-```
-
-Upload the resulting `dist/cargo/index` and `dist/cargo/crates` trees to R2.
-When adding a version, invalidate the CDN cache for the changed index object.
-The `.crate` files contain source code and are compiled by the consuming
-project.
-
-For the current `0.1.0` release, upload these objects under the `cargo/`
-prefix:
-
-```text
-cargo/index/config.json
-cargo/index/oa/s-/oas-rs
-cargo/index/oa/s-/oas-rs-macros
-cargo/crates/oas-rs/0.1.0/oas-rs-0.1.0.crate
-cargo/crates/oas-rs-macros/0.1.0/oas-rs-macros-0.1.0.crate
-```
-
-The release download endpoint is
-`https://storage.quangt.com/cargo/crates/{crate}/{version}/{crate}-{version}.crate`.
+Enable optional features as needed: `swagger` (Swagger UI), `uuid` (UUID
+extraction and schema support), `test-util` (in-process `oneshot` testing).
+The minimum supported Rust version is 1.88.
 
 ## Performance
 

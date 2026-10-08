@@ -12,8 +12,8 @@ bash scripts/verify-docker.sh
 ```
 
 Without Docker, run the commands listed under "Verification" in the README.
-The `.cargo/config.toml` in this repository declares the `quangt` registry, so
-a plain `cargo test` works after cloning.
+A plain `cargo test --features "uuid test-util swagger"` also works after
+cloning.
 
 ## Guidelines
 

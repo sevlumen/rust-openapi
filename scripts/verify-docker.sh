@@ -4,14 +4,12 @@
 set -euo pipefail
 
 RUST_VERSION="${RUST_VERSION:-1.88}"
-REGISTRY_INDEX="${CARGO_REGISTRIES_QUANGT_INDEX:-sparse+https://storage.quangt.com/cargo/index/}"
 
 MSYS_NO_PATHCONV=1 docker run --rm \
   -v "$PWD:/src" \
   -v oasrs-target:/cache/target \
   -v oasrs-cargo:/usr/local/cargo/registry \
   -e CARGO_TARGET_DIR=/cache/target \
-  -e CARGO_REGISTRIES_QUANGT_INDEX="$REGISTRY_INDEX" \
   -w /src "rust:${RUST_VERSION}" bash -euxc '
     rustup component add rustfmt clippy
     cargo fmt --all -- --check
