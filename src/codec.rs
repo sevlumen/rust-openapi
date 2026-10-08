@@ -1,27 +1,16 @@
 use crate::*;
 
+/// The serde fallback for query structs the direct parser cannot handle. Each
+/// value is parsed into its own field's type (`serde_urlencoded`), so a
+/// `String` field keeps `123456` or `true` as text. A `+` is a literal plus in
+/// a query string here (not a space), and invalid percent-encoding is a `400`.
 pub(crate) fn parse_query<T: DeserializeOwned>(query: &str) -> Result<T, ApiError> {
-    let mut object = Map::new();
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let key = percent_decode(key)?;
-        let value = percent_decode(value)?;
-        let json_value = match value.as_str() {
-            "true" => Value::Bool(true),
-            "false" => Value::Bool(false),
-            text => {
-                if let Ok(number) = text.parse::<i64>() {
-                    json!(number)
-                } else if let Ok(number) = text.parse::<f64>() {
-                    json!(number)
-                } else {
-                    Value::String(value)
-                }
-            }
-        };
-        object.insert(key, json_value);
+        percent_decode(key)?;
+        percent_decode(value)?;
     }
-    serde_json::from_value(Value::Object(object))
+    serde_urlencoded::from_str(&query.replace('+', "%2B"))
         .map_err(|error| ApiError::bad_request(error.to_string()))
 }
 

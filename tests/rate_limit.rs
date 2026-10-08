@@ -148,3 +148,15 @@ async fn very_long_keys_are_limited_without_being_stored() {
     assert_eq!(status(&runtime, Some(&long)).await, 200);
     assert_eq!(status(&runtime, Some(&long)).await, 429);
 }
+
+#[tokio::test(start_paused = true)]
+async fn thousands_of_keys_each_get_their_own_bucket_with_the_default_table() {
+    let runtime = runtime(RateLimit::new(1, Duration::from_secs(60)).key_by_header("x-api-key"));
+    let keys: Vec<String> = (0..5_000).map(|i| format!("client-{i}")).collect();
+    for key in &keys {
+        assert_eq!(status(&runtime, Some(key)).await, 200, "{key}");
+    }
+    for key in keys.iter().step_by(97) {
+        assert_eq!(status(&runtime, Some(key)).await, 429, "{key}");
+    }
+}

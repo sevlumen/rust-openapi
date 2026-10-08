@@ -309,3 +309,46 @@ async fn a_symlink_to_a_hidden_file_is_not_served() {
         "hidden"
     );
 }
+
+#[tokio::test]
+async fn a_rewrite_within_the_same_second_and_size_changes_the_etag() {
+    use std::time::{Duration, SystemTime};
+    let site = Site::new("etag");
+    let runtime = site.runtime(ServeDir::new("/assets", site.public()));
+    let path = site.public().join("v.txt");
+    let base = SystemTime::now() - Duration::from_secs(3600);
+    std::fs::write(&path, "aaaa").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(base)
+        .unwrap();
+    let first = get(&runtime, "/assets/v.txt").await;
+    let first_tag = first.header("etag").unwrap().to_owned();
+
+    // Same size, same second, different content.
+    std::fs::write(&path, "bbbb").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(base + Duration::from_millis(5))
+        .unwrap();
+    let second = get(&runtime, "/assets/v.txt").await;
+    let second_tag = second.header("etag").unwrap().to_owned();
+    assert_ne!(
+        first_tag, second_tag,
+        "a stale validator would give a wrong 304"
+    );
+    let stale = runtime
+        .oneshot(
+            Method::GET,
+            "/assets/v.txt",
+            &[("if-none-match", first_tag.as_str())],
+            None,
+        )
+        .await;
+    assert_eq!(stale.status(), 200);
+    assert_eq!(stale.body_string().await, "bbbb");
+}

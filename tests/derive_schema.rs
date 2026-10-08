@@ -232,8 +232,11 @@ enum Either {
 #[test]
 fn untagged_enums_list_the_payloads() {
     let schema = Either::schema();
+    // Untagged payloads can overlap (a `u32` also matches a number), and
+    // `oneOf` requires exactly one match, so the schema uses `anyOf`.
+    assert!(schema.get("oneOf").is_none());
     assert_eq!(
-        schema["oneOf"],
+        schema["anyOf"],
         json!([int(), { "type": "string" }, { "type": "null" }])
     );
 }

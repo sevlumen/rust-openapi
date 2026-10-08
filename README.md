@@ -1,8 +1,9 @@
 # oas-rs
 
 Typed HTTP routing on Hyper + Tokio with startup-generated OpenAPI 3.1
-metadata. The V1 release line is Cargo `0.1.0`; the public API and HTTP
-semantics follow semver within the `0.5` line. Licensed under the MIT License.
+metadata. The crate is `0.x`: breaking changes are minor releases listed in the
+changelog (see "Stability and support policy" below). Licensed under the MIT
+License.
 
 ## Quick start
 
@@ -184,9 +185,9 @@ Enable `swagger` for the UI and `uuid` for UUID extraction/schema support.
 types may be scalars (`String`, `bool`, integers, `f32`/`f64`, `Uuid`),
 `Option`, `Vec`, `Box`, string-keyed maps, `serde_json::Value`, or another
 `ApiSchema` type. Unit-variant enums derive a string `enum` schema; enums with
-data derive `oneOf` for serde's four representations: externally tagged (the
-default), internally tagged (`tag = "..."`), adjacently tagged (`tag`
-and `content`) and `untagged`.
+data derive `oneOf` for serde's tagged representations: externally tagged (the
+default), internally tagged (`tag = "..."`) and adjacently tagged (`tag` and
+`content`), and `anyOf` for `untagged` (whose payloads can overlap).
 
 Serde attributes reflected in the schema: `rename`, `rename_all`, `skip`
 (field omitted), `skip_serializing` (`writeOnly`), `skip_deserializing`

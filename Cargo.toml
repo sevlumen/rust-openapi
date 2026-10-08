@@ -195,3 +195,16 @@ name = "body_timeout"
 [[test]]
 name = "properties"
 required-features = ["test-util"]
+
+[[test]]
+name = "query_fallback"
+required-features = ["test-util"]
+
+[[bench]]
+name = "rate_limit"
+harness = false
+required-features = ["test-util"]
+
+[[test]]
+name = "stress"
+required-features = ["http2", "websocket", "multipart"]

@@ -524,6 +524,14 @@ fn derive_enum(
         };
         alternatives.push(alternative);
     }
+    // Untagged payloads can overlap (a `u32` also validates as a number), and
+    // `oneOf` demands exactly one match, so they are `anyOf`; the tagged forms
+    // are disjoint by construction.
+    let combinator = if matches!(tagging, Tagging::Untagged) {
+        "anyOf"
+    } else {
+        "oneOf"
+    };
     let description = description.map(|text| {
         quote! { __oas_schema.insert("description".to_owned(), #json::json!(#text)); }
     });
@@ -531,7 +539,7 @@ fn derive_enum(
         {
             let mut __oas_schema = #json::Map::new();
             #description
-            __oas_schema.insert("oneOf".to_owned(), #json::Value::Array(vec![#(#alternatives),*]));
+            __oas_schema.insert(#combinator.to_owned(), #json::Value::Array(vec![#(#alternatives),*]));
             #json::Value::Object(__oas_schema)
         }
     };
