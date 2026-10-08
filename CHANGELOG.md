@@ -43,6 +43,14 @@ All notable changes to this project are documented here. The format follows
   `304`, streaming, index files with a slash redirect, traversal, symlink and
   hidden-file protection including Windows 8.3 short names).
 - `serde_urlencoded` is now a dependency (it backs `Form`).
+- Feature `websocket`: `WebSocketUpgrade` / `WebSocket` / `Message` (handshake
+  validation, origin allow-list, subprotocol negotiation, message size limit,
+  automatic pongs) over `tokio-tungstenite`.
+
+### Changed (internal)
+- The accept loop tracks connections with a shutdown signal and a completion
+  channel (as the TLS loop already did) instead of `GracefulShutdown::watch`,
+  so upgraded connections can be served; shutdown behaviour is unchanged.
 
 ### Changed
 - **Schema changes for existing derives** (they now match what serde writes):

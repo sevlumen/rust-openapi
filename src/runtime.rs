@@ -722,10 +722,12 @@ where
     let connect_info = runtime.connect_info;
     let observer = runtime.connection_error_observer;
     let runtime = runtime.inner;
-    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
-    // Tells connections still sniffing for the h2 preface that shutdown began.
-    #[cfg(feature = "http2")]
-    let (stop, _) = tokio::sync::watch::channel(());
+    // Every connection task holds a `done` sender and watches `signal`;
+    // shutdown fires the signal, then waits for the senders to be dropped.
+    // (`GracefulShutdown::watch` cannot wrap an upgradeable connection, and
+    // this form also covers the connections that are still sniffing for h2.)
+    let (signal, _) = tokio::sync::watch::channel(());
+    let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
     tokio::pin!(shutdown);
     while let Some(Accepted {
         io: stream,
@@ -739,12 +741,13 @@ where
             let prepared = connection.prepare(request);
             async move { Ok::<_, Infallible>(prepared.await) }
         });
+        let observer = observer.clone();
+        let mut stop = signal.subscribe();
+        let done = done_tx.clone();
         #[cfg(feature = "http2")]
         if h2c {
-            let watcher = graceful.watcher();
-            let observer = observer.clone();
-            let mut stop = stop.subscribe();
             tokio::spawn(async move {
+                let _done = done;
                 let _slot = slot;
                 let mut stream = stream;
                 let mut seen = Vec::new();
@@ -785,11 +788,21 @@ where
                     if let Some(limit) = max_streams {
                         builder.max_concurrent_streams(limit);
                     }
-                    watcher.watch(builder.serve_connection(io, service)).await
+                    drive(
+                        builder.serve_connection(io, service),
+                        &mut stop,
+                        |connection| connection.graceful_shutdown(),
+                    )
+                    .await
                 } else {
-                    watcher
-                        .watch(http1_builder(header_read_timeout).serve_connection(io, service))
-                        .await
+                    let connection =
+                        http1_builder(header_read_timeout).serve_connection(io, service);
+                    #[cfg(feature = "websocket")]
+                    let connection = connection.with_upgrades();
+                    drive(connection, &mut stop, |connection| {
+                        connection.graceful_shutdown()
+                    })
+                    .await
                 };
                 if let Err(error) = outcome {
                     report_connection_error(&observer, &error);
@@ -799,19 +812,44 @@ where
         }
         let io = hyper_util::rt::TokioIo::new(stream);
         let connection = http1_builder(header_read_timeout).serve_connection(io, service);
-        let connection = graceful.watch(connection);
-        let observer = observer.clone();
+        #[cfg(feature = "websocket")]
+        let connection = connection.with_upgrades();
         tokio::spawn(async move {
+            let _done = done;
             let _slot = slot;
-            if let Err(error) = connection.await {
+            if let Err(error) = drive(connection, &mut stop, |connection| {
+                connection.graceful_shutdown()
+            })
+            .await
+            {
                 report_connection_error(&observer, &error);
             }
         });
     }
-    #[cfg(feature = "http2")]
-    let _ = stop.send(());
-    let _ = tokio::time::timeout(shutdown_timeout, graceful.shutdown()).await;
+    let _ = signal.send(());
+    drop(done_tx);
+    let _ = tokio::time::timeout(shutdown_timeout, done_rx.recv()).await;
     Ok(())
+}
+
+/// Drives a connection until it ends, asking it to finish gracefully (idle
+/// keep-alive closes at once, in-flight requests complete) when `stop` fires.
+pub(crate) async fn drive<C, E>(
+    connection: C,
+    stop: &mut tokio::sync::watch::Receiver<()>,
+    graceful: impl FnOnce(Pin<&mut C>),
+) -> Result<(), E>
+where
+    C: Future<Output = Result<(), E>>,
+{
+    let mut connection = std::pin::pin!(connection);
+    tokio::select! {
+        result = connection.as_mut() => result,
+        _ = stop.changed() => {
+            graceful(connection.as_mut());
+            connection.await
+        }
+    }
 }
 
 /// The HTTP/2 connection preface a client sends first with prior knowledge.

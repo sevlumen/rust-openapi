@@ -496,8 +496,39 @@ rate limits, `Cors`) do not run for files, so mount it under a prefix of its
 own (ideally `app.layer_for("/assets", ServeDir::new(..))`) and register `Cors`
 first if fonts are fetched cross-origin.
 
-WebSocket is not provided: it needs connection-upgrade support that the server
-loop does not have.
+**WebSocket** (feature `websocket`, over `tokio-tungstenite`). Use
+`WebSocketUpgrade` in a raw route, which receives the `Request<Incoming>` an
+upgrade needs:
+
+```rust
+use hyper::body::Incoming;
+use oas_rs::{Message, WebSocketUpgrade};
+
+app.raw(Method::GET, "/ws", |request: Request<Incoming>| async move {
+    WebSocketUpgrade::new(request)
+        .allow_origin("https://app.example")
+        .on_upgrade(|mut socket| async move {
+            while let Some(Ok(message)) = socket.recv().await {
+                if let Message::Text(text) = message {
+                    let _ = socket.send(Message::Text(text)).await;
+                }
+            }
+        })
+});
+```
+
+Layers (authentication, rate limits) run before the handshake like for any
+route; a request that is not a valid handshake gets `400` (`426` for a wrong
+version) and a disallowed origin `403`. Browsers do not apply CORS to
+WebSockets, so list the allowed origins with `allow_origin` for
+cookie-authenticated endpoints (a request with no `Origin` header, which is not
+a browser, is not blocked by that check). `protocols([...])` negotiates a
+subprotocol; messages above `max_message_size` (1 MiB by default) end the
+session; pings are answered automatically. Limits: HTTP/1.1 only (no RFC 8441
+over HTTP/2), no `permessage-deflate`, and after the upgrade the connection
+belongs to your handler task: graceful shutdown does not wait for it, so watch
+your own shutdown signal if sessions must be closed politely. The route is not
+described in the OpenAPI document (add `.summary(..)` / a note yourself).
 
 ## Middleware
 
@@ -733,7 +764,7 @@ benchmark on your own hardware for absolute values.
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --features 'uuid test-util swagger multipart tls http2 compression compression-brotli static-files'
+cargo test --workspace --all-targets --features 'uuid test-util swagger multipart tls http2 compression compression-brotli static-files websocket'
 cargo test --doc --workspace
 cargo build --workspace --examples --features 'uuid swagger tls http2'
 ```
@@ -747,8 +778,7 @@ version) before committing.
 
 ## Roadmap
 
-Not provided, and not planned for now: WebSocket (it needs connection-upgrade
-support that the server loop does not have), HTTP/3 (a QUIC stack), and zstd
+Not provided, and not planned for now: HTTP/3 (a QUIC stack) and zstd
 compression (a C dependency). Still open: the full HTTP acceptance benchmark
 matrix.
 

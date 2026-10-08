@@ -260,6 +260,8 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
                     return;
                 }
                 let conn = http1_builder(header_read_timeout).serve_connection(io, service);
+                #[cfg(feature = "websocket")]
+                let conn = conn.with_upgrades();
                 tokio::pin!(conn);
                 let result = tokio::select! {
                     result = conn.as_mut() => result,

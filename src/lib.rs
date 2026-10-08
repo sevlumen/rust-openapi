@@ -52,6 +52,8 @@ mod static_files;
 mod tls;
 mod trace;
 mod web;
+#[cfg(feature = "websocket")]
+mod websocket;
 pub use app::App;
 use app::Operation;
 pub use bearer::{BearerAuth, constant_time_eq};
@@ -108,6 +110,10 @@ pub use static_files::ServeDir;
 pub use tls::{TlsConfig, TlsError};
 pub use trace::{Trace, TraceRecord};
 pub use web::{Cookies, Form, Headered, Html, Redirect, ResponseExt, SameSite, SetCookie};
+#[cfg(feature = "websocket")]
+pub use websocket::{
+    CloseFrame, Message, WebSocket, WebSocketError, WebSocketResponse, WebSocketUpgrade,
+};
 
 pub use http::Method;
 pub use oas_rs_macros::ApiSchema;
