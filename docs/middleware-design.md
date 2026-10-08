@@ -40,7 +40,7 @@ pub trait Middleware: Send + Sync + 'static {
   have no such concern.
 - `Next` is an owned, `'static` handle (an `Arc` plus an index), so ordinary
   `async fn`s work without lifetime gymnastics. `Next::run(self, request) ->
-  impl Future<Output = HttpResponse>` runs the remaining layers and then the
+  BoxFuture<HttpResponse>` runs the remaining layers and then the
   normal dispatch.
 - `App::layer(&mut self, middleware: impl Middleware) -> &mut Self` registers
   a global layer. The layer registered first runs outermost.
@@ -70,8 +70,10 @@ pub trait Middleware: Send + Sync + 'static {
 
 ## Architecture
 
-- `AppRuntime` stores `Option<Arc<[Arc<dyn Middleware>]>>`. `None` is the
-  existing request path, untouched: one `Option` check per request.
+- `AppRuntime` shares its state through an `Arc<RuntimeInner>` whose
+  `middleware: Box<[Arc<dyn Middleware>]>` is empty when no layer is
+  registered. An empty list is the existing request path, untouched: one
+  `is_empty()` check per request.
 - With layers present, the connection wraps `Request<Incoming>` as
   `Request<RequestBody::Incoming>` and starts the chain. Each layer returns a
   boxed future, so each registered layer costs one allocation per request.
@@ -143,3 +145,9 @@ TCP loopback (16 connections, 3 s, mean of 3 alternating runs):
 
 Conclusion: the no-middleware path is unchanged within measurement noise, and a
 no-op layer costs about 1.7% of keep-alive throughput.
+
+Re-measured after the real-connection terminal was boxed directly (mean of 3
+alternating TCP loopback runs, same session): keep-alive 225,000 req/s with no
+layer versus 223,700 req/s with one no-op layer (-0.6%); short connections
+61,100 versus 61,100 req/s (unchanged). The first-layer cost quoted above applies
+to the in-memory path used by `oneshot` and the microbenchmark.

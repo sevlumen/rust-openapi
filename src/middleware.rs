@@ -1,10 +1,13 @@
 use crate::*;
 use http_body::{Body, Frame, SizeHint};
+use std::fmt;
 
 /// The request body seen by middleware: Hyper's streaming body for real
 /// connections, or an in-memory buffer for [`AppRuntime::oneshot`]. It can be
 /// read, but only the framework constructs it, so the same body always reaches
-/// the handler at the end of the chain.
+/// the handler at the end of the chain. Reading it in a layer consumes it:
+/// handlers and extractors downstream see only what is left (for an in-memory
+/// request, nothing).
 pub struct RequestBody(RequestBodyKind);
 
 enum RequestBodyKind {
@@ -12,6 +15,19 @@ enum RequestBodyKind {
     /// In-memory body; only `AppRuntime::oneshot` (test-util) constructs it.
     #[allow(dead_code)]
     Full(Option<Bytes>),
+}
+
+impl fmt::Debug for RequestBody {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match &self.0 {
+            RequestBodyKind::Incoming(_) => "incoming",
+            RequestBodyKind::Full(_) => "full",
+        };
+        formatter
+            .debug_struct("RequestBody")
+            .field("kind", &kind)
+            .finish()
+    }
 }
 
 impl RequestBody {
@@ -88,6 +104,18 @@ pub struct Next {
     index: usize,
 }
 
+impl fmt::Debug for Next {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Next")
+            .field(
+                "remaining_layers",
+                &(self.host.middleware().len() - self.index),
+            )
+            .finish()
+    }
+}
+
 impl Next {
     pub(crate) fn new(host: Arc<dyn Host>) -> Self {
         Self { host, index: 0 }
@@ -121,18 +149,17 @@ impl<S: Send + Sync + 'static> Host for RuntimeInner<S> {
     }
 
     fn dispatch(self: Arc<Self>, request: Request<RequestBody>) -> BoxFuture<HttpResponse> {
-        Box::pin(async move {
-            let (parts, body) = request.into_parts();
-            match body.0 {
-                RequestBodyKind::Incoming(incoming) => {
-                    let request = Request::from_parts(parts, incoming);
-                    ConnectionRuntime::new(self).prepare_direct(request).await
-                }
-                RequestBodyKind::Full(bytes) => {
-                    let request = Request::from_parts(parts, bytes.unwrap_or_default());
-                    self.runtime_ref().handle(request).await
-                }
-            }
-        })
+        let (parts, body) = request.into_parts();
+        match body.0 {
+            // The prepared dispatch is already a `'static` future, so box it
+            // directly instead of wrapping it in a larger async block.
+            RequestBodyKind::Incoming(incoming) => Box::pin(
+                ConnectionRuntime::new(self).prepare_direct(Request::from_parts(parts, incoming)),
+            ),
+            RequestBodyKind::Full(bytes) => Box::pin(async move {
+                let request = Request::from_parts(parts, bytes.unwrap_or_default());
+                self.runtime_ref().handle(request).await
+            }),
+        }
     }
 }

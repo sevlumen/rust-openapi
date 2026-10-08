@@ -390,3 +390,29 @@ async fn early_return_keeps_the_connection_usable_for_the_next_keep_alive_reques
     assert_eq!(out.matches("HTTP/1.1 200").count(), 1, "{out}");
     assert!(out.ends_with("hello"), "{out}");
 }
+
+#[tokio::test]
+async fn request_body_and_next_implement_debug() {
+    let seen = Arc::new(Mutex::new(String::new()));
+    let sink = Arc::clone(&seen);
+    let mut app = App::new();
+    app.get("/", hello);
+    app.layer(move |request: Request<RequestBody>, next: Next| {
+        let sink = Arc::clone(&sink);
+        async move {
+            *sink.lock().unwrap() = format!("{:?} | {:?}", request.body(), next);
+            next.run(request).await
+        }
+    });
+    let runtime = app.build().unwrap();
+    runtime.oneshot(Method::GET, "/", &[], None).await;
+    let text = seen.lock().unwrap().clone();
+    assert!(
+        text.contains("RequestBody") && text.contains("full"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Next") && text.contains("remaining_layers"),
+        "{text}"
+    );
+}

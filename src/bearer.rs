@@ -32,6 +32,7 @@ impl BearerAuth {
     }
 
     /// Exact paths (a trailing slash is ignored) that do not require a token.
+    /// Paths must start with `/`. Calling this again replaces the list.
     pub fn exempt_paths<I, T>(mut self, paths: I) -> Self
     where
         I: IntoIterator<Item = T>,

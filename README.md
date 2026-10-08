@@ -2,7 +2,7 @@
 
 Typed HTTP routing on Hyper + Tokio with startup-generated OpenAPI 3.1
 metadata. The V1 release line is Cargo `0.1.0`; the public API and HTTP
-semantics are frozen for the `0.1` line. Licensed under the MIT License.
+semantics follow semver within the `0.2` line. Licensed under the MIT License.
 
 ## Quick start
 
@@ -193,8 +193,9 @@ app.layer(timing);
 
 Layers run before routing, so they also see `404`, `405`, automatic `OPTIONS`
 and `HEAD` requests. A layer may answer without calling `next` (for example
-`401`). It can read or change the request head and read the body, but cannot
-substitute a different body. There is no per-route layer yet, and panics are
+`401`). It can read or change the request head and read the body (which
+consumes it for the handler and extractors downstream), but cannot substitute a
+different body. There is no per-route layer yet, and panics are
 not caught. `BearerAuth` *enforces* a bearer token; `OpenApiOptions::bearer_auth`
 only *documents* the scheme, so use both for a protected, documented API.
 
@@ -213,7 +214,7 @@ status and elapsed time of every request.
 
 ```toml
 [dependencies]
-oas-rs = "0.1"
+oas-rs = "0.2"
 ```
 
 Enable optional features as needed: `swagger` (Swagger UI), `uuid` (UUID
