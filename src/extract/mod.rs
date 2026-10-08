@@ -246,6 +246,23 @@ pub struct Query<T>(pub T);
 #[derive(Clone, Debug)]
 pub struct Header<T>(pub T);
 
+/// All request headers, for code that reads many or dynamic headers. Cloning
+/// the map allocates a few times per request that extracts it, so prefer
+/// [`Header`] for one or two known headers. It documents no OpenAPI
+/// parameters.
+#[derive(Clone, Debug)]
+pub struct Headers(pub http::HeaderMap);
+
+impl<S: Send + Sync + 'static> FromRequest<S> for Headers {
+    fn from_request(
+        request: &mut Request<Bytes>,
+        _params: &Params,
+        _state: &Arc<S>,
+    ) -> Result<Self, ApiError> {
+        Ok(Headers(request.headers().clone()))
+    }
+}
+
 pub trait HeaderSpec: Sized + Send + 'static {
     const NAME: &'static str;
     const HEADER_NAME: header::HeaderName = header::HeaderName::from_static(Self::NAME);

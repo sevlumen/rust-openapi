@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `Cors` middleware: preflight handling, `Access-Control-*` headers,
+  credentials, exposed headers, `Vary`.
+- `TestResponse::header_all` (test-util) for headers that repeat.
+- `Headers` extractor exposing the request's `HeaderMap`.
+
 ## [0.6.0] - 2026-10-08
 
 ### Added
