@@ -112,3 +112,34 @@ Added to `benches/router.rs` and run through `AppRuntime::oneshot`:
   possible later extension.
 - Adding `RequestBody` and `Next` to the public API commits to them for the
   0.2 line.
+
+## Results (measured 2026-10-08, Docker Linux, Rust 1.88, release profile)
+
+In-memory microbenchmark (`benches/router.rs`, `AppRuntime::oneshot`, 100,000
+iterations, median of 3 runs; run-to-run noise is roughly ±5%, with an
+occasional outlier):
+
+| No-op layers | ns/op | allocations/op | bytes/op |
+|---|---|---|---|
+| 0 | 283.8 | 3 | 666 |
+| 1 | 403.3 | 5 | 2,866 |
+| 3 | 489.5 | 7 | 3,490 |
+| 5 | 569.8 | 9 | 4,114 |
+
+- Zero layers keeps exactly 3 allocations and 666 bytes per request, identical
+  to the pre-change path (the pre-change `plaintext` case measured 256–278 ns
+  in the same session).
+- Each additional layer costs about 40 ns, one allocation and about 310 bytes.
+  The first layer also pays a fixed cost (about 120 ns, one extra allocation
+  and about 1.9 KB) for the boxed terminal dispatch; in-memory dispatch is the
+  larger state machine, so the real-connection terminal is cheaper.
+
+TCP loopback (16 connections, 3 s, mean of 3 alternating runs):
+
+| Scenario | `main` before | this branch, 0 layers | this branch, 1 no-op layer |
+|---|---|---|---|
+| Keep-alive | 223,800 req/s | 224,000 req/s (+0.1%) | 220,100 req/s (-1.7%) |
+| Short connections | 60,900 req/s | 61,000 req/s (+0.2%) | 61,200 req/s (+0.5%) |
+
+Conclusion: the no-middleware path is unchanged within measurement noise, and a
+no-op layer costs about 1.7% of keep-alive throughput.
