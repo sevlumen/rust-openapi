@@ -1,7 +1,4 @@
-use std::{
-    future::Future,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 use http::{Request, StatusCode};
 use oas_rs::{ApiError, App, IntoResponse, Method, Next, RequestBody};
@@ -11,21 +8,16 @@ async fn ok() -> &'static str {
 }
 
 /// A layer that rejects with 401 unless `x-token: yes` is present.
-fn auth(
-    request: Request<RequestBody>,
-    next: Next,
-) -> impl Future<Output = oas_rs::HttpResponse> + Send + 'static {
-    async move {
-        let allowed = request
-            .headers()
-            .get("x-token")
-            .and_then(|value| value.to_str().ok())
-            == Some("yes");
-        if allowed {
-            next.run(request).await
-        } else {
-            ApiError::new(StatusCode::UNAUTHORIZED, "Unauthorized", "token").into_response()
-        }
+async fn auth(request: Request<RequestBody>, next: Next) -> oas_rs::HttpResponse {
+    let allowed = request
+        .headers()
+        .get("x-token")
+        .and_then(|value| value.to_str().ok())
+        == Some("yes");
+    if allowed {
+        next.run(request).await
+    } else {
+        ApiError::new(StatusCode::UNAUTHORIZED, "Unauthorized", "token").into_response()
     }
 }
 

@@ -314,8 +314,7 @@ Layers run before routing, so they also see `404`, `405`, automatic `OPTIONS`
 and `HEAD` requests. A layer may answer without calling `next` (for example
 `401`). It can read or change the request head and read the body (which
 consumes it for the handler and extractors downstream), but cannot substitute a
-different body. There is no per-route layer yet, and panics are
-not caught. `BearerAuth` *enforces* a bearer token; `OpenApiOptions::bearer_auth`
+different body. Panics are not caught. `BearerAuth` *enforces* a bearer token; `OpenApiOptions::bearer_auth`
 only *documents* the scheme, so use both for a protected, documented API.
 
 With no layers registered, the request path is unchanged. The first layer adds a
@@ -328,6 +327,45 @@ CORS preflight `OPTIONS` requests, which browsers send without credentials.
 Register a layer that answers preflights before `BearerAuth`, or list the
 paths in `exempt_paths`. `Trace::new(|record| ...)` receives the method, path,
 status and elapsed time of every request.
+
+### Scoped middleware
+
+A layer can apply to part of the API only. Layers still run before routing, so
+"part of the API" is defined by the request **path**:
+
+```rust
+app.layer(Trace::stderr());                     // every request
+app.group("/admin", |g| {
+    g.layer(BearerAuth::new(validate));         // only /admin and below
+    g.get("/users", list).tag("admin");         // registered as /admin/users
+    g.group("/v1", |g| { g.post("/reset", reset); });
+});
+app.layer_for("/tenants/{id}", tenant_check);   // scope by path pattern
+app.get("/export", export).route_layer(audit);  // this route's path and method
+```
+
+- Every `Group` method returns the group itself, so `g.get("/a", h).get("/b", h2)`
+  registers both routes under the prefix. Per-route calls such as `.tag(..)`,
+  `.security(..)`, `.public()`, `.body_limit(..)` and `.route_layer(..)` work on the
+  route just registered.
+- A prefix matches whole segments: `/admin` covers `/admin`, `/admin/` and
+  `/admin/x`, not `/administrator`; `{name}` matches any one segment. A prefix
+  also covers paths with no route under it (a `404`), so an authentication
+  layer does not reveal which routes exist.
+- Segments are split like the router does (repeated slashes are ignored), so a
+  scope is never narrower than routing.
+- `route_layer` matches the route's path pattern and method (a `HEAD` request
+  matches a `GET` route); other methods on the same path, and automatic
+  `OPTIONS` answers, are not affected.
+- Layers run in registration order, global and scoped interleaved; a scoped
+  layer is skipped for requests outside its scope. A request that no layer
+  covers skips the middleware chain completely (same cost as an app without
+  middleware); a matching scoped layer costs about as much as a global one.
+- **Caveat:** matching uses the raw, undecoded path, like static routing. A
+  request such as `/%61dmin/x` does not match an `/admin` scope, and does not
+  match a static `/admin/x` route either; it can only reach a top-level dynamic
+  route such as `/{section}/x`. If you have top-level dynamic routes, protect
+  sensitive prefixes with a global layer that checks the path explicitly.
 
 ## Installation
 

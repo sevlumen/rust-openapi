@@ -1,6 +1,6 @@
 # Scoped middleware design for oas-rs
 
-Status: approved design, being implemented. Target release: 0.5.0.
+Status: implemented (see Results at the end). Target release: 0.5.0.
 
 ## Goal
 
