@@ -15,4 +15,4 @@ wildcards = "deny"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-registry = ["https://github.com/rust-lang/crates.io-index", "sparse+https://storage.quangt.com/cargo/index/"]
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

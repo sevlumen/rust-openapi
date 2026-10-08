@@ -5,30 +5,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-### Added
-- `#[derive(ApiSchema)]` on unit-variant enums and support for
-  `#[serde(rename)]` / `#[serde(rename_all)]` on structs and enums.
-- `ApiSchema` implementations for `f32`, `f64`, small integers, `Box`,
+## [0.1.0] - 2026-10-08
+
+First public release.
+
+### Features
+- Typed routing on Hyper and Tokio with startup-generated OpenAPI 3.1 metadata
+  and an opt-in Swagger UI (pinned `swagger-ui-dist@5.17.14` with Subresource
+  Integrity hashes).
+- Extractors (`Path`, `Query`, `Header`, `Json`, `State`, `Params`) and response
+  types with RFC 9457-style `ApiError`.
+- `#[derive(ApiSchema)]` for structs and unit-variant enums, with
+  `#[serde(rename)]` / `#[serde(rename_all)]` support. Built-in schemas cover
+  `String`, `bool`, integers, `f32`/`f64`, `Uuid`, `Option`, `Vec`, `Box`,
   string-keyed maps and `serde_json::Value`.
-- `LICENSE-MIT`, `CONTRIBUTING.md`, and `scripts/verify-docker.sh`.
-- Crate metadata (`repository`, `readme`, `keywords`, `categories`, `rust-version`).
 
-### Changed
-- Split the 1500-line `src/lib.rs` into `params`, `schema`, `codec` and `path`
-  modules and moved response, handler and extractor types next to their
-  related code. No public API or behavior change.
-- CI lints the default feature set as well as all features.
-- Swagger UI assets carry Subresource Integrity hashes.
-- CI runs `cargo-deny` (advisories, licenses, sources) via `deny.toml`.
-- CI and `scripts/verify-docker.sh` also build the docs with warnings denied.
-- Benchmark design notes moved to `docs/benchmark-design.md`; internal agent
-  plan files removed.
-- Swagger UI assets are pinned to `swagger-ui-dist@5.17.14`.
-- Inline-future safety invariants are enforced with `assert!` and documented
-  with `SAFETY` comments.
-- Query values are parsed once instead of twice.
-- Percent-decoding copies literal runs in bulk instead of byte by byte.
-
-## [0.1.0]
-
-- Initial release: typed routing on Hyper and Tokio with OpenAPI 3.1 generation.
+### Quality
+- Inline-future safety invariants are enforced with `assert!`, documented with
+  `SAFETY` comments, and checked by Miri in CI.
+- CI runs fmt, clippy (default and all features), tests, doctests, examples,
+  rustdoc with warnings denied, and `cargo-deny`.
+- `scripts/verify-docker.sh` runs the same gates locally in Docker.
+- MIT license, `CONTRIBUTING.md`, crate metadata and a minimum supported Rust
+  version of 1.88.

@@ -29,8 +29,6 @@ cargo bench --bench router --features uuid,test-util,swagger     # microbenchmar
 cargo +nightly miri test --lib inline_future --                  # CI gate for the unsafe inline-future code
 ```
 
-Docker note: the `quangt` registry is only declared in `.cargo/config.toml`. If a build runs with `CARGO_TARGET_DIR` outside the repo, trybuild (`tests/compile.rs`) will not find that config and fails with `registry index was not found ... quangt`; `verify-docker.sh` sets `CARGO_REGISTRIES_QUANGT_INDEX` to avoid this.
-
 ## Architecture
 
 Two-phase lifecycle: `App` (mutable builder, `src/app.rs`) → `App::build()` → `AppRuntime` (immutable, `src/runtime.rs`) that serves requests. All route compilation, OpenAPI document and Swagger HTML are produced once at `build()`; request dispatch does no OpenAPI work.
@@ -47,6 +45,6 @@ Two-phase lifecycle: `App` (mutable builder, `src/app.rs`) → `App::build()` �
 ## Conventions specific to this repo
 
 - HTTP semantics are specified in `README.md` (HEAD→GET fallback, automatic OPTIONS `204` + `Allow`, 404 vs 405, trailing-slash normalization, JSON media-type strictness, 1 MiB buffered body limit). Behavior changes need an acceptance test in `tests/acceptance.rs`.
-- Release distribution is via a private sparse Cargo registry (`quangt`, see README and `scripts/generate-sparse-index.ps1`), so `Cargo.toml` has `publish = ["quangt"]` and the macros dependency pins `registry = "quangt"`. Do not remove `.cargo/config.toml`.
+- Releases go to crates.io: publish `oas-rs-macros` first, wait for the index to update, then `oas-rs` (its macros dependency is pinned `=version` with a `path` for local development).
 - Performance work is judged against `benches/router.rs` (ns/op and allocations/op vs a raw-handler baseline); include before/after numbers. Design rationale is in `docs/benchmark-design.md`.
 - Update `CHANGELOG.md` for user-visible changes. `python3` is not available on the dev machine (use `python`).
