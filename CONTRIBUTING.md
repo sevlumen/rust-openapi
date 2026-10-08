@@ -38,6 +38,7 @@ It removes `target/` and those two volumes (everything is rebuilt on demand).
   `src/handler.rs` must keep the Miri job green.
 - Performance-sensitive changes should include `cargo bench --bench router`
   numbers before and after.
-- Update `CHANGELOG.md` for user-visible changes.
+- Update `CHANGELOG.md` for user-visible changes. The support policy (versions,
+  MSRV, what counts as public API) is in the README.
 
 By contributing you agree that your work is licensed under the MIT License.
