@@ -1,6 +1,6 @@
 # HTTP/2 design for oas-rs
 
-Status: approved design, being implemented. Target release: 0.5.0.
+Status: implemented (see Results at the end). Target release: 0.5.0.
 
 ## Goal
 
@@ -80,3 +80,38 @@ Written before the implementation, with a `hyper` HTTP/2 client over
   features and `--all-features`.
 - HTTP/2 rapid-reset style abuse is mitigated by `h2`'s defaults (bounded
   pending-accept reset streams); the version in use is recorded in the results.
+
+## Results (measured 2026-10-08, Docker Linux, Rust 1.88, release profile)
+
+Default-path gate, microbenchmark (`benches/router.rs`), 3 runs each:
+
+| Case | without `http2` | with `multipart,tls,http2` |
+|---|---|---|
+| `plaintext` (median) | 260.0 ns, 3 allocations | 260.0 ns, 3 allocations |
+| `static_route_count` (1 route, median) | 266.5 ns, 3 allocations | 260.6 ns, 3 allocations |
+
+One run of the second configuration showed a 296-302 ns outlier in both cases
+(the other two runs: 260 ns); run-to-run noise on this machine is about +/-5%
+with occasional outliers, so the medians are the comparison.
+
+TLS HTTP/1.1 over loopback (16 connections, keep-alive, 3 s, mean of 3
+alternating runs): `main` 205,300 req/s versus this branch with the `http2`
+feature on 205,400 req/s (p50 73-74 us, p99 152-175 us on both): unchanged.
+
+HTTP/2 versus HTTP/1.1 over TLS (same harness, tiny response, mean of 3 runs):
+
+| Client | Throughput | p50 | p99 |
+|---|---|---|---|
+| HTTP/1.1, 16 connections x 1 request in flight | 205,400 req/s | 73 us | 152-175 us |
+| HTTP/2, 16 connections x 1 stream | 112,100 req/s | 137 us | 257-291 us |
+| HTTP/2, 16 connections x 8 streams (128 in flight) | 227,300 req/s | 550 us | 990-1,197 us |
+
+At equal concurrency a single h2 stream costs about 1.8x the latency of an
+HTTP/1.1 request on a keep-alive connection (frame encoding, HPACK, per-stream
+tasks), so HTTP/2 is not a speed-up for tiny responses on loopback. Its value is
+multiplexing many requests over few connections: at 128 requests in flight it
+delivered about 11% more throughput than 16 HTTP/1.1 connections (latency is
+higher there because more requests are queued).
+
+Supply chain: `cargo deny check` passes with default features and with
+`--all-features`; the resolved `h2` version is 0.4.19.
