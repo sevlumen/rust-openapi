@@ -178,8 +178,13 @@ async fn timing(request: Request<RequestBody>, next: Next) -> oas_rs::HttpRespon
 app.layer(Trace::stderr()); // outermost: first registered runs first
 app.layer(
     BearerAuth::new(|token: String| async move {
-        // Validate against your own store; return an ApiError to reject.
-        if token == "secret" { Ok(()) } else { Err(oas_rs::ApiError::missing("bad token")) }
+        // Validate against your own store, comparing secrets in constant time
+        // (or compare hashes). Return an ApiError to reject.
+        if token == "secret" {
+            Ok(())
+        } else {
+            Err(oas_rs::ApiError::new(http::StatusCode::UNAUTHORIZED, "Unauthorized", "bad token"))
+        }
     })
     .exempt_paths(["/health", "/openapi.json"]),
 );
@@ -193,9 +198,15 @@ substitute a different body. There is no per-route layer yet, and panics are
 not caught. `BearerAuth` *enforces* a bearer token; `OpenApiOptions::bearer_auth`
 only *documents* the scheme, so use both for a protected, documented API.
 
-With no layers registered, the request path is unchanged. Each layer costs
-about 40 ns and one allocation per request (see `docs/middleware-design.md`
-for measurements). `Trace::new(|record| ...)` receives the method, path,
+With no layers registered, the request path is unchanged. The first layer adds a
+fixed cost of about 120 ns and two allocations (the boxed end of the chain);
+each further layer adds about 40 ns and one allocation (see
+`docs/middleware-design.md` for measurements).
+
+`BearerAuth` answers `401` to any non-exempt request without a token, including
+CORS preflight `OPTIONS` requests, which browsers send without credentials.
+Register a layer that answers preflights before `BearerAuth`, or list the
+paths in `exempt_paths`. `Trace::new(|record| ...)` receives the method, path,
 status and elapsed time of every request.
 
 ## Installation

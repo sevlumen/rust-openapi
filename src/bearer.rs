@@ -8,6 +8,11 @@ type Validator = dyn Fn(String) -> BoxFuture<Result<(), ApiError>> + Send + Sync
 /// It enforces authentication; declaring the scheme in the OpenAPI document is
 /// separate (see `OpenApiOptions::bearer_auth`). Paths listed in
 /// [`exempt_paths`](Self::exempt_paths) skip the check.
+///
+/// Every other request, including CORS preflight `OPTIONS` requests (which
+/// browsers send without credentials), gets `401` unless a layer registered
+/// before this one answers it. Compare secrets in constant time in the
+/// validator.
 #[derive(Clone)]
 pub struct BearerAuth {
     validator: Arc<Validator>,

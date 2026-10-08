@@ -363,3 +363,30 @@ async fn bearer_header_with_non_utf8_bytes_is_401_not_a_panic() {
     let out = String::from_utf8_lossy(&out);
     assert!(out.starts_with("HTTP/1.1 401"), "{out}");
 }
+
+#[tokio::test]
+async fn early_return_keeps_the_connection_usable_for_the_next_keep_alive_request() {
+    let mut app = App::new();
+    app.post("/", hello);
+    app.get("/ok", hello);
+    app.layer(|request: Request<RequestBody>, next: Next| async move {
+        if request.method() == Method::POST {
+            ApiError::new(http::StatusCode::UNAUTHORIZED, "Unauthorized", "no").into_response()
+        } else {
+            next.run(request).await
+        }
+    });
+    let (addr, _stop) = serve(app).await;
+    let body = "x".repeat(10_000);
+    let pipeline = format!(
+        "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n{body}\
+         GET /ok HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let out = tokio::time::timeout(Duration::from_secs(3), raw(addr, &pipeline))
+        .await
+        .expect("keep-alive connection hung after an early return");
+    assert_eq!(out.matches("HTTP/1.1 401").count(), 1, "{out}");
+    assert_eq!(out.matches("HTTP/1.1 200").count(), 1, "{out}");
+    assert!(out.ends_with("hello"), "{out}");
+}

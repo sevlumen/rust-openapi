@@ -4,6 +4,7 @@ use crate::*;
 
 /// One finished request, handed to the [`Trace`] callback.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct TraceRecord {
     pub method: Method,
     pub path: String,
