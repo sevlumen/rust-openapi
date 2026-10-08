@@ -85,6 +85,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 description: None,
                 security_schemes: Vec::new(),
                 default_security: Vec::new(),
+                document_errors: true,
             });
         }
         self.invalidate_openapi_cache();
@@ -445,6 +446,15 @@ impl<S: Send + Sync + 'static> App<S> {
 
     pub fn openapi_document(&self) -> Value {
         let mut paths = Map::new();
+        let document_errors = self
+            .openapi_config
+            .as_ref()
+            .is_none_or(|config| config.document_errors);
+        let default_secured = self
+            .openapi_config
+            .as_ref()
+            .is_some_and(|config| !config.default_security.is_empty());
+        let mut uses_problem = false;
         for metadata in self.metadata.iter() {
             if metadata.builtin {
                 continue;
@@ -524,7 +534,44 @@ impl<S: Send + Sync + 'static> App<S> {
                     json!({ "application/json": { "schema": schema } }),
                 );
             }
-            operation.insert("responses".to_owned(), json!({ status: response }));
+            let mut responses = Map::new();
+            responses.insert(status, Value::Object(response));
+            if document_errors {
+                let has_input = !metadata.operation.request.parameters.is_empty()
+                    || metadata.operation.request.request_body.is_some()
+                    || metadata
+                        .segments
+                        .iter()
+                        .any(|segment| matches!(segment, Segment::Capture(_)));
+                let mut errors: Vec<(&str, &str)> = Vec::new();
+                if has_input {
+                    errors.push(("400", "Bad Request"));
+                }
+                if metadata.operation.request.request_body.is_some() {
+                    errors.push(("413", "Payload Too Large"));
+                }
+                let secured = match &metadata.operation.security {
+                    Some(requirements) => !requirements.is_empty(),
+                    None => default_secured,
+                };
+                if secured {
+                    errors.push(("401", "Unauthorized"));
+                }
+                errors.sort();
+                for (code, description) in errors {
+                    uses_problem = true;
+                    responses.insert(
+                        code.to_owned(),
+                        json!({
+                            "description": description,
+                            "content": { "application/problem+json": {
+                                "schema": { "$ref": PROBLEM_REF }
+                            } }
+                        }),
+                    );
+                }
+            }
+            operation.insert("responses".to_owned(), Value::Object(responses));
             paths
                 .entry(metadata.template.clone())
                 .or_insert_with(|| Value::Object(Map::new()));
@@ -552,6 +599,10 @@ impl<S: Send + Sync + 'static> App<S> {
             "info": Value::Object(info),
             "paths": paths,
         });
+        let mut components = Map::new();
+        if uses_problem {
+            components.insert("schemas".to_owned(), json!({ "Problem": problem_schema() }));
+        }
         if let Some(config) = config {
             if !config.security_schemes.is_empty() {
                 let schemes: Map<String, Value> = config
@@ -559,7 +610,7 @@ impl<S: Send + Sync + 'static> App<S> {
                     .iter()
                     .map(|(name, scheme)| (name.clone(), scheme.to_json()))
                     .collect();
-                document["components"] = json!({ "securitySchemes": schemes });
+                components.insert("securitySchemes".to_owned(), Value::Object(schemes));
             }
             if !config.default_security.is_empty() {
                 document["security"] = Value::Array(
@@ -570,6 +621,9 @@ impl<S: Send + Sync + 'static> App<S> {
                         .collect(),
                 );
             }
+        }
+        if !components.is_empty() {
+            document["components"] = Value::Object(components);
         }
         document
     }
@@ -1022,4 +1076,20 @@ pub(crate) struct Operation {
     /// `None` inherits the document default; `Some(vec![])` is explicitly
     /// public; otherwise each entry is an AND group and entries are alternatives.
     pub(crate) security: Option<Vec<Vec<String>>>,
+}
+
+const PROBLEM_REF: &str = "#/components/schemas/Problem";
+
+/// The body of every error the framework produces (see `ApiError`).
+fn problem_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["type", "title", "status", "detail"],
+        "properties": {
+            "type": { "type": "string", "example": "about:blank" },
+            "title": { "type": "string" },
+            "status": { "type": "integer" },
+            "detail": { "type": "string" }
+        }
+    })
 }

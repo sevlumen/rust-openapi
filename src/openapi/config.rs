@@ -13,6 +13,8 @@ pub(crate) struct OpenApiConfig {
     /// Document-wide security requirements (each entry is an AND group; the
     /// entries are alternatives).
     pub(crate) default_security: Vec<Vec<String>>,
+    /// Whether routes document the errors the framework itself can return.
+    pub(crate) document_errors: bool,
 }
 
 #[cfg(any(test, feature = "swagger"))]
@@ -102,6 +104,20 @@ impl<S: Send + Sync + 'static> OpenApiOptions<'_, S> {
             .as_mut()
             .expect("OpenAPI options are initialized")
             .version = version.into();
+        self.app.invalidate_openapi_cache();
+        self
+    }
+
+    /// Whether every route documents the error responses the framework can
+    /// produce for it (`400` for bad parameters or bodies, `413` for a body
+    /// over the limit, `401` for secured routes), all pointing at the shared
+    /// `Problem` schema. On by default.
+    pub fn document_errors(self, enabled: bool) -> Self {
+        self.app
+            .openapi_config
+            .as_mut()
+            .expect("OpenAPI options are initialized")
+            .document_errors = enabled;
         self.app.invalidate_openapi_cache();
         self
     }
