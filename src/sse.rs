@@ -5,7 +5,7 @@ use futures_core::Stream;
 use crate::*;
 
 /// One server-sent event. `Display` gives the wire form.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Event {
     event: Option<String>,
     id: Option<String>,
@@ -19,12 +19,27 @@ fn one_line(value: &str) -> String {
     value.chars().filter(|c| *c != '\n' && *c != '\r').collect()
 }
 
+/// An id additionally may not contain NUL (clients ignore such an id).
+fn event_id(value: &str) -> String {
+    one_line(value).replace('\0', "")
+}
+
 impl Event {
     /// An event carrying `data`; line breaks in it become several `data:` lines.
     pub fn data(data: impl Into<String>) -> Self {
         Self {
             data: Some(data.into()),
-            ..Self::default()
+            ..Self::blank()
+        }
+    }
+
+    fn blank() -> Self {
+        Self {
+            event: None,
+            id: None,
+            retry: None,
+            data: None,
+            comment: None,
         }
     }
 
@@ -32,7 +47,7 @@ impl Event {
     pub fn comment(text: impl AsRef<str>) -> Self {
         Self {
             comment: Some(one_line(text.as_ref())),
-            ..Self::default()
+            ..Self::blank()
         }
     }
 
@@ -43,9 +58,9 @@ impl Event {
     }
 
     /// The event id (`id:`), sent back as `Last-Event-ID` on reconnect. Line
-    /// breaks are removed.
+    /// breaks and NUL are removed.
     pub fn id(mut self, id: impl AsRef<str>) -> Self {
-        self.id = Some(one_line(id.as_ref()));
+        self.id = Some(event_id(id.as_ref()));
         self
     }
 
@@ -163,6 +178,8 @@ where
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/event-stream")
             .header(header::CACHE_CONTROL, "no-cache")
+            // nginx buffers proxied responses unless told otherwise.
+            .header("x-accel-buffering", "no")
             .body(ResponseBody::stream(stream))
             .expect("a valid event-stream response")
     }

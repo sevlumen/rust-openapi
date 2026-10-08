@@ -35,14 +35,26 @@ struct Config {
 /// Responses carry `Content-Type` (by extension), `Content-Length`, a weak
 /// `ETag` and `Last-Modified`, and `If-None-Match` / `If-Modified-Since` get
 /// `304`. Large files are streamed. Not supported: `Range` requests (the
-/// whole file is sent), precompressed variants, directory listings. A
-/// directory serves its index file (`index.html` by default).
+/// whole file is sent, with `Accept-Ranges: none`), precompressed variants,
+/// directory listings. A directory serves its index file (`index.html` by
+/// default); a directory requested without a trailing slash is redirected
+/// (`308`) to the slashed URL so relative links in the page work.
 ///
 /// Safety: `..` segments, backslashes, NUL, drive-letter colons and hidden
 /// files (names starting with `.`, unless
 /// [`allow_dotfiles`](Self::allow_dotfiles)) are refused after percent-decoding,
-/// and the resolved path must stay inside the directory, so a symlink pointing
-/// out of it is not followed.
+/// and the resolved path must stay inside the directory and not name anything
+/// hidden, so neither a symlink pointing out of it or at a dotfile, nor a
+/// Windows 8.3 short name, gets through. Paths are compared by the file
+/// system's own rules (`/assets/APP.CSS` works on Windows), and a file swapped
+/// between the check and the read is a limitation shared by every file server.
+///
+/// **Order matters.** The layer runs before routing, so a file under the
+/// prefix wins over an application route with the same path (mount it under
+/// a prefix of its own, ideally scoped with `app.layer_for("/assets", ..)` so
+/// other requests skip it), and layers registered after it (authentication,
+/// rate limits, `Cors`) do not run for served files: register `Cors` first if
+/// fonts are fetched cross-origin.
 #[derive(Clone)]
 pub struct ServeDir {
     config: Arc<Config>,
@@ -138,22 +150,39 @@ impl Config {
         Some(segments)
     }
 
-    async fn resolve(&self, segments: &[String]) -> Option<(PathBuf, std::fs::Metadata)> {
+    async fn resolve(&self, segments: &[String]) -> Option<Resolved> {
         let mut path = self.root.clone();
         path.extend(segments);
         let mut path = self.contained(path).await?;
         let mut metadata = tokio::fs::metadata(&path).await.ok()?;
+        let mut via_directory = false;
         if metadata.is_dir() {
+            via_directory = true;
             path = self.contained(path.join(self.index.as_ref()?)).await?;
             metadata = tokio::fs::metadata(&path).await.ok()?;
         }
-        metadata.is_file().then_some((path, metadata))
+        metadata.is_file().then_some(Resolved {
+            path,
+            metadata,
+            via_directory,
+        })
     }
 
-    /// Canonicalizes `path` and requires it to be inside the root.
+    /// Canonicalizes `path` and requires it to be inside the root and, unless
+    /// dotfiles are allowed, to name nothing hidden. The check runs on the
+    /// resolved path so a symlink, hard link or Windows 8.3 short name
+    /// (`SECRET~1`) cannot reach a hidden file the request did not name.
     async fn contained(&self, path: PathBuf) -> Option<PathBuf> {
         let canonical = tokio::fs::canonicalize(path).await.ok()?;
-        canonical.starts_with(&self.root).then_some(canonical)
+        let relative = canonical.strip_prefix(&self.root).ok()?;
+        if !self.dotfiles
+            && relative
+                .components()
+                .any(|part| part.as_os_str().to_string_lossy().starts_with('.'))
+        {
+            return None;
+        }
+        Some(canonical)
     }
 }
 
@@ -169,6 +198,14 @@ fn content_type(path: &Path) -> &'static str {
         "js" | "mjs" => "text/javascript; charset=utf-8",
         "json" | "map" => "application/json",
         "txt" | "md" => "text/plain; charset=utf-8",
+        "webmanifest" => "application/manifest+json",
+        "xhtml" => "application/xhtml+xml",
+        "bmp" => "image/bmp",
+        "eot" => "application/vnd.ms-fontobject",
+        "flac" => "audio/flac",
+        "m4a" => "audio/mp4",
+        "jsonld" => "application/ld+json",
+        "rss" | "atom" => "application/xml",
         "csv" => "text/csv; charset=utf-8",
         "xml" => "application/xml",
         "svg" => "image/svg+xml",
@@ -193,6 +230,13 @@ fn content_type(path: &Path) -> &'static str {
         "gz" => "application/gzip",
         _ => "application/octet-stream",
     }
+}
+
+struct Resolved {
+    path: PathBuf,
+    metadata: std::fs::Metadata,
+    /// The request named a directory and its index file was chosen.
+    via_directory: bool,
 }
 
 /// Streams a file in chunks, ending after `remaining` bytes.
@@ -269,8 +313,22 @@ async fn serve(
     segments: Vec<String>,
     validators: Validators,
     head: bool,
+    redirect_to: Option<String>,
 ) -> Option<HttpResponse> {
-    let (path, metadata) = config.resolve(&segments).await?;
+    let Resolved {
+        path,
+        metadata,
+        via_directory,
+    } = config.resolve(&segments).await?;
+    if via_directory && let Some(location) = redirect_to {
+        // `/dir` -> `/dir/`: relative links in the index page need the slash.
+        return Response::builder()
+            .status(StatusCode::PERMANENT_REDIRECT)
+            .header(header::LOCATION, location)
+            .header(header::CONTENT_LENGTH, "0")
+            .body(ResponseBody::full(Bytes::new()))
+            .ok();
+    }
     let length = metadata.len();
     let modified = metadata.modified().ok();
     let etag = modified.map(|modified| {
@@ -281,6 +339,7 @@ async fn serve(
     });
     let mut builder = Response::builder()
         .header(header::CONTENT_TYPE, content_type(&path))
+        .header(header::ACCEPT_RANGES, "none")
         .header("x-content-type-options", "nosniff");
     if let Some(cache_control) = &config.cache_control {
         builder = builder.header(header::CACHE_CONTROL, cache_control.clone());
@@ -305,7 +364,10 @@ async fn serve(
     let body = if head {
         ResponseBody::full(Bytes::new())
     } else if length <= SMALL_FILE {
-        ResponseBody::full(Bytes::from(tokio::fs::read(&path).await.ok()?))
+        // Never more than the declared length, even if the file grew since.
+        let mut bytes = tokio::fs::read(&path).await.ok()?;
+        bytes.truncate(length as usize);
+        ResponseBody::full(Bytes::from(bytes))
     } else {
         let file = tokio::fs::File::open(&path).await.ok()?;
         ResponseBody::stream(FileChunks {
@@ -336,9 +398,15 @@ impl Middleware for ServeDir {
             if_none_match: text(header::IF_NONE_MATCH),
             if_modified_since: text(header::IF_MODIFIED_SINCE),
         };
+        // Where a directory request without a trailing slash is sent.
+        let path = request.uri().path();
+        let redirect_to = (!path.ends_with('/')).then(|| match request.uri().query() {
+            Some(query) => format!("{path}/?{query}"),
+            None => format!("{path}/"),
+        });
         let config = Arc::clone(&self.config);
         Box::pin(async move {
-            match serve(&config, segments, validators, head).await {
+            match serve(&config, segments, validators, head, redirect_to).await {
                 Some(response) => response,
                 None => next.run(request).await,
             }

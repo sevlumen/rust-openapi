@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use bytes::Bytes;
 use http::{HeaderName, HeaderValue, StatusCode};
 use oas_rs::{App, Cookies, Html, Method, Redirect, ResponseExt, SameSite, SetCookie};
 
@@ -171,4 +172,42 @@ async fn malformed_cookie_pairs_are_skipped_not_fatal() {
         )
         .await;
     assert_eq!(response.body_string().await, "1|2|-");
+}
+
+#[tokio::test]
+async fn a_non_ascii_cookie_does_not_hide_the_others() {
+    let response = runtime().oneshot(Method::GET, "/read", &[], None).await;
+    assert_eq!(response.body_string().await, "-|-|-");
+    // Header values with raw UTF-8 bytes cannot go through `oneshot`'s string
+    // API, so exercise the parser through a request built by hand.
+    let mut request = http::Request::new(Bytes::new());
+    request.headers_mut().insert(
+        http::header::COOKIE,
+        HeaderValue::from_bytes("a=1; name=\u{fc}ber; b=2".as_bytes()).unwrap(),
+    );
+    let cookies = <Cookies as oas_rs::FromRequest<()>>::from_request(
+        &mut request,
+        &oas_rs::Params::default(),
+        &std::sync::Arc::new(()),
+    )
+    .unwrap();
+    assert_eq!(cookies.get("a"), Some("1"));
+    assert_eq!(cookies.get("b"), Some("2"));
+    assert_eq!(cookies.get("name"), Some("\u{fc}ber"));
+}
+
+#[test]
+fn a_sub_second_max_age_rounds_up_instead_of_deleting_the_cookie() {
+    assert_eq!(
+        SetCookie::new("a", "b")
+            .max_age(Duration::from_millis(500))
+            .to_string(),
+        "a=b; Max-Age=1"
+    );
+}
+
+#[test]
+#[should_panic(expected = "Domain")]
+fn a_non_ascii_domain_is_rejected() {
+    let _ = SetCookie::new("a", "b").domain("ex\u{e4}mple.com");
 }

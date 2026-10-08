@@ -76,11 +76,9 @@ async fn files_are_served_with_type_length_and_validators() {
 async fn directories_serve_their_index_file() {
     let site = Site::new("index");
     let runtime = site.runtime(ServeDir::new("/assets", site.public()));
-    for uri in ["/assets", "/assets/"] {
-        let response = get(&runtime, uri).await;
-        assert_eq!(response.status(), 200, "{uri}");
-        assert_eq!(response.body_string().await, "<h1>home</h1>", "{uri}");
-    }
+    let response = get(&runtime, "/assets/").await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.body_string().await, "<h1>home</h1>");
     let sub = get(&runtime, "/assets/sub/").await;
     assert_eq!(sub.body_string().await, "<p>sub</p>");
     let nested = get(&runtime, "/assets/sub/page.txt").await;
@@ -247,4 +245,67 @@ async fn serving_from_the_root_prefix_works() {
     );
     // Routes registered by the app still win when no file matches.
     assert_eq!(get(&runtime, "/api/ping").await.body_string().await, "pong");
+}
+
+#[tokio::test]
+async fn a_directory_without_a_trailing_slash_redirects_so_relative_links_work() {
+    let site = Site::new("redirect");
+    let runtime = site.runtime(ServeDir::new("/assets", site.public()));
+    for (uri, location) in [
+        ("/assets", "/assets/"),
+        ("/assets/sub", "/assets/sub/"),
+        ("/assets/sub?v=1", "/assets/sub/?v=1"),
+    ] {
+        let response = get(&runtime, uri).await;
+        assert_eq!(response.status(), 308, "{uri}");
+        assert_eq!(response.header("location"), Some(location), "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn files_say_they_do_not_support_ranges() {
+    let site = Site::new("ranges");
+    let runtime = site.runtime(ServeDir::new("/assets", site.public()));
+    let response = runtime
+        .oneshot(
+            Method::GET,
+            "/assets/app.css",
+            &[("range", "bytes=0-1")],
+            None,
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.header("accept-ranges"), Some("none"));
+}
+
+#[tokio::test]
+async fn windows_short_names_do_not_reach_hidden_files() {
+    // On NTFS `.secret` may also be reachable as `SECRET~1`; the check runs on
+    // the resolved name. Elsewhere this simply is not found.
+    let site = Site::new("shortname");
+    let runtime = site.runtime(ServeDir::new("/assets", site.public()));
+    for uri in ["/assets/SECRET~1", "/assets/secret~1"] {
+        let response = get(&runtime, uri).await;
+        let body = response.body_string().await;
+        assert!(!body.contains("hidden"), "{uri}: {body}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_to_a_hidden_file_is_not_served() {
+    let site = Site::new("dotlink");
+    std::os::unix::fs::symlink(
+        site.public().join(".secret"),
+        site.public().join("plain.txt"),
+    )
+    .unwrap();
+    let runtime = site.runtime(ServeDir::new("/assets", site.public()));
+    let response = get(&runtime, "/assets/plain.txt").await;
+    assert_eq!(response.status(), 404);
+    let allowed = site.runtime(ServeDir::new("/assets", site.public()).allow_dotfiles(true));
+    assert_eq!(
+        get(&allowed, "/assets/plain.txt").await.body_string().await,
+        "hidden"
+    );
 }

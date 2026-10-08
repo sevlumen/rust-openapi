@@ -464,8 +464,10 @@ whatever constructor is used.
 **Cookies and forms.** The `Cookies` extractor reads every `Cookie` header
 (`cookies.get("sid")`; malformed pairs are skipped, values are not
 percent-decoded). `Form<T>` decodes an `application/x-www-form-urlencoded`
-body (`+` is a space) into a type that derives `ApiSchema` and `Deserialize`,
-and documents the form in OpenAPI; other media types get `415`.
+body (`+` is a space; each value is parsed into its field's own type, so a
+`String` keeps `123456` as text; a repeated key keeps the last value; `a[]=1`
+and nested keys are not supported) into a type that derives `ApiSchema` and
+`Deserialize`, and documents the form in OpenAPI; other media types get `415`.
 
 **Peer address.** `runtime.connect_info(true)` (off by default: it adds a
 request extension) enables the `ConnectInfo(addr)` extractor, `peer_addr(&request)`
@@ -482,10 +484,17 @@ connection stays open until the stream ends or the client leaves.
 "./public"))` serves `GET`/`HEAD` for files under the prefix, falling through to
 your routes for everything else. It sends `Content-Type`, `Content-Length`, a
 weak `ETag` and `Last-Modified` (`304` on conditional requests), streams large
-files, serves `index.html` for directories and refuses `..`, hidden files and
-symlinks that leave the directory. No `Range` requests, directory listings or
-precompressed variants. `.cache_control("public, max-age=3600")`,
-`.index_file("start.html")` and `.allow_dotfiles(true)` configure it.
+files, serves `index.html` for directories (a directory without a trailing
+slash is redirected with `308` so relative links work) and refuses `..`, hidden
+files (also through symlinks and Windows 8.3 short names) and symlinks that
+leave the directory. No `Range` requests (it answers `Accept-Ranges: none`),
+directory listings or precompressed variants. `.cache_control("public,
+max-age=3600")`, `.index_file("start.html")` and `.allow_dotfiles(true)`
+configure it. The layer runs before routing: a file under the prefix wins over
+a route with the same path, and layers registered after it (authentication,
+rate limits, `Cors`) do not run for files, so mount it under a prefix of its
+own (ideally `app.layer_for("/assets", ServeDir::new(..))`) and register `Cors`
+first if fonts are fetched cross-origin.
 
 WebSocket is not provided: it needs connection-upgrade support that the server
 loop does not have.
@@ -738,8 +747,10 @@ version) before committing.
 
 ## Roadmap
 
-Planned: WebSocket (needs connection-upgrade support), HTTP/3, zstd compression, and the full HTTP
-acceptance benchmark matrix.
+Not provided, and not planned for now: WebSocket (it needs connection-upgrade
+support that the server loop does not have), HTTP/3 (a QUIC stack), and zstd
+compression (a C dependency). Still open: the full HTTP acceptance benchmark
+matrix.
 
 ## Contributing and license
 

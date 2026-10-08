@@ -87,3 +87,51 @@ fn the_form_is_documented_as_urlencoded() {
     assert_eq!(schema["properties"]["age"]["type"], "integer");
     assert_eq!(schema["required"], serde_json::json!(["name", "age"]));
 }
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+struct Login {
+    user: String,
+    password: String,
+    #[serde(default)]
+    remember: bool,
+}
+
+async fn login(Form(form): Form<Login>) -> Json<Login> {
+    Json(form)
+}
+
+#[tokio::test]
+async fn string_fields_keep_their_text_even_when_it_looks_like_a_number_or_bool() {
+    let mut app = App::new();
+    app.post("/login", login);
+    let runtime = app.build().unwrap();
+    for body in [
+        "user=bob&password=123456",
+        "user=true&password=x",
+        "user=bob&password=1e3&remember=true",
+        "user=007&password=0042",
+    ] {
+        let response = runtime
+            .oneshot(
+                Method::POST,
+                "/login",
+                &[("content-type", FORM)],
+                Some(Bytes::from_static(body.as_bytes())),
+            )
+            .await;
+        let status = response.status().as_u16();
+        let text = response.body_string().await;
+        assert_eq!(status, 200, "{body}: {text}");
+    }
+    let response = runtime
+        .oneshot(
+            Method::POST,
+            "/login",
+            &[("content-type", FORM)],
+            Some(Bytes::from_static(b"user=a&password=0042&remember=true")),
+        )
+        .await;
+    let value: serde_json::Value = serde_json::from_str(&response.body_string().await).unwrap();
+    assert_eq!(value["password"], "0042");
+    assert_eq!(value["remember"], true);
+}

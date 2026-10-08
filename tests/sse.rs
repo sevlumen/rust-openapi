@@ -38,6 +38,10 @@ fn events_are_formatted_per_the_spec() {
         "event: update\nid: 7\nretry: 1500\ndata: x\n\n"
     );
     assert_eq!(Event::comment("ping").to_string(), ": ping\n\n");
+    assert_eq!(
+        Event::data("x").id("a\0b").to_string(),
+        "id: ab\ndata: x\n\n"
+    );
     assert_eq!(Event::data("").to_string(), "data: \n\n");
 }
 
@@ -106,6 +110,10 @@ async fn events_arrive_as_they_are_sent_with_the_right_headers() {
     assert!(
         head.to_ascii_lowercase()
             .contains("cache-control: no-cache"),
+        "{head}"
+    );
+    assert!(
+        head.to_ascii_lowercase().contains("x-accel-buffering: no"),
         "{head}"
     );
     assert!(

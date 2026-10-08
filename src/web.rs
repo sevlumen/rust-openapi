@@ -34,7 +34,8 @@ pub trait ResponseExt: IntoResponse + Sized {
         }
     }
 
-    /// Replaces the response status.
+    /// Replaces the response status. The OpenAPI document keeps describing the
+    /// original response type's status.
     fn with_status(self, status: StatusCode) -> Headered<Self> {
         Headered {
             inner: self,
@@ -112,6 +113,12 @@ pub struct Redirect {
     location: HeaderValue,
 }
 
+/// # Panics
+///
+/// Every constructor panics if `location` is not a valid header value (no
+/// control characters or line breaks), which would otherwise allow header
+/// injection; this happens when the handler runs, so install `CatchPanic` if
+/// the location comes from user input.
 impl Redirect {
     fn new(status: StatusCode, location: &str) -> Self {
         Self {
@@ -217,6 +224,7 @@ fn is_cookie_octet(byte: u8) -> bool {
 
 fn is_attribute_value(value: &str) -> bool {
     !value.is_empty()
+        && value.is_ascii()
         && value
             .bytes()
             .all(|byte| byte >= 0x20 && byte != 0x7F && byte != b';')
@@ -267,7 +275,7 @@ impl SetCookie {
         self
     }
 
-    /// `Max-Age` in whole seconds; zero deletes the cookie.
+    /// `Max-Age` in whole seconds (rounded up); zero deletes the cookie.
     pub fn max_age(mut self, max_age: Duration) -> Self {
         self.max_age = Some(max_age);
         self
@@ -301,7 +309,10 @@ impl fmt::Display for SetCookie {
             write!(formatter, "; Domain={domain}")?;
         }
         if let Some(max_age) = self.max_age {
-            write!(formatter, "; Max-Age={}", max_age.as_secs())?;
+            // Round up: `Max-Age=0` deletes the cookie, which a sub-second
+            // lifetime must not do.
+            let seconds = max_age.as_secs() + u64::from(max_age.subsec_nanos() > 0);
+            write!(formatter, "; Max-Age={seconds}")?;
         }
         if self.http_only {
             formatter.write_str("; HttpOnly")?;
@@ -321,7 +332,9 @@ impl fmt::Display for SetCookie {
 
 /// The cookies of a request, from every `Cookie` header. Malformed pairs are
 /// skipped; values are returned as sent (a surrounding pair of quotes is
-/// removed) and are not percent-decoded. Documents no OpenAPI parameters.
+/// removed, invalid UTF-8 replaced) and are not percent-decoded. When a name
+/// repeats, [`get`](Self::get) returns the first, as RFC 6265 asks.
+/// Documents no OpenAPI parameters.
 #[derive(Clone, Debug, Default)]
 pub struct Cookies(Vec<(String, String)>);
 
@@ -349,8 +362,10 @@ impl<S: Send + Sync + 'static> FromRequest<S> for Cookies {
     ) -> Result<Self, ApiError> {
         let mut cookies = Vec::new();
         for value in request.headers().get_all(header::COOKIE) {
-            let Ok(value) = value.to_str() else { continue };
-            for pair in value.split(';') {
+            // Browsers may send raw UTF-8 that `HeaderValue::to_str` refuses;
+            // parse the bytes so one such cookie does not hide the others.
+            for pair in value.as_bytes().split(|byte| *byte == b';') {
+                let pair = String::from_utf8_lossy(pair);
                 let Some((name, value)) = pair.split_once('=') else {
                     continue;
                 };
@@ -371,10 +386,11 @@ impl<S: Send + Sync + 'static> FromRequest<S> for Cookies {
 }
 
 /// A `application/x-www-form-urlencoded` request body, decoded into `T`
-/// (`+` is a space, as HTML forms send it). `T` derives `ApiSchema` (and
-/// `Deserialize`), which also documents the form in OpenAPI. Other media
-/// types get `415`; a missing or malformed field `400`. The body is buffered
-/// up to the route's limit.
+/// (`+` is a space, as HTML forms send it; a repeated key keeps the last
+/// value; `a[]=1` and nested keys are not understood). `T` derives
+/// `ApiSchema` (for the OpenAPI document) and `Deserialize`. Other media types
+/// get `415`; a missing or malformed field `400`. The body is buffered up to
+/// the route's limit.
 #[derive(Clone, Debug)]
 pub struct Form<T>(pub T);
 
@@ -440,10 +456,10 @@ where
                 "expected application/x-www-form-urlencoded",
             ));
         }
-        let body = std::str::from_utf8(request.body())
-            .map_err(|_| ApiError::bad_request("form body is not valid UTF-8"))?;
-        // `+` is a space in forms (unlike in query strings here).
-        let body = body.replace('+', " ");
-        T::parse(&body).map(Form)
+        // `serde_urlencoded` decodes `+` as a space and parses each value into
+        // the field's own type, so a `String` field keeps `123456` as text.
+        serde_urlencoded::from_bytes::<T>(request.body())
+            .map(Form)
+            .map_err(|error| ApiError::bad_request(format!("invalid form: {error}")))
     }
 }

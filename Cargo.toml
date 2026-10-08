@@ -40,6 +40,7 @@ hyper = { version = "1.6", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["http1", "tokio", "server-graceful"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_urlencoded = "0.7"
 tokio = { version = "1.45", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 oas-rs-macros = { version = "=0.7.0", path = "oas-rs-macros" }
 uuid = { version = "1.17", optional = true, features = ["serde", "v4"] }

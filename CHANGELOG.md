@@ -40,7 +40,9 @@ All notable changes to this project are documented here. The format follows
   `RateLimit::key_by_peer_ip` (opt-in peer address, TCP only).
 - `Sse` / `Event`: server-sent events with optional keep-alive comments.
 - Feature `static-files`: `ServeDir` middleware (content types, validators and
-  `304`, streaming, index files, traversal and symlink protection).
+  `304`, streaming, index files with a slash redirect, traversal, symlink and
+  hidden-file protection including Windows 8.3 short names).
+- `serde_urlencoded` is now a dependency (it backs `Form`).
 
 ### Changed
 - **Schema changes for existing derives** (they now match what serde writes):
