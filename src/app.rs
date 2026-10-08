@@ -12,7 +12,7 @@ pub struct App<S = ()> {
     pub(crate) openapi_config: Option<OpenApiConfig>,
     pub(crate) openapi_bytes: Option<Bytes>,
     pub(crate) route_error: Option<BuildError>,
-    pub(crate) middleware: Vec<Arc<dyn Middleware>>,
+    pub(crate) middleware: Vec<ScopedLayer>,
     #[cfg(any(test, feature = "swagger"))]
     pub(crate) swagger_config: Option<SwaggerConfig>,
     #[cfg(any(test, feature = "swagger"))]
@@ -306,7 +306,24 @@ impl<S: Send + Sync + 'static> App<S> {
     /// Registers a global layer. Layers run before routing; the first one
     /// registered is the outermost. See [`Middleware`].
     pub fn layer(&mut self, middleware: impl Middleware) -> &mut Self {
-        self.middleware.push(Arc::new(middleware));
+        self.middleware.push(ScopedLayer {
+            scope: Scope::All,
+            layer: Arc::new(middleware),
+        });
+        self
+    }
+
+    /// Registers a layer that applies only to requests whose path starts with
+    /// `prefix`, which may contain `{capture}` segments. A prefix matches whole
+    /// segments (`/admin` covers `/admin` and `/admin/x`, not `/administrator`)
+    /// and also covers paths with no route under it (a `404`), so an
+    /// authentication layer does not reveal which routes exist. Matching uses
+    /// the raw, undecoded path.
+    pub fn layer_for(&mut self, prefix: &str, middleware: impl Middleware) -> &mut Self {
+        self.middleware.push(ScopedLayer {
+            scope: Scope::Prefix(Scope::parse(prefix)),
+            layer: Arc::new(middleware),
+        });
         self
     }
 

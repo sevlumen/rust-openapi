@@ -98,6 +98,83 @@ where
     }
 }
 
+/// One segment of a scope pattern: a literal, or `{name}` matching any one
+/// segment.
+#[derive(Clone, Debug)]
+pub(crate) enum ScopeSegment {
+    Literal(Box<str>),
+    Any,
+}
+
+/// The part of the API a layer applies to.
+#[derive(Clone)]
+pub(crate) enum Scope {
+    /// Every request (a global layer).
+    All,
+    /// Requests whose path starts with the pattern.
+    Prefix(Arc<[ScopeSegment]>),
+    /// Requests for exactly this path pattern and method.
+    Route {
+        method: Method,
+        segments: Arc<[ScopeSegment]>,
+    },
+}
+
+impl Scope {
+    pub(crate) fn parse(pattern: &str) -> Arc<[ScopeSegment]> {
+        PathParts::new(pattern)
+            .map(|part| {
+                if part.value.starts_with('{') && part.value.ends_with('}') && part.value.len() > 2
+                {
+                    ScopeSegment::Any
+                } else {
+                    ScopeSegment::Literal(part.value.into())
+                }
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    pub(crate) fn matches(&self, method: &Method, path: &str) -> bool {
+        match self {
+            Scope::All => true,
+            Scope::Prefix(segments) => segments_match(segments, path, false),
+            Scope::Route {
+                method: route_method,
+                segments,
+            } => {
+                (route_method == method
+                    || (*route_method == Method::GET && *method == Method::HEAD))
+                    && segments_match(segments, path, true)
+            }
+        }
+    }
+}
+
+/// Compares path segments with the router's own splitter (repeated slashes are
+/// ignored), so a scope matches at least everything the router can route to.
+fn segments_match(pattern: &[ScopeSegment], path: &str, exact: bool) -> bool {
+    let mut parts = PathParts::new(path);
+    for segment in pattern {
+        let Some(part) = parts.next() else {
+            return false;
+        };
+        if let ScopeSegment::Literal(literal) = segment
+            && part.value != &**literal
+        {
+            return false;
+        }
+    }
+    !exact || parts.next().is_none()
+}
+
+/// A layer together with the part of the API it applies to.
+#[derive(Clone)]
+pub(crate) struct ScopedLayer {
+    pub(crate) scope: Scope,
+    pub(crate) layer: Arc<dyn Middleware>,
+}
+
 /// The rest of the chain: the remaining layers, then normal dispatch.
 pub struct Next {
     host: Arc<dyn Host>,
@@ -123,28 +200,35 @@ impl Next {
 
     /// Runs the remaining layers and then the handler, returning the response.
     pub fn run(self, request: Request<RequestBody>) -> BoxFuture<HttpResponse> {
-        match self.host.middleware().get(self.index).cloned() {
-            Some(layer) => layer.handle(
-                request,
-                Next {
-                    host: self.host,
-                    index: self.index + 1,
-                },
-            ),
-            None => self.host.dispatch(request),
+        // Skip layers whose scope does not cover this request.
+        let mut index = self.index;
+        let layers = self.host.middleware();
+        while let Some(entry) = layers.get(index) {
+            if entry.scope.matches(request.method(), request.uri().path()) {
+                let layer = Arc::clone(&entry.layer);
+                return layer.handle(
+                    request,
+                    Next {
+                        host: self.host,
+                        index: index + 1,
+                    },
+                );
+            }
+            index += 1;
         }
+        self.host.dispatch(request)
     }
 }
 
 /// What the chain needs from the runtime: the layer list and the terminal
 /// dispatch. Implemented by `RuntimeInner`.
 pub(crate) trait Host: Send + Sync + 'static {
-    fn middleware(&self) -> &[Arc<dyn Middleware>];
+    fn middleware(&self) -> &[ScopedLayer];
     fn dispatch(self: Arc<Self>, request: Request<RequestBody>) -> BoxFuture<HttpResponse>;
 }
 
 impl<S: Send + Sync + 'static> Host for RuntimeInner<S> {
-    fn middleware(&self) -> &[Arc<dyn Middleware>] {
+    fn middleware(&self) -> &[ScopedLayer] {
         &self.middleware
     }
 

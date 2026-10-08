@@ -104,3 +104,7 @@ required-features = ["tls"]
 [[test]]
 name = "http2"
 required-features = ["http2"]
+
+[[test]]
+name = "scoped_middleware"
+required-features = ["test-util"]

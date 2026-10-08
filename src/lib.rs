@@ -50,7 +50,7 @@ use handler::{BoxFuture, HandlerFuture};
 pub use handler::{Handler, RawHandler};
 #[cfg(test)]
 use handler::{HandlerFutureKind, INLINE_FUTURE_SIZE, InlineFuture};
-use middleware::Host;
+use middleware::{Host, Scope, ScopedLayer};
 pub use middleware::{Middleware, Next, RequestBody};
 #[cfg(feature = "multipart")]
 pub use multipart::{Field, Multipart};

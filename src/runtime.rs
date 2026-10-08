@@ -17,7 +17,7 @@ pub(crate) struct RuntimeInner<S> {
     pub(crate) capture_names: Box<[Option<Arc<[String]>>]>,
     pub(crate) static_routes: HashMap<String, RouteSet>,
     pub(crate) dynamic_routes: DynamicRouteTrie,
-    pub(crate) middleware: Box<[Arc<dyn Middleware>]>,
+    pub(crate) middleware: Box<[ScopedLayer]>,
 }
 
 impl<S: Send + Sync + 'static> RuntimeInner<S> {
