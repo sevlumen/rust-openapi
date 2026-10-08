@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-08
+
 ### Added
 - `#[derive(ApiSchema)]` for enums with data (`oneOf`; externally, internally
   and adjacently tagged and untagged), serde `skip`, `skip_serializing`,
