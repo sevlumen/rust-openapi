@@ -23,6 +23,7 @@ use std::{
 };
 
 mod app;
+mod bearer;
 mod codec;
 mod extract;
 mod handler;
@@ -37,6 +38,7 @@ mod schema;
 mod trace;
 pub use app::App;
 use app::Operation;
+pub use bearer::BearerAuth;
 pub use codec::*;
 pub use extract::FromRequest;
 pub use extract::{Header, HeaderSpec, Path, Query, State};

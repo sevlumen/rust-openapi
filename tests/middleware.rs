@@ -228,3 +228,138 @@ async fn trace_reports_method_path_status_and_latency() {
     assert_eq!(records[1].status, 404);
     assert!(records[0].elapsed < Duration::from_secs(1));
 }
+
+use oas_rs::BearerAuth;
+
+fn secured() -> oas_rs::AppRuntime {
+    let mut app = App::new();
+    app.get("/secret", hello);
+    app.get("/health", hello);
+    app.get("/healthz", hello);
+    app.layer(
+        BearerAuth::new(|token: String| async move {
+            if token == "good" {
+                Ok(())
+            } else {
+                Err(ApiError::new(
+                    http::StatusCode::FORBIDDEN,
+                    "Forbidden",
+                    "bad token",
+                ))
+            }
+        })
+        .exempt_paths(["/health"]),
+    );
+    app.build().unwrap()
+}
+
+#[tokio::test]
+async fn bearer_accepts_a_valid_token() {
+    let runtime = secured();
+    let response = runtime
+        .oneshot(
+            Method::GET,
+            "/secret",
+            &[("authorization", "Bearer good")],
+            None,
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+}
+
+#[tokio::test]
+async fn bearer_rejects_missing_or_malformed_headers_with_401() {
+    let runtime = secured();
+    for header in [
+        None,
+        Some("Bearer"),
+        Some("Bearer "),
+        Some("Bearer   "),
+        Some("Basic abc"),
+        Some("good"),
+    ] {
+        let headers: Vec<(&str, &str)> = header
+            .map(|value| ("authorization", value))
+            .into_iter()
+            .collect();
+        let response = runtime
+            .oneshot(Method::GET, "/secret", &headers, None)
+            .await;
+        assert_eq!(response.status(), 401, "{header:?}");
+        assert_eq!(
+            response.header("www-authenticate"),
+            Some("Bearer"),
+            "{header:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn bearer_scheme_is_case_insensitive_and_tolerates_extra_spaces() {
+    let runtime = secured();
+    for value in ["bearer good", "BEARER good", "Bearer  good"] {
+        let response = runtime
+            .oneshot(Method::GET, "/secret", &[("authorization", value)], None)
+            .await;
+        assert_eq!(response.status(), 200, "{value}");
+    }
+}
+
+#[tokio::test]
+async fn validator_errors_are_returned_as_given() {
+    let runtime = secured();
+    let response = runtime
+        .oneshot(
+            Method::GET,
+            "/secret",
+            &[("authorization", "Bearer evil")],
+            None,
+        )
+        .await;
+    assert_eq!(response.status(), 403);
+}
+
+#[tokio::test]
+async fn exempt_paths_skip_authentication_exactly() {
+    let runtime = secured();
+    assert_eq!(
+        runtime
+            .oneshot(Method::GET, "/health", &[], None)
+            .await
+            .status(),
+        200
+    );
+    assert_eq!(
+        runtime
+            .oneshot(Method::GET, "/health/", &[], None)
+            .await
+            .status(),
+        200
+    );
+    assert_eq!(
+        runtime
+            .oneshot(Method::GET, "/healthz", &[], None)
+            .await
+            .status(),
+        401
+    );
+}
+
+#[tokio::test]
+async fn bearer_header_with_non_utf8_bytes_is_401_not_a_panic() {
+    let mut app = App::new();
+    app.get("/secret", hello);
+    app.layer(BearerAuth::new(|_token: String| async { Ok(()) }));
+    let (addr, _stop) = serve(app).await;
+
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let mut request =
+        b"GET /secret HTTP/1.1\r\nHost: t\r\nConnection: close\r\nAuthorization: Bearer ".to_vec();
+    request.extend_from_slice(&[0xFF, 0xFE]);
+    request.extend_from_slice(b"\r\n\r\n");
+    stream.write_all(&request).await.unwrap();
+    let mut out = Vec::new();
+    stream.read_to_end(&mut out).await.unwrap();
+    let out = String::from_utf8_lossy(&out);
+    assert!(out.starts_with("HTTP/1.1 401"), "{out}");
+}
