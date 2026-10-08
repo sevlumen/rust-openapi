@@ -80,6 +80,8 @@ impl<S: Send + Sync + 'static> App<S> {
                 title: env!("CARGO_PKG_NAME").to_owned(),
                 version: env!("CARGO_PKG_VERSION").to_owned(),
                 description: None,
+                security_schemes: Vec::new(),
+                default_security: Vec::new(),
             });
         }
         self.invalidate_openapi_cache();
@@ -129,10 +131,36 @@ impl<S: Send + Sync + 'static> App<S> {
     ///
     /// The returned runtime exposes serving and request execution only; route
     /// registration methods remain available on the builder type.
+    /// Every scheme referenced by the document defaults or a route must have
+    /// been declared; otherwise Swagger UI's Authorize button would be broken.
+    fn validate_security(&self) -> Result<(), BuildError> {
+        let Some(config) = &self.openapi_config else {
+            return Ok(());
+        };
+        let declared = |name: &String| config.security_schemes.iter().any(|(n, _)| n == name);
+        let route_groups = self
+            .metadata
+            .iter()
+            .filter(|metadata| !metadata.builtin)
+            .filter_map(|metadata| metadata.operation.security.as_ref())
+            .flatten();
+        match config
+            .default_security
+            .iter()
+            .chain(route_groups)
+            .flatten()
+            .find(|name| !declared(name))
+        {
+            Some(name) => Err(BuildError::UnknownSecurityScheme { name: name.clone() }),
+            None => Ok(()),
+        }
+    }
+
     pub fn build(mut self) -> Result<AppRuntime<S>, BuildError> {
         if let Some(error) = self.route_error.take() {
             return Err(error);
         }
+        self.validate_security()?;
         self.prepare_openapi();
         #[cfg(any(test, feature = "swagger"))]
         self.prepare_swagger();
@@ -263,6 +291,35 @@ impl<S: Send + Sync + 'static> App<S> {
         self
     }
 
+    /// Requires every listed security scheme for the last registered route.
+    /// Calling it again adds an alternative requirement. The schemes must be
+    /// declared through [`OpenApiOptions`] or `build()` fails.
+    pub fn security<I, T>(&mut self, schemes: I) -> &mut Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        if let Some(index) = self.last_route {
+            self.metadata[index]
+                .operation
+                .security
+                .get_or_insert_with(Vec::new)
+                .push(schemes.into_iter().map(Into::into).collect());
+            self.invalidate_openapi_cache();
+        }
+        self
+    }
+
+    /// Marks the last registered route as requiring no authentication,
+    /// overriding any document-wide default security.
+    pub fn public(&mut self) -> &mut Self {
+        if let Some(index) = self.last_route {
+            self.metadata[index].operation.security = Some(Vec::new());
+            self.invalidate_openapi_cache();
+        }
+        self
+    }
+
     pub fn operation_id(&mut self, operation_id: impl Into<String>) -> &mut Self {
         let operation_id = operation_id.into();
         assert!(
@@ -294,6 +351,17 @@ impl<S: Send + Sync + 'static> App<S> {
             }
             if let Some(operation_id) = &metadata.operation.operation_id {
                 operation.insert("operationId".to_owned(), json!(operation_id));
+            }
+            if let Some(security) = &metadata.operation.security {
+                operation.insert(
+                    "security".to_owned(),
+                    Value::Array(
+                        security
+                            .iter()
+                            .map(|group| requirement_json(group))
+                            .collect(),
+                    ),
+                );
             }
             let mut parameters = metadata.operation.request.parameters.clone();
             let mut path_schema_index = 0;
@@ -371,11 +439,31 @@ impl<S: Send + Sync + 'static> App<S> {
         if let Some(description) = config.and_then(|config| config.description.as_deref()) {
             info.insert("description".to_owned(), json!(description));
         }
-        json!({
+        let mut document = json!({
             "openapi": "3.1.0",
             "info": Value::Object(info),
             "paths": paths,
-        })
+        });
+        if let Some(config) = config {
+            if !config.security_schemes.is_empty() {
+                let schemes: Map<String, Value> = config
+                    .security_schemes
+                    .iter()
+                    .map(|(name, scheme)| (name.clone(), scheme.to_json()))
+                    .collect();
+                document["components"] = json!({ "securitySchemes": schemes });
+            }
+            if !config.default_security.is_empty() {
+                document["security"] = Value::Array(
+                    config
+                        .default_security
+                        .iter()
+                        .map(|group| requirement_json(group))
+                        .collect(),
+                );
+            }
+        }
+        document
     }
 
     /// Temporary compatibility helper for the in-tree tests. Production
@@ -480,6 +568,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 tag: None,
                 summary: None,
                 operation_id: None,
+                security: None,
                 response_status: StatusCode::OK,
                 response_schema: None,
                 request: OpenApiRequest::default(),
@@ -571,6 +660,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 tag: None,
                 summary: None,
                 operation_id: None,
+                security: None,
                 response_status: <H::Response as ResponseMetadata>::status_code(),
                 response_schema: <H::Response as ResponseMetadata>::response_schema(),
                 request: H::openapi_request(),
@@ -624,6 +714,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 tag: None,
                 summary: None,
                 operation_id: None,
+                security: None,
                 response_status: <H::Response as ResponseMetadata>::status_code(),
                 response_schema: <H::Response as ResponseMetadata>::response_schema(),
                 request: OpenApiRequest::default(),
@@ -727,6 +818,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 tag: None,
                 summary: None,
                 operation_id: None,
+                security: None,
                 response_status: StatusCode::OK,
                 response_schema: None,
                 request: OpenApiRequest::default(),
@@ -819,4 +911,7 @@ pub(crate) struct Operation {
     pub(crate) response_status: StatusCode,
     pub(crate) response_schema: Option<Value>,
     pub(crate) request: OpenApiRequest,
+    /// `None` inherits the document default; `Some(vec![])` is explicitly
+    /// public; otherwise each entry is an AND group and entries are alternatives.
+    pub(crate) security: Option<Vec<Vec<String>>>,
 }

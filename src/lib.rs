@@ -47,9 +47,10 @@ use openapi::OpenApiConfig;
 use openapi::SwaggerConfig;
 #[cfg(any(test, feature = "swagger"))]
 pub use openapi::SwaggerOptions;
+use openapi::requirement_json;
 #[cfg(any(test, feature = "swagger"))]
 use openapi::swagger_html;
-pub use openapi::{BuildError, OpenApiOptions};
+pub use openapi::{ApiKeyLocation, BuildError, OpenApiOptions, SecurityScheme};
 pub use params::*;
 use path::*;
 pub use response::*;

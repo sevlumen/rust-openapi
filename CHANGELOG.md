@@ -5,7 +5,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Breaking
+- `BuildError` is now `#[non_exhaustive]` and has a new
+  `UnknownSecurityScheme { name }` variant.
+
 ### Added
+- OpenAPI security schemes: `OpenApiOptions::{security_scheme, bearer_auth,
+  api_key, default_security}`, per-route `App::security` / `App::public`, and
+  the `SecurityScheme` / `ApiKeyLocation` types. Generates
+  `components.securitySchemes` and `security`; `build()` rejects undeclared
+  schemes. Documentation only: no credentials are checked.
 - Graceful shutdown: `serve_listener` waits for in-flight requests after the
   shutdown signal, bounded by `AppRuntime::shutdown_timeout` (default 30 s).
 
