@@ -17,7 +17,7 @@ MSYS_NO_PATHCONV=1 docker run --rm \
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     cargo clippy --workspace --all-targets --features tls -- -D warnings
     cargo test --features tls --test tls
-    cargo test --workspace --all-targets --features "uuid test-util swagger multipart tls http2 compression compression-brotli"
+    cargo test --workspace --all-targets --features "uuid test-util swagger multipart tls http2 compression compression-brotli static-files"
     cargo test --doc --workspace
     cargo build --workspace --examples --features "uuid swagger tls http2"
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features

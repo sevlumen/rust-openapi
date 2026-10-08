@@ -3,7 +3,9 @@ use std::{fmt, path::Path, sync::Arc};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use tokio_rustls::{TlsAcceptor, rustls};
 
-use crate::runtime::{accept_next, connection_limit, http1_builder, report_connection_error};
+use crate::runtime::{
+    Accepted, accept_next, connection_limit, http1_builder, report_connection_error,
+};
 use crate::*;
 
 /// An error building a [`TlsConfig`] (unreadable file, malformed PEM, missing
@@ -178,6 +180,7 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         let nodelay = self.tcp_nodelay;
         let header_read_timeout = self.header_read_timeout;
         let limit = connection_limit(self.max_connections);
+        let connect_info = self.connect_info;
         let observer = self.connection_error_observer;
         #[cfg(feature = "http2")]
         let max_streams = self.http2_max_concurrent_streams;
@@ -189,12 +192,16 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         let (signal, _) = tokio::sync::watch::channel(());
         let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
         tokio::pin!(shutdown);
-        while let Some((stream, slot)) =
-            accept_next(&listener, &mut shutdown, nodelay, limit.as_ref()).await?
+        while let Some(Accepted {
+            io: stream,
+            peer,
+            slot,
+        }) = accept_next(&listener, &mut shutdown, nodelay, limit.as_ref()).await?
         {
             let observer = observer.clone();
             let acceptor = acceptor.clone();
-            let connection = ConnectionRuntime::new(Arc::clone(&runtime));
+            let connection =
+                ConnectionRuntime::new(Arc::clone(&runtime), peer.filter(|_| connect_info));
             let mut stop = signal.subscribe();
             let done = done_tx.clone();
             tokio::spawn(async move {

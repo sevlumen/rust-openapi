@@ -236,6 +236,7 @@ impl<S: Send + Sync + 'static> App<S> {
             tcp_nodelay: true,
             header_read_timeout: Some(DEFAULT_HEADER_READ_TIMEOUT),
             max_connections: None,
+            connect_info: false,
             connection_error_observer: None,
             #[cfg(feature = "http2")]
             http2_max_concurrent_streams: None,

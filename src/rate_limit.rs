@@ -142,6 +142,20 @@ impl RateLimit {
         })
     }
 
+    /// Limits each client IP address separately, ignoring the port (an IPv4
+    /// address on a dual-stack socket is keyed as plain IPv4). Needs
+    /// [`AppRuntime::connect_info`](crate::AppRuntime::connect_info)`(true)`;
+    /// without it every request lands in the anonymous bucket. Behind a proxy
+    /// all clients share the proxy's address: key on a header instead. A single
+    /// IPv6 client usually owns a whole /64, so it can rotate addresses past a
+    /// per-address limit; key on a prefix with [`key_by`](Self::key_by) if that
+    /// matters.
+    pub fn key_by_peer_ip(self) -> Self {
+        self.key_by(|request| {
+            crate::peer_addr(request).map(|peer| peer.ip().to_canonical().to_string())
+        })
+    }
+
     /// Limits each distinct key separately; `None` means the anonymous bucket.
     pub fn key_by(
         self,

@@ -255,7 +255,8 @@ impl<S: Send + Sync + 'static> Host for RuntimeInner<S> {
             // The prepared dispatch is already a `'static` future, so box it
             // directly instead of wrapping it in a larger async block.
             RequestBodyKind::Incoming(incoming) => Box::pin(
-                ConnectionRuntime::new(self).prepare_direct(Request::from_parts(parts, incoming)),
+                ConnectionRuntime::new(self, None)
+                    .prepare_direct(Request::from_parts(parts, incoming)),
             ),
             RequestBodyKind::Full(bytes) => Box::pin(async move {
                 let request = Request::from_parts(parts, bytes.unwrap_or_default());
