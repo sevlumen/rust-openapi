@@ -4,6 +4,8 @@ use super::*;
 pub struct AppRuntime<S = ()> {
     pub(crate) inner: Arc<RuntimeInner<S>>,
     pub(crate) shutdown_timeout: Duration,
+    #[cfg(feature = "tls")]
+    pub(crate) handshake_timeout: Duration,
 }
 
 /// The immutable routing state, shared (by `Arc`) with every connection and
@@ -32,6 +34,11 @@ impl<S: Send + Sync + 'static> RuntimeInner<S> {
 /// How long [`AppRuntime::serve_listener`] waits for in-flight requests after
 /// the shutdown signal before giving up on the remaining connections.
 pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a TLS client may take to finish the handshake before the
+/// connection is dropped (see `AppRuntime::handshake_timeout`).
+#[cfg(feature = "tls")]
+pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) struct RuntimeRef<'a, S> {
     state: &'a Arc<S>,
@@ -84,7 +91,7 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
         self.runtime.runtime_ref()
     }
 
-    fn prepare(&self, request: Request<Incoming>) -> PreparedDispatch {
+    pub(crate) fn prepare(&self, request: Request<Incoming>) -> PreparedDispatch {
         if self.runtime.middleware.is_empty() {
             return self.prepare_direct(request);
         }

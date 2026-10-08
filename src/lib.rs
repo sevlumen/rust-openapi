@@ -74,6 +74,8 @@ use router::{
 #[cfg(test)]
 use router::{DynamicRouteNode, NodeId};
 use runtime::ConnectionRuntime;
+#[cfg(feature = "tls")]
+pub use runtime::DEFAULT_HANDSHAKE_TIMEOUT;
 use runtime::RuntimeInner;
 #[cfg(any(test, feature = "test-util"))]
 pub use runtime::TestResponse;

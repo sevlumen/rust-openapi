@@ -202,6 +202,8 @@ impl<S: Send + Sync + 'static> App<S> {
                 middleware: self.middleware.into_boxed_slice(),
             }),
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
+            #[cfg(feature = "tls")]
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
         })
     }
 
