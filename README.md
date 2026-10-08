@@ -425,6 +425,22 @@ headers. `allow_any_origin()` cannot be combined with `allow_credentials(true)`
 (it panics; list the origins instead), and `allow_origin` panics on anything
 but `scheme://host[:port]`.
 
+### Custom error format
+
+```rust
+app.layer(ErrorFormat::new(|info: &ErrorInfo| {
+    info.respond(serde_json::json!({ "error": info.detail }))
+}));          // register it first
+```
+
+`ErrorFormat` rewrites every error the framework produces (bad parameters or
+bodies, `404`, `405`, `413`, `BearerAuth` failures and each `ApiError` a
+handler returns) so you can keep an existing error contract. Responses your
+own handlers build are untouched, `Allow` and `WWW-Authenticate` are carried
+over, and `HEAD` errors stay bodiless. The OpenAPI document keeps describing
+the default `Problem` schema, so use `app.openapi().document_errors(false)`
+when you change the format.
+
 ### All headers
 
 `Header<T>` reads one declared header. For many or dynamic headers extract

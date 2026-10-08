@@ -118,7 +118,8 @@ impl IntoResponse for ApiError {
             "status": self.status.as_u16(),
             "detail": self.detail,
         });
-        response_json(self.status, body)
+        let info = ErrorInfo::new(self.status, &self.title, &self.detail);
+        info.attach(response_json(self.status, body))
     }
 }
 
@@ -373,21 +374,32 @@ pub(crate) fn response_json_bytes(status: StatusCode, body: Bytes) -> HttpRespon
 #[cold]
 #[inline(never)]
 pub(crate) fn payload_too_large_response() -> HttpResponse {
-    response_json(
-        StatusCode::PAYLOAD_TOO_LARGE,
-        json!({
-            "type": "about:blank",
-            "title": "Payload Too Large",
-            "status": 413,
-            "detail": "request body exceeds the configured limit"
-        }),
+    const DETAIL: &str = "request body exceeds the configured limit";
+    ErrorInfo::new(StatusCode::PAYLOAD_TOO_LARGE, "Payload Too Large", DETAIL).attach(
+        response_json(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            json!({
+                "type": "about:blank",
+                "title": "Payload Too Large",
+                "status": 413,
+                "detail": DETAIL
+            }),
+        ),
     )
 }
 
 #[cold]
 #[inline(never)]
 pub(crate) fn not_found() -> HttpResponse {
-    response_text(StatusCode::NOT_FOUND, Bytes::from_static(b"Not Found"))
+    ErrorInfo::new(
+        StatusCode::NOT_FOUND,
+        "Not Found",
+        "the requested resource was not found",
+    )
+    .attach(response_text(
+        StatusCode::NOT_FOUND,
+        Bytes::from_static(b"Not Found"),
+    ))
 }
 
 #[cold]
@@ -404,12 +416,18 @@ pub(crate) fn options_response(allow: &str) -> HttpResponse {
 #[cold]
 #[inline(never)]
 pub(crate) fn method_not_allowed_response(allow: &str) -> HttpResponse {
-    Response::builder()
+    let response = Response::builder()
         .status(StatusCode::METHOD_NOT_ALLOWED)
         .header(header::ALLOW, allow)
         .header(header::CONTENT_LENGTH, "0")
         .body(ResponseBody::full(Bytes::new()))
-        .unwrap()
+        .unwrap();
+    ErrorInfo::new(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "Method Not Allowed",
+        "the method is not allowed for this resource",
+    )
+    .attach(response)
 }
 
 pub(crate) fn maybe_head_flag(is_head: bool, response: HttpResponse) -> HttpResponse {
