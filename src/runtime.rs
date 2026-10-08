@@ -89,6 +89,12 @@ impl Future for PreparedDispatch {
     type Output = HttpResponse;
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: this is a structural pin projection. `self` is never moved
+        // out of or replaced, and the only field that is `!Unpin` (the
+        // `HandlerFuture`, which may hold an inline future that must not move)
+        // is re-pinned in place with `Pin::new_unchecked`; the `Buffered`
+        // future is a `Pin<Box<_>>` and could be polled safely, but shares the
+        // same projection.
         unsafe {
             match self.get_unchecked_mut() {
                 Self::Ready(response) => {
@@ -245,7 +251,12 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
                         Err(error) if error.downcast_ref::<LengthLimitError>().is_some() => {
                             payload_too_large_response()
                         }
-                        Err(_) => response_json(
+                        Err(_) => ErrorInfo::new(
+                            StatusCode::BAD_REQUEST,
+                            "Bad Request",
+                            "request body was interrupted",
+                        )
+                        .attach(response_json(
                             StatusCode::BAD_REQUEST,
                             json!({
                                 "type": "about:blank",
@@ -253,7 +264,7 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
                                 "status": 400,
                                 "detail": "request body was interrupted"
                             }),
-                        ),
+                        )),
                     }
                 }))
             }
