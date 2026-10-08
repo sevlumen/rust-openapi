@@ -5,6 +5,32 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `#[derive(ApiSchema)]` for enums with data (`oneOf`; externally, internally
+  and adjacently tagged and untagged), serde `skip`, `skip_serializing`,
+  `skip_deserializing`, `default`, `skip_serializing_if` and `flatten`
+  (`allOf`), doc comments as descriptions, and field-level
+  `#[api_schema(description, example, minimum, maximum, min_length,
+  max_length, pattern, min_items, max_items, format, deprecated)]`.
+
+- `#[serde(transparent)]`, container `#[serde(default)]`,
+  `deny_unknown_fields` (`additionalProperties: false`), `rename_all_fields`
+  and variant-level `#[serde(untagged)]` are understood by the derive;
+  `ApiSchema` does not support generic types (clear compile error).
+
+### Changed
+- **Schema changes for existing derives** (they now match what serde writes):
+  `#[serde(default)]` and `skip_serializing_if` fields are no longer
+  `required` (and a query struct with a `default` field is parsed by serde, so a
+  missing parameter no longer gives `400`); `#[serde(skip)]` fields are
+  hidden; `#[serde(flatten)]` fields are merged (`allOf`, or
+  `additionalProperties` for a map) instead of appearing as a property;
+  `Option<T>` is nullable (`oneOf: [T, null]`) in request/response schemas
+  (query parameters keep the plain type).
+- The derive's generated code uses `__oas_*` local names, so neither a query
+  field called `key`/`value`/`pair` nor a user constant called `registry`
+  or `schema` breaks it.
+
 ## [0.7.0] - 2026-10-08
 
 ### Added

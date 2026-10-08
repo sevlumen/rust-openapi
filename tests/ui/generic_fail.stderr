@@ -1,0 +1,5 @@
+error: ApiSchema does not support generic types; implement `ApiSchema` by hand
+ --> tests/ui/generic_fail.rs:4:12
+  |
+4 | struct Page<T> {
+  |            ^^^
