@@ -643,6 +643,21 @@ impl TestResponse {
             .and_then(|value| value.to_str().ok())
     }
 
+    /// Every value of a header that may appear more than once.
+    pub fn header_all(&self, name: &str) -> Vec<&str> {
+        self.response
+            .as_ref()
+            .map(|response| {
+                response
+                    .headers()
+                    .get_all(name)
+                    .iter()
+                    .filter_map(|value| value.to_str().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub async fn body_string(mut self) -> String {
         let response = self.response.take().unwrap();
         String::from_utf8(

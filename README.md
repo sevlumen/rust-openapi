@@ -396,6 +396,42 @@ response. Register it first so the id exists for the layers after it.
 For a single shared token use `BearerAuth::static_token("...")`; for your own
 validator compare secrets with `constant_time_eq(a, b)`.
 
+### CORS
+
+```rust
+app.layer(
+    Cors::new()
+        .allow_origin("https://app.example")
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers(["content-type", "authorization"])
+        .max_age(Duration::from_secs(600)),
+);
+app.layer(BearerAuth::static_token("..."));   // after Cors
+```
+
+`Cors` answers preflights itself (an explicit `OPTIONS` route is never reached
+for a preflight) and adds `Access-Control-*` headers to responses for allowed
+origins, error responses included. With listed origins every response, with or
+without an `Origin` header, carries `Vary: Origin` so shared caches stay
+correct; `allow_any_origin()` sends `Access-Control-Allow-Origin: *` on every
+response. `content-type` is allowed by default (JSON bodies need it): add
+`authorization` with `allow_headers` for bearer tokens, which replaces the
+list. `allow_methods` replaces the default `GET`, `HEAD`, `POST`.
+Register it **before** `BearerAuth`: browsers send preflights without
+credentials. Use `layer`, `layer_for` or a group layer, not `route_layer`
+(a route scope matches only its own method, never the `OPTIONS` preflight).
+A request from an origin that is not allowed is still served but gets no CORS
+headers. `allow_any_origin()` cannot be combined with `allow_credentials(true)`
+(it panics; list the origins instead), and `allow_origin` panics on anything
+but `scheme://host[:port]`.
+
+### All headers
+
+`Header<T>` reads one declared header. For many or dynamic headers extract
+`Headers(map)`: it hands you the request's `HeaderMap` (a clone per request)
+and adds no OpenAPI parameters. Its `Debug` output includes every header
+value, `Authorization` and `Cookie` included, so do not log it.
+
 ### Scoped middleware
 
 A layer can apply to part of the API only. Layers still run before routing, so

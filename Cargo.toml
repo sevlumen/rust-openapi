@@ -116,3 +116,11 @@ required-features = ["test-util"]
 [[test]]
 name = "openapi_errors"
 required-features = ["test-util"]
+
+[[test]]
+name = "cors"
+required-features = ["test-util"]
+
+[[test]]
+name = "headers"
+required-features = ["test-util"]
