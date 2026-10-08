@@ -55,6 +55,17 @@ runtime.listen("0.0.0.0:8080").await?;
 `AppRuntime::serve_listener` accepts an already-bound Tokio listener and a
 shutdown future. The default OpenAPI endpoint is `/openapi.json`.
 
+### TCP_NODELAY
+
+Accepted connections get `TCP_NODELAY` by default. Without it, a response that
+is written in several small pieces (streamed or chunked bodies) can stall for
+about 40 ms on Linux while the kernel waits for a delayed ACK; with it, a
+3-chunk streamed response measured about 6.5 ms instead of 41 ms, while the
+throughput of small responses changed by between -3% and +1.5% across
+benchmark harnesses (within measurement noise). Use
+`app.build()?.tcp_nodelay(false)` to keep the operating system default. This
+applies to `serve_listener` and `serve_tls`.
+
 ### Graceful shutdown
 
 When the shutdown future completes, the server stops accepting connections,

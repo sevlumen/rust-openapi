@@ -284,3 +284,88 @@ async fn an_idle_keep_alive_https_connection_does_not_block_shutdown() {
     assert!(returned_at.duration_since(shutdown_at) < Duration::from_secs(2));
     drop(tls);
 }
+
+// Streamed chunks over TLS must not be stalled by Nagle's algorithm either
+// (Linux kernel behavior; see tests/tcp_nodelay.rs).
+#[cfg(target_os = "linux")]
+mod nodelay {
+    use super::*;
+    use bytes::Bytes;
+    use futures_core::Stream;
+    use oas_rs::StreamResponse;
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    struct Chunks(tokio::sync::mpsc::Receiver<Bytes>);
+
+    impl Stream for Chunks {
+        type Item = Bytes;
+
+        fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Bytes>> {
+            self.0.poll_recv(context)
+        }
+    }
+
+    async fn streamed() -> StreamResponse<Chunks> {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            for part in ["aaaa", "bbbb", "cccc"] {
+                if tx.send(Bytes::from_static(part.as_bytes())).await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+        StreamResponse(Chunks(rx))
+    }
+
+    #[tokio::test]
+    async fn streamed_chunks_over_tls_are_not_stalled_by_nagle() {
+        let id = identity();
+        let mut app = App::new();
+        app.get("/stream", streamed);
+        let runtime = app.build().unwrap();
+        let tls = TlsConfig::from_pem(id.cert_pem.as_bytes(), id.key_pem.as_bytes()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (_stop, stopped) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            runtime
+                .serve_tls(listener, tls, async {
+                    let _ = stopped.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        tcp.set_nodelay(true).unwrap();
+        let mut tls = connector(&id.cert_pem, &[&version::TLS13])
+            .connect(ServerName::try_from("localhost").unwrap(), tcp)
+            .await
+            .unwrap();
+        let mut times = Vec::new();
+        let mut buffer = [0u8; 1024];
+        for _ in 0..21 {
+            let started = Instant::now();
+            tls.write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .await
+                .unwrap();
+            let mut seen = Vec::new();
+            while !seen.ends_with(b"0\r\n\r\n") {
+                let read = tls.read(&mut buffer).await.unwrap();
+                assert!(read > 0, "connection closed early");
+                seen.extend_from_slice(&buffer[..read]);
+            }
+            times.push(started.elapsed());
+        }
+        times.sort();
+        let median = times[times.len() / 2];
+        assert!(
+            median < Duration::from_millis(25),
+            "median {median:?}: a Nagle/delayed-ACK stall (about 40 ms) over TLS"
+        );
+    }
+}

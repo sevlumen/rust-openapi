@@ -4,6 +4,7 @@ use super::*;
 pub struct AppRuntime<S = ()> {
     pub(crate) inner: Arc<RuntimeInner<S>>,
     pub(crate) shutdown_timeout: Duration,
+    pub(crate) tcp_nodelay: bool,
     #[cfg(feature = "tls")]
     pub(crate) handshake_timeout: Duration,
 }
@@ -243,6 +244,17 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         self
     }
 
+    /// Whether accepted TCP connections get `TCP_NODELAY` (default `true`).
+    ///
+    /// With Nagle's algorithm left on, a response written in several small
+    /// pieces (streamed or chunked bodies) can stall for about 40 ms on Linux
+    /// while the kernel waits for a delayed ACK. Disabling `TCP_NODELAY`
+    /// restores the operating system default.
+    pub fn tcp_nodelay(mut self, enabled: bool) -> Self {
+        self.tcp_nodelay = enabled;
+        self
+    }
+
     #[cfg(any(test, feature = "test-util"))]
     fn runtime_ref(&self) -> RuntimeRef<'_, S> {
         self.inner.runtime_ref()
@@ -409,10 +421,13 @@ fn classify_accept_error(error: &std::io::Error) -> AcceptAction {
 
 /// Waits for the next connection. `Ok(None)` means `shutdown` completed.
 /// Transient accept errors are absorbed (see [`classify_accept_error`]); only
-/// a broken listener is returned as an error.
+/// a broken listener is returned as an error. When `nodelay` is set the
+/// accepted socket gets `TCP_NODELAY` (a failure to set it is ignored: the
+/// connection still works, just with the operating system default).
 pub(crate) async fn accept_next<F>(
     listener: &tokio::net::TcpListener,
     shutdown: &mut Pin<&mut F>,
+    nodelay: bool,
 ) -> Result<Option<tokio::net::TcpStream>, std::io::Error>
 where
     F: Future<Output = ()>,
@@ -421,7 +436,12 @@ where
         tokio::select! {
             _ = shutdown.as_mut() => return Ok(None),
             accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => return Ok(Some(stream)),
+                Ok((stream, _)) => {
+                    if nodelay {
+                        let _ = stream.set_nodelay(true);
+                    }
+                    return Ok(Some(stream));
+                }
                 Err(error) => match classify_accept_error(&error) {
                     AcceptAction::Retry => continue,
                     AcceptAction::Backoff => {
@@ -445,10 +465,11 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     let shutdown_timeout = runtime.shutdown_timeout;
+    let nodelay = runtime.tcp_nodelay;
     let runtime = runtime.inner;
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
     tokio::pin!(shutdown);
-    while let Some(stream) = accept_next(&listener, &mut shutdown).await? {
+    while let Some(stream) = accept_next(&listener, &mut shutdown, nodelay).await? {
         let connection = ConnectionRuntime::new(Arc::clone(&runtime));
         let io = hyper_util::rt::TokioIo::new(stream);
         let service = hyper::service::service_fn(move |request: Request<Incoming>| {

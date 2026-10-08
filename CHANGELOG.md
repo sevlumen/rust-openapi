@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- Accepted connections now get `TCP_NODELAY` by default (both `serve_listener`
+  and `serve_tls`), removing a roughly 40 ms Nagle/delayed-ACK stall for
+  responses written in several small pieces (3-chunk streamed response: 41 ms
+  -> 6.5 ms). Opt out with `AppRuntime::tcp_nodelay(false)`.
+
 ## [0.3.0] - 2026-10-08
 
 ### Added
