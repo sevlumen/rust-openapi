@@ -416,3 +416,88 @@ async fn request_body_and_next_implement_debug() {
         "{text}"
     );
 }
+
+#[tokio::test]
+async fn static_token_accepts_only_the_exact_token() {
+    let mut app = App::new();
+    app.get("/", hello);
+    app.layer(oas_rs::BearerAuth::static_token("s3cret"));
+    let runtime = app.build().unwrap();
+    for (header, expected) in [
+        ("Bearer s3cret", 200),
+        ("Bearer s3cre", 401),
+        ("Bearer s3crets", 401),
+        ("Bearer S3CRET", 401),
+        ("Basic s3cret", 401),
+    ] {
+        let response = runtime
+            .oneshot(Method::GET, "/", &[("authorization", header)], None)
+            .await;
+        assert_eq!(response.status(), expected, "{header}");
+    }
+    let missing = runtime.oneshot(Method::GET, "/", &[], None).await;
+    assert_eq!(missing.status(), 401);
+}
+
+struct RequestIdHeader(String);
+
+impl HeaderSpec for RequestIdHeader {
+    const NAME: &'static str = "x-request-id";
+    fn parse(value: &str) -> Result<Self, ApiError> {
+        Ok(RequestIdHeader(value.to_owned()))
+    }
+}
+
+async fn echo_request_id(Header(id): Header<RequestIdHeader>) -> String {
+    id.0
+}
+
+fn request_id_app() -> oas_rs::AppRuntime {
+    let mut app = App::new();
+    app.get("/id", echo_request_id);
+    app.layer(oas_rs::RequestId::new());
+    app.build().unwrap()
+}
+
+#[tokio::test]
+async fn request_id_is_generated_unique_and_visible_to_the_handler() {
+    let runtime = request_id_app();
+    let first = runtime.oneshot(Method::GET, "/id", &[], None).await;
+    let first_header = first.header("x-request-id").unwrap().to_owned();
+    assert!(!first_header.is_empty() && first_header.len() <= 64);
+    assert_eq!(first.body_string().await, first_header);
+    let second = runtime.oneshot(Method::GET, "/id", &[], None).await;
+    assert_ne!(second.header("x-request-id").unwrap(), first_header);
+}
+
+#[tokio::test]
+async fn request_id_keeps_a_valid_client_value() {
+    let runtime = request_id_app();
+    let response = runtime
+        .oneshot(Method::GET, "/id", &[("x-request-id", "abc-123_X.y")], None)
+        .await;
+    assert_eq!(response.header("x-request-id"), Some("abc-123_X.y"));
+    assert_eq!(response.body_string().await, "abc-123_X.y");
+}
+
+#[tokio::test]
+async fn request_id_replaces_unusable_client_values() {
+    let runtime = request_id_app();
+    let too_long = "a".repeat(129);
+    for bad in ["", "has space", "tab\there", too_long.as_str()] {
+        let response = runtime
+            .oneshot(Method::GET, "/id", &[("x-request-id", bad)], None)
+            .await;
+        let id = response.header("x-request-id").unwrap().to_owned();
+        assert_ne!(id, bad, "{bad:?}");
+        assert!(!id.is_empty() && id.len() <= 64, "{id}");
+    }
+}
+
+#[tokio::test]
+async fn request_id_is_also_set_on_404_responses() {
+    let runtime = request_id_app();
+    let response = runtime.oneshot(Method::GET, "/missing", &[], None).await;
+    assert_eq!(response.status(), 404);
+    assert!(response.header("x-request-id").is_some());
+}

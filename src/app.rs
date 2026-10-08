@@ -203,6 +203,11 @@ impl<S: Send + Sync + 'static> App<S> {
             }),
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             tcp_nodelay: true,
+            header_read_timeout: Some(DEFAULT_HEADER_READ_TIMEOUT),
+            max_connections: None,
+            connection_error_observer: None,
+            #[cfg(feature = "http2")]
+            http2_max_concurrent_streams: None,
             #[cfg(feature = "tls")]
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
         })

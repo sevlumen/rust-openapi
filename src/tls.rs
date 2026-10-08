@@ -3,7 +3,7 @@ use std::{fmt, path::Path, sync::Arc};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use tokio_rustls::{TlsAcceptor, rustls};
 
-use crate::runtime::accept_next;
+use crate::runtime::{accept_next, connection_limit, http1_builder, report_connection_error};
 use crate::*;
 
 /// An error building a [`TlsConfig`] (unreadable file, malformed PEM, missing
@@ -136,6 +136,25 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         self
     }
 
+    /// Caps the streams a single HTTP/2 connection may have open at once
+    /// (default: Hyper's 200). A stream opened over the limit is refused
+    /// (`REFUSED_STREAM`), which well-behaved clients retry. Each
+    /// open stream can buffer up to its route's body limit, so lowering this
+    /// bounds the memory one client can pin.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `limit` is `Some(0)`.
+    #[cfg(feature = "http2")]
+    pub fn http2_max_concurrent_streams(mut self, limit: Option<u32>) -> Self {
+        assert!(
+            limit != Some(0),
+            "http2_max_concurrent_streams must be at least 1"
+        );
+        self.http2_max_concurrent_streams = limit;
+        self
+    }
+
     /// Serves HTTPS on `listener` until `shutdown` completes, then waits for
     /// in-flight requests like [`AppRuntime::serve_listener`], bounded by
     /// [`AppRuntime::shutdown_timeout`]. HTTP/1.1, plus HTTP/2 when the
@@ -157,6 +176,11 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         let shutdown_timeout = self.shutdown_timeout;
         let handshake_timeout = self.handshake_timeout;
         let nodelay = self.tcp_nodelay;
+        let header_read_timeout = self.header_read_timeout;
+        let limit = connection_limit(self.max_connections);
+        let observer = self.connection_error_observer;
+        #[cfg(feature = "http2")]
+        let max_streams = self.http2_max_concurrent_streams;
         let runtime = self.inner;
         let acceptor = tls.acceptor();
         // `GracefulShutdown::watch` needs an already-built connection, which
@@ -165,7 +189,10 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         let (signal, _) = tokio::sync::watch::channel(());
         let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
         tokio::pin!(shutdown);
-        while let Some(stream) = accept_next(&listener, &mut shutdown, nodelay).await? {
+        while let Some((stream, slot)) =
+            accept_next(&listener, &mut shutdown, nodelay, limit.as_ref()).await?
+        {
+            let observer = observer.clone();
             let acceptor = acceptor.clone();
             let connection = ConnectionRuntime::new(Arc::clone(&runtime));
             let mut stop = signal.subscribe();
@@ -173,12 +200,24 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
             tokio::spawn(async move {
                 // Dropped when the task ends; shutdown waits for every sender.
                 let _done = done;
+                let _slot = slot;
                 let handshake = tokio::time::timeout(handshake_timeout, acceptor.accept(stream));
                 let tls_stream = tokio::select! {
                     result = handshake => match result {
                         Ok(Ok(tls_stream)) => tls_stream,
                         // Failed or timed-out handshake: drop only this connection.
-                        _ => return,
+                        Ok(Err(error)) => {
+                            report_connection_error(&observer, &error);
+                            return;
+                        }
+                        Err(_) => {
+                            let error = std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "TLS handshake timed out",
+                            );
+                            report_connection_error(&observer, &error);
+                            return;
+                        }
                     },
                     // Shutting down during the handshake.
                     _ = stop.changed() => return,
@@ -193,25 +232,38 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
                 });
                 #[cfg(feature = "http2")]
                 if negotiated_h2 {
-                    let conn = hyper::server::conn::http2::Builder::new(
+                    let mut builder = hyper::server::conn::http2::Builder::new(
                         hyper_util::rt::TokioExecutor::new(),
-                    )
-                    .serve_connection(io, service);
-                    tokio::pin!(conn);
-                    tokio::select! {
-                        _ = conn.as_mut() => return,
-                        _ = stop.changed() => conn.as_mut().graceful_shutdown(),
+                    );
+                    if let Some(limit) = max_streams {
+                        builder.max_concurrent_streams(limit);
                     }
-                    let _ = conn.await;
+                    let conn = builder.serve_connection(io, service);
+                    tokio::pin!(conn);
+                    let result = tokio::select! {
+                        result = conn.as_mut() => result,
+                        _ = stop.changed() => {
+                            conn.as_mut().graceful_shutdown();
+                            conn.await
+                        }
+                    };
+                    if let Err(error) = result {
+                        report_connection_error(&observer, &error);
+                    }
                     return;
                 }
-                let conn = hyper::server::conn::http1::Builder::new().serve_connection(io, service);
+                let conn = http1_builder(header_read_timeout).serve_connection(io, service);
                 tokio::pin!(conn);
-                tokio::select! {
-                    _ = conn.as_mut() => return,
-                    _ = stop.changed() => conn.as_mut().graceful_shutdown(),
+                let result = tokio::select! {
+                    result = conn.as_mut() => result,
+                    _ = stop.changed() => {
+                        conn.as_mut().graceful_shutdown();
+                        conn.await
+                    }
+                };
+                if let Err(error) = result {
+                    report_connection_error(&observer, &error);
                 }
-                let _ = conn.await;
             });
         }
         let _ = signal.send(());

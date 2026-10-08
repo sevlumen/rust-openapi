@@ -55,7 +55,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use oas_rs::App;
+use oas_rs::{App, AppRuntime};
 use rustls_pki_types::{CertificateDer, ServerName, pem::PemObject};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -84,14 +84,19 @@ struct Server {
 }
 
 async fn start(handshake_timeout: Option<Duration>) -> Server {
+    start_with(|runtime| match handshake_timeout {
+        Some(timeout) => runtime.handshake_timeout(timeout),
+        None => runtime,
+    })
+    .await
+}
+
+async fn start_with(configure: impl FnOnce(AppRuntime) -> AppRuntime) -> Server {
     let id = identity();
     let mut app = App::new();
     app.get("/", hello);
     app.get("/slow", slow);
-    let mut runtime = app.build().unwrap();
-    if let Some(timeout) = handshake_timeout {
-        runtime = runtime.handshake_timeout(timeout);
-    }
+    let runtime = configure(app.build().unwrap());
     let tls = TlsConfig::from_pem(id.cert_pem.as_bytes(), id.key_pem.as_bytes()).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -346,4 +351,73 @@ fn tls_error_keeps_its_source_so_a_missing_file_is_distinguishable() {
     assert!(from_io.is_none(), "malformed PEM is not an io error");
 
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+async fn tls_stream(server: &Server) -> tokio_rustls::client::TlsStream<TcpStream> {
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    connector(&server.cert_pem, &[&version::TLS13])
+        .connect(ServerName::try_from("localhost").unwrap(), tcp)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn header_read_timeout_applies_over_tls() {
+    let server =
+        start_with(|runtime| runtime.header_read_timeout(Some(Duration::from_millis(200)))).await;
+    let mut tls = tls_stream(&server).await;
+    // The request head never finishes.
+    tls.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n")
+        .await
+        .unwrap();
+    let mut sink = Vec::new();
+    let closed = tokio::time::timeout(Duration::from_secs(3), tls.read_to_end(&mut sink)).await;
+    assert!(closed.is_ok(), "a stalled TLS request was kept open");
+}
+
+#[tokio::test]
+async fn max_connections_applies_over_tls() {
+    let server =
+        start_with(|runtime| runtime.header_read_timeout(None).max_connections(Some(1))).await;
+    let first = tls_stream(&server).await;
+    // The only slot is taken, so the next client's handshake is not served.
+    let second = tokio::time::timeout(Duration::from_millis(400), tls_stream(&server)).await;
+    assert!(second.is_err(), "a connection over the limit was served");
+    drop(first);
+    let mut third = tokio::time::timeout(Duration::from_secs(3), tls_stream(&server))
+        .await
+        .expect("a slot frees after the first connection closes");
+    third
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut out = String::new();
+    let _ = third.read_to_string(&mut out).await;
+    assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+}
+
+#[tokio::test]
+async fn handshake_failures_and_timeouts_reach_the_observer() {
+    let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let recorder = std::sync::Arc::clone(&errors);
+    let server = start_with(move |runtime| {
+        runtime
+            .handshake_timeout(Duration::from_millis(150))
+            .on_connection_error(move |error| recorder.lock().unwrap().push(error.to_string()))
+    })
+    .await;
+    // Garbage instead of a ClientHello.
+    let mut tcp = TcpStream::connect(server.addr).await.unwrap();
+    tcp.write_all(&[0u8, 1, 2, 3, 255, 254, 9, 9, 9, 9])
+        .await
+        .unwrap();
+    let mut drain = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(2), tcp.read_to_end(&mut drain)).await;
+    // A client that never speaks.
+    let mut silent = TcpStream::connect(server.addr).await.unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(2), silent.read_to_end(&mut drain)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let errors = errors.lock().unwrap();
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    assert!(errors.iter().any(|e| e.contains("timed out")), "{errors:?}");
 }
