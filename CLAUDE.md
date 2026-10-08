@@ -29,6 +29,10 @@ cargo bench --bench router --features uuid,test-util,swagger     # microbenchmar
 cargo +nightly miri test --lib inline_future --                  # CI gate for the unsafe inline-future code
 ```
 
+Cleanup step: after finishing a task or branch run `bash scripts/clean.sh`
+(removes `target/` and the Docker cache volumes `oasrs-target` / `oasrs-cargo`, which can reach
+12+ GB). Remove scratch crates, worktrees and temp logs created for experiments in the same step.
+
 ## Architecture
 
 Two-phase lifecycle: `App` (mutable builder, `src/app.rs`) → `App::build()` → `AppRuntime` (immutable, `src/runtime.rs`) that serves requests. All route compilation, OpenAPI document and Swagger HTML are produced once at `build()`; request dispatch does no OpenAPI work.
