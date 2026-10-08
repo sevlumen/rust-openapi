@@ -23,3 +23,4 @@ MSYS_NO_PATHCONV=1 docker run --rm \
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
   '
 echo "verify-docker: all gates passed"
+echo "(the Docker cache volumes oasrs-target and oasrs-cargo can reach many GB; run scripts/clean.sh when you are done)"

@@ -15,6 +15,18 @@ Without Docker, run the commands listed under "Verification" in the README.
 A plain `cargo test --features "uuid test-util swagger"` also works after
 cloning.
 
+## Cleaning up
+
+`scripts/verify-docker.sh` keeps its build cache in the Docker volumes
+`oasrs-target` and `oasrs-cargo`, and cargo fills `target/`. Together they grow
+to many GB across feature combinations. When you finish a task or branch, run:
+
+```bash
+bash scripts/clean.sh
+```
+
+It removes `target/` and those two volumes (everything is rebuilt on demand).
+
 ## Guidelines
 
 - Keep changes focused; add a test for every behavior change.
