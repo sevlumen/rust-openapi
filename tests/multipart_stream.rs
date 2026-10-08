@@ -218,3 +218,76 @@ fn a_raw_streaming_route_can_document_its_form_too() {
     let after = app.openapi_document();
     assert!(after["paths"]["/up"]["post"]["requestBody"].is_object());
 }
+
+/// Sends `junk` after a request head that declares `declared` bytes, never
+/// finishing the body, and returns what the server answers meanwhile.
+async fn flood(junk: Vec<u8>, declared: usize) -> String {
+    let (tx, _first) = mpsc::channel(1);
+    let (addr, stop) = serve(streaming_app(10 * 1024 * 1024, tx)).await;
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(request_head(Some(declared)).as_bytes())
+        .await
+        .unwrap();
+    for piece in junk.chunks(8192) {
+        if stream.write_all(piece).await.is_err() {
+            break;
+        }
+    }
+    let started = std::time::Instant::now();
+    let response = read_response(&mut stream).await;
+    let _ = stop.send(());
+    // The server may reset the connection while the client is still sending,
+    // which can swallow the `400`: an early close counts as refused too. Only
+    // the server waiting for the rest of the body (until the read times out)
+    // is a failure.
+    if response.is_empty() && started.elapsed() < Duration::from_secs(3) {
+        return "HTTP/1.1 400 (connection closed early)".to_owned();
+    }
+    response
+}
+
+#[tokio::test]
+async fn a_body_that_never_reaches_a_boundary_is_cut_off_early() {
+    // No `--boundary` anywhere: multer would keep buffering until the limit.
+    let response = flood(vec![b'a'; 600_000], 2_000_000).await;
+    assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+}
+
+#[tokio::test]
+async fn part_headers_that_never_end_are_cut_off_early() {
+    let mut junk = format!("--{BOUNDARY}\r\nX-Junk: ").into_bytes();
+    junk.extend(vec![b'a'; 600_000]);
+    let response = flood(junk, 2_000_000).await;
+    assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+}
+
+#[tokio::test]
+async fn a_large_well_formed_upload_is_not_cut_off_by_that_guard() {
+    let (tx, mut first) = mpsc::channel(1);
+    let (addr, stop) = serve(streaming_app(10 * 1024 * 1024, tx)).await;
+    let data = vec![3u8; 3_000_000];
+    let (head, tail) = (head("ok.bin"), tail());
+    let total = head.len() + data.len() + tail.len();
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(request_head(Some(total)).as_bytes())
+        .await
+        .unwrap();
+    stream.write_all(&head).await.unwrap();
+    stream.write_all(&data).await.unwrap();
+    stream.write_all(&tail).await.unwrap();
+    let response = read_response(&mut stream).await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.ends_with("3000000"), "{response}");
+    let _ = first.try_recv();
+    let _ = stop.send(());
+}
+
+#[test]
+#[should_panic(expected = "twice")]
+fn documenting_a_field_name_twice_is_rejected() {
+    let mut app = App::new();
+    app.post("/x", buffered);
+    app.multipart_fields([MultipartField::text("a"), MultipartField::file("a")]);
+}

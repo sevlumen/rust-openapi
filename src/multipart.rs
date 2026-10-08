@@ -1,6 +1,59 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use futures_core::Stream;
 
 use crate::*;
+
+/// How many body bytes `Multipart::from_stream` may pull without yielding a
+/// part header or a piece of data. `multer` buffers everything it has not been
+/// able to parse yet (a preamble with no boundary, part headers with no
+/// blank line), so without this a malformed body could pin the whole `limit`.
+const MAX_UNPRODUCTIVE: u64 = 256 * 1024;
+
+/// Bytes pulled from the body since the parser last produced something.
+#[derive(Default)]
+struct Progress(AtomicU64);
+
+impl Progress {
+    fn made(&self) {
+        self.0.store(0, Ordering::Relaxed);
+    }
+}
+
+/// The request body as a stream that fails when the parser is not
+/// consuming it (see [`MAX_UNPRODUCTIVE`]).
+struct GuardedBody {
+    inner: http_body_util::BodyDataStream<Incoming>,
+    progress: Arc<Progress>,
+}
+
+impl Stream for GuardedBody {
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.inner).poll_next(context) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                // What was pulled before this chunk and produced nothing. A
+                // single large chunk from the connection is not a violation by
+                // itself, so the bound is `MAX_UNPRODUCTIVE` plus one chunk.
+                let before = self
+                    .progress
+                    .0
+                    .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                if before > MAX_UNPRODUCTIVE {
+                    return Poll::Ready(Some(Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "multipart preamble or part headers too large",
+                    ))));
+                }
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(std::io::Error::other(error)))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
 
 /// A one-item stream over an already buffered body.
 struct OnceBody(Option<Bytes>);
@@ -57,6 +110,8 @@ fn boundary_of(headers: &http::HeaderMap) -> Result<String, ApiError> {
 /// as it arrives.
 pub struct Multipart {
     inner: multer::Multipart<'static>,
+    /// Set for `from_stream`: the guard against unparsable data piling up.
+    progress: Option<Arc<Progress>>,
 }
 
 impl Multipart {
@@ -64,6 +119,16 @@ impl Multipart {
     /// buffering it: memory use is about one chunk plus whatever the handler
     /// keeps. Use it in a raw handler (`App::raw`), which receives the
     /// streaming `Request<Incoming>`.
+    ///
+    /// Memory use: about one chunk for a well-formed body. A body that never
+    /// produces a boundary or ends a part's headers is refused with `400` after
+    /// 256 KiB instead of being buffered up to `limit`.
+    ///
+    /// There is no read timeout on the body: a client that stops sending keeps
+    /// the handler (and its connection) waiting, so wrap `next_field()` and
+    /// `chunk()` in `tokio::time::timeout`. Answering early (any `?` from here)
+    /// ends the connection, and a client that is still uploading usually
+    /// never sees the error status unless it sent `Expect: 100-continue`.
     ///
     /// `limit` is the most bytes the whole body may have. A larger declared
     /// `Content-Length` is refused with `413` before anything is read, and a
@@ -88,9 +153,14 @@ impl Multipart {
         let boundary = boundary_of(request.headers())?;
         let constraints =
             multer::Constraints::new().size_limit(multer::SizeLimit::new().whole_stream(limit));
-        let stream = request.into_body().into_data_stream();
+        let progress = Arc::new(Progress::default());
+        let stream = GuardedBody {
+            inner: request.into_body().into_data_stream(),
+            progress: Arc::clone(&progress),
+        };
         Ok(Multipart {
             inner: multer::Multipart::with_constraints(stream, boundary, constraints),
+            progress: Some(progress),
         })
     }
 
@@ -101,17 +171,21 @@ impl Multipart {
     /// it makes this return a `500` error, because that is a bug in the
     /// handler rather than a bad request.
     pub async fn next_field(&mut self) -> Result<Option<Field>, ApiError> {
-        self.inner
-            .next_field()
-            .await
-            .map(|field| field.map(|inner| Field { inner }))
-            .map_err(map_error)
+        let field = self.inner.next_field().await.map_err(map_error)?;
+        if let Some(progress) = &self.progress {
+            progress.made();
+        }
+        Ok(field.map(|inner| Field {
+            inner,
+            progress: self.progress.clone(),
+        }))
     }
 }
 
 /// One part of a multipart body.
 pub struct Field {
     inner: multer::Field<'static>,
+    progress: Option<Arc<Progress>>,
 }
 
 impl Field {
@@ -134,15 +208,33 @@ impl Field {
     /// [`Multipart::from_stream`] this is how a large file is written out
     /// without holding all of it.
     pub async fn chunk(&mut self) -> Result<Option<Bytes>, ApiError> {
-        self.inner.chunk().await.map_err(map_error)
+        let chunk = self.inner.chunk().await.map_err(map_error)?;
+        if let Some(progress) = &self.progress {
+            progress.made();
+        }
+        Ok(chunk)
     }
 
-    pub async fn bytes(self) -> Result<Bytes, ApiError> {
-        self.inner.bytes().await.map_err(map_error)
+    pub async fn bytes(mut self) -> Result<Bytes, ApiError> {
+        if self.progress.is_none() {
+            return self.inner.bytes().await.map_err(map_error);
+        }
+        // Streaming: collect through `chunk` so progress is recorded.
+        let mut buffer = bytes::BytesMut::new();
+        while let Some(chunk) = self.chunk().await? {
+            buffer.extend_from_slice(&chunk);
+        }
+        Ok(buffer.freeze())
     }
 
+    /// The part as text. Buffered uploads honour the part's `charset`;
+    /// streamed ones decode as UTF-8 (invalid sequences replaced).
     pub async fn text(self) -> Result<String, ApiError> {
-        self.inner.text().await.map_err(map_error)
+        if self.progress.is_none() {
+            return self.inner.text().await.map_err(map_error);
+        }
+        let bytes = self.bytes().await?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 }
 
@@ -175,6 +267,7 @@ impl<S: Send + Sync + 'static> FromRequest<S> for Multipart {
         let body = std::mem::take(request.body_mut());
         Ok(Multipart {
             inner: multer::Multipart::new(OnceBody(Some(body)), boundary),
+            progress: None,
         })
     }
 }
@@ -234,7 +327,14 @@ impl<S: Send + Sync + 'static> App<S> {
     /// document, as a `multipart/form-data` request body (replacing what the
     /// route had). It documents only: it does not validate uploads. Use it
     /// for [`Multipart`] routes and for raw streaming routes, which otherwise
-    /// have no `requestBody`.
+    /// have no `requestBody`. Call it right after registering the route. The
+    /// error responses the framework documents for a body route (`400`, `413`,
+    /// `415`) are assumed to apply, as they do for the buffered extractor and
+    /// [`Multipart::from_stream`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if a field name is given twice.
     pub fn multipart_fields(
         &mut self,
         fields: impl IntoIterator<Item = MultipartField>,
@@ -246,6 +346,11 @@ impl<S: Send + Sync + 'static> App<S> {
         let mut required = Vec::new();
         let mut encoding = Map::new();
         for field in fields {
+            assert!(
+                !properties.contains_key(&field.name),
+                "multipart field `{}` is documented twice",
+                field.name
+            );
             let mut schema = Map::new();
             schema.insert("type".to_owned(), json!("string"));
             if field.file {

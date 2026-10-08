@@ -20,7 +20,8 @@ All notable changes to this project are documented here. The format follows
 
 - `Multipart::from_stream` and `Field::chunk`: streaming multipart uploads
   from a raw handler with a whole-body limit (declared lengths are refused
-  early, chunked bodies are cut off at the limit).
+  early, chunked bodies are cut off at the limit, and a body that never yields
+  a boundary or part headers is cut off after 256 KiB).
 - `App::multipart_fields` / `MultipartField`: document the form fields of a
   `multipart/form-data` route (buffered or raw) in the OpenAPI document.
 
