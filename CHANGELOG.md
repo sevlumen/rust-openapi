@@ -10,6 +10,9 @@ All notable changes to this project are documented here. The format follows
   `UnknownSecurityScheme { name }` variant.
 
 ### Added
+- Middleware: `Middleware`, `Next`, `RequestBody` and `App::layer` for global
+  layers that run before routing, plus the built-in `Trace` and `BearerAuth`
+  layers. Zero cost without layers; about 40 ns and one allocation per layer.
 - OpenAPI security schemes: `OpenApiOptions::{security_scheme, bearer_auth,
   api_key, default_security}`, per-route `App::security` / `App::public`, and
   the `SecurityScheme` / `ApiKeyLocation` types. Generates

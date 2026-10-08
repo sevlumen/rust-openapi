@@ -1,6 +1,6 @@
 # Middleware design for oas-rs
 
-Status: draft for review. Target release: 0.2.0.
+Status: implemented (see Results at the end). Target release: 0.2.0.
 
 ## Goal
 

@@ -159,6 +159,45 @@ an alternative (logical OR). Referencing a scheme that was never declared makes
 `security_scheme(name, SecurityScheme::...)` (`bearer_with_format("JWT")`,
 `basic()`, `api_key(...)`).
 
+## Middleware
+
+Register global layers with `App::layer`. A layer is an `async fn` (or any type
+implementing `Middleware`) that receives the request and a `Next` handle:
+
+```rust
+use oas_rs::{BearerAuth, Next, RequestBody, Trace};
+use http::Request;
+
+async fn timing(request: Request<RequestBody>, next: Next) -> oas_rs::HttpResponse {
+    let started = std::time::Instant::now();
+    let response = next.run(request).await;
+    eprintln!("{} in {:?}", response.status(), started.elapsed());
+    response
+}
+
+app.layer(Trace::stderr()); // outermost: first registered runs first
+app.layer(
+    BearerAuth::new(|token: String| async move {
+        // Validate against your own store; return an ApiError to reject.
+        if token == "secret" { Ok(()) } else { Err(oas_rs::ApiError::missing("bad token")) }
+    })
+    .exempt_paths(["/health", "/openapi.json"]),
+);
+app.layer(timing);
+```
+
+Layers run before routing, so they also see `404`, `405`, automatic `OPTIONS`
+and `HEAD` requests. A layer may answer without calling `next` (for example
+`401`). It can read or change the request head and read the body, but cannot
+substitute a different body. There is no per-route layer yet, and panics are
+not caught. `BearerAuth` *enforces* a bearer token; `OpenApiOptions::bearer_auth`
+only *documents* the scheme, so use both for a protected, documented API.
+
+With no layers registered, the request path is unchanged. Each layer costs
+about 40 ns and one allocation per request (see `docs/middleware-design.md`
+for measurements). `Trace::new(|record| ...)` receives the method, path,
+status and elapsed time of every request.
+
 ## Installation
 
 ```toml
