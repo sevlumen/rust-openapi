@@ -248,8 +248,9 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
     ///
     /// With Nagle's algorithm left on, a response written in several small
     /// pieces (streamed or chunked bodies) can stall for about 40 ms on Linux
-    /// while the kernel waits for a delayed ACK. Disabling `TCP_NODELAY`
-    /// restores the operating system default.
+    /// while the kernel waits for a delayed ACK. Passing `false` leaves the
+    /// socket exactly as accepted (it inherits the listener's setting, which
+    /// is off unless you enabled it when building the listener).
     pub fn tcp_nodelay(mut self, enabled: bool) -> Self {
         self.tcp_nodelay = enabled;
         self
@@ -550,6 +551,22 @@ mod accept_tests {
                 AcceptAction::Backoff,
                 "os error {code}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_sockets_get_tcp_nodelay_only_when_asked() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        for enabled in [true, false] {
+            let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let shutdown = std::future::pending::<()>();
+            tokio::pin!(shutdown);
+            let accepted = accept_next(&listener, &mut shutdown, enabled)
+                .await
+                .unwrap()
+                .expect("a connection");
+            assert_eq!(accepted.nodelay().unwrap(), enabled);
         }
     }
 

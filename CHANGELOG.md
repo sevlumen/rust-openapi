@@ -5,11 +5,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `AppRuntime::tcp_nodelay(bool)` to control `TCP_NODELAY` on accepted
+  connections.
+
 ### Changed
-- Accepted connections now get `TCP_NODELAY` by default (both `serve_listener`
-  and `serve_tls`), removing a roughly 40 ms Nagle/delayed-ACK stall for
-  responses written in several small pieces (3-chunk streamed response: 41 ms
-  -> 6.5 ms). Opt out with `AppRuntime::tcp_nodelay(false)`.
+- Behavior change: accepted connections now get `TCP_NODELAY` by default
+  (`listen`, `serve_listener` and `serve_tls`), removing a roughly 40 ms
+  Nagle/delayed-ACK stall for responses written in several small pieces
+  (measured: 3-chunk streamed response 41 ms -> 6.5 ms; small-response
+  throughput -3%..+1.5% across harnesses, within noise). Opt out with
+  `AppRuntime::tcp_nodelay(false)`.
 
 ## [0.3.0] - 2026-10-08
 

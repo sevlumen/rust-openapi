@@ -3,7 +3,9 @@
 //! `TCP_NODELAY` on accepted connections by default to avoid that; these tests
 //! pin the behavior with a streamed response whose chunks are written 1 ms
 //! apart. The timing contrast is a Linux kernel behavior, so they only run
-//! there.
+//! there. That the option reaches (or is withheld from) the accepted socket is
+//! checked deterministically by `accepted_sockets_get_tcp_nodelay_only_when_asked`
+//! in `src/runtime.rs`.
 #![cfg(target_os = "linux")]
 
 use std::{
@@ -97,17 +99,5 @@ async fn streamed_chunks_are_not_stalled_by_nagle_by_default() {
     assert!(
         median < Duration::from_millis(25),
         "median {median:?}: a Nagle/delayed-ACK stall (about 40 ms) is back"
-    );
-}
-
-#[tokio::test]
-async fn tcp_nodelay_can_be_turned_off() {
-    let (addr, _stop) = spawn_server(runtime().tcp_nodelay(false)).await;
-    let median = median_stream_latency(addr, 11).await;
-    // With Nagle enabled the delayed-ACK stall shows up (about 40 ms), which
-    // proves the option reaches the accepted socket.
-    assert!(
-        median >= Duration::from_millis(20),
-        "median {median:?}: expected the Nagle stall with tcp_nodelay(false)"
     );
 }
