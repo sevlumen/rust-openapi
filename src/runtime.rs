@@ -21,6 +21,15 @@ pub(crate) struct RuntimeInner<S> {
 }
 
 impl<S: Send + Sync + 'static> RuntimeInner<S> {
+    /// Whether any registered layer covers this request. When none does (no
+    /// layers at all, or only scoped layers that miss), the request skips the
+    /// chain and takes the allocation-free direct path.
+    pub(crate) fn has_matching_layer(&self, method: &Method, path: &str) -> bool {
+        self.middleware
+            .iter()
+            .any(|entry| entry.scope.matches(method, path))
+    }
+
     pub(crate) fn runtime_ref(&self) -> RuntimeRef<'_, S> {
         RuntimeRef {
             state: &self.state,
@@ -93,7 +102,10 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
     }
 
     pub(crate) fn prepare(&self, request: Request<Incoming>) -> PreparedDispatch {
-        if self.runtime.middleware.is_empty() {
+        if !self
+            .runtime
+            .has_matching_layer(request.method(), request.uri().path())
+        {
             return self.prepare_direct(request);
         }
         let (parts, body) = request.into_parts();
@@ -278,7 +290,10 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         let request = builder
             .body(body.unwrap_or_default())
             .expect("valid test request");
-        let response = if self.inner.middleware.is_empty() {
+        let response = if !self
+            .inner
+            .has_matching_layer(request.method(), request.uri().path())
+        {
             self.runtime_ref().handle(request).await
         } else {
             let (parts, body) = request.into_parts();

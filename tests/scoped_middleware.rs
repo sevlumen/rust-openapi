@@ -389,3 +389,56 @@ fn group_supports_every_registration_method() {
         assert!(doc["paths"].get(path).is_some(), "missing {path}");
     }
 }
+
+/// Requests outside every scope skip the chain entirely: the layer never runs,
+/// and the responses are identical to an app without the layer.
+#[tokio::test]
+async fn requests_outside_every_scope_behave_exactly_as_without_the_layer() {
+    let calls = Arc::new(Mutex::new(0usize));
+    let counted = {
+        let calls = Arc::clone(&calls);
+        move |request: Request<RequestBody>, next: Next| {
+            let calls = Arc::clone(&calls);
+            async move {
+                *calls.lock().unwrap() += 1;
+                next.run(request).await
+            }
+        }
+    };
+    fn routes(app: &mut App) {
+        app.get("/public", ok);
+        app.get("/admin/users", ok);
+    }
+    let mut plain = App::new();
+    routes(&mut plain);
+    let plain = plain.build().unwrap();
+    let mut layered = App::new();
+    routes(&mut layered);
+    layered.layer_for("/admin", counted);
+    let layered = layered.build().unwrap();
+
+    for (method, uri) in [
+        (Method::GET, "/public"),
+        (Method::HEAD, "/public"),
+        (Method::POST, "/public"),
+        (Method::OPTIONS, "/public"),
+        (Method::GET, "/missing"),
+    ] {
+        let expected = plain.oneshot(method.clone(), uri, &[], None).await;
+        let actual = layered.oneshot(method.clone(), uri, &[], None).await;
+        assert_eq!(expected.status(), actual.status(), "{method} {uri}");
+        assert_eq!(
+            expected.header("allow"),
+            actual.header("allow"),
+            "{method} {uri}"
+        );
+    }
+    assert_eq!(
+        *calls.lock().unwrap(),
+        0,
+        "a scoped layer ran outside its scope"
+    );
+
+    status(&layered, Method::GET, "/admin/users").await;
+    assert_eq!(*calls.lock().unwrap(), 1);
+}

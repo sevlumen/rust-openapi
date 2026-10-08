@@ -107,3 +107,25 @@ test: for every path variant the router serves (`//admin/x`, `/admin//x`,
   with the mitigation.
 - A new public type (`Group`) with many forwarding methods must stay in step
   with `App`'s registration methods; a test lists them.
+
+## Results (measured 2026-10-08, Docker Linux, Rust 1.88, release profile)
+
+In-memory microbenchmark (`benches/router.rs`, `AppRuntime::oneshot`, 100,000
+iterations, median of 3 runs; run-to-run noise about +/-5%):
+
+| Layers (all no-op) | none | global | scoped, request inside scope | scoped, request outside scope |
+|---|---|---|---|---|
+| 0 | 260 ns, 3 allocs | - | - | - |
+| 1 | - | 390 ns, 5 allocs | 395 ns, 5 allocs | 259 ns, 3 allocs |
+| 3 | - | 480 ns, 7 allocs | 502 ns, 7 allocs | 283 ns, 3 allocs |
+| 5 | - | 585 ns, 9 allocs | 610 ns, 9 allocs | 285 ns, 3 allocs |
+
+- With no layer covering the request the chain is skipped entirely: a request
+  outside every scope costs the same 3 allocations and 666 bytes as an app with
+  no middleware, plus about 7 ns per scoped layer to check its scope. (Before
+  this check was added, such a request paid a boxed terminal dispatch: about
+  +90 ns, 4 allocations and 2.5 KB.)
+- A global layer is unchanged versus 0.4.0 (about 390 / 480 / 585 ns for 1 / 3 /
+  5 layers, against 403 / 490 / 570 ns measured before).
+- A scoped layer that matches costs about 2-4% more than a global one (segment
+  comparison), still one allocation per layer.
