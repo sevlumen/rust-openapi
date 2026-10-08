@@ -893,4 +893,58 @@ async fn main() {
             bytes as f64 / iterations as f64,
         );
     }
+
+    #[cfg(feature = "multipart")]
+    {
+        use oas_rs::Multipart;
+
+        async fn upload(mut form: Multipart) -> Result<&'static str, ApiError> {
+            while let Some(field) = form.next_field().await? {
+                let _ = field.bytes().await?;
+            }
+            Ok("OK")
+        }
+
+        let mut app = App::new();
+        app.post("/upload", upload).body_limit(5 * 1024 * 1024);
+        let runtime = app.build().unwrap();
+
+        let boundary = "BENCHBOUNDARY";
+        let file = vec![0xA5u8; 4 * 1024 * 1024 - 1024];
+        let mut body = Vec::new();
+        for (name, data) in [("note", &b"firmware 1.2.3"[..]), ("firmware", &file[..])] {
+            body.extend_from_slice(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{name}.bin\"\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+            body.extend_from_slice(data);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        let body = Bytes::from(body);
+        let content_type = format!("multipart/form-data; boundary={boundary}");
+        let headers = [("content-type", content_type.as_str())];
+
+        let iterations = 200u64;
+        ALLOCATIONS.store(0, Ordering::Relaxed);
+        ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let response = runtime
+                .oneshot(Method::POST, "/upload", &headers, Some(body.clone()))
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "case=multipart_upload body_bytes={} iterations={iterations} ms_per_op={:.3} mib_per_s={:.0} allocations_per_op={:.1} bytes_per_op={:.0}",
+            body.len(),
+            elapsed.as_secs_f64() * 1000.0 / iterations as f64,
+            body.len() as f64 * iterations as f64 / (1024.0 * 1024.0) / elapsed.as_secs_f64(),
+            ALLOCATIONS.load(Ordering::Relaxed) as f64 / iterations as f64,
+            ALLOCATED_BYTES.load(Ordering::Relaxed) as f64 / iterations as f64,
+        );
+    }
 }

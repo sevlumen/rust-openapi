@@ -110,3 +110,24 @@ disabled nothing in the default build changes.
 - If `multer::Multipart<'static>` turns out not to be `Send`, the wrapper owns
   the parser behind a `Mutex`-free design chosen at implementation time; the
   public API above does not change.
+
+## Results (measured 2026-10-08, Docker Linux, Rust 1.88, release profile)
+
+Default-path gate, mean of 3 runs each (`benches/router.rs`):
+
+| Case | feature `multipart` off | feature `multipart` on |
+|---|---|---|
+| `plaintext` | 257.0 ns, 3 allocations | 258.2 ns, 3 allocations |
+| `static_route_count` (1 route) | 259.5 ns, 3 allocations | 260.3 ns, 3 allocations |
+| `middleware layers=0` | 257.1 ns, 3 allocations | 255.7 ns, 3 allocations |
+
+The feature adds no per-request work to other routes: differences are within
+run-to-run noise (about ±5%).
+
+Upload benchmark (`multipart_upload`, two parts, 4,193,495-byte body, in-memory
+`oneshot`, 200 iterations, 3 runs): 0.240-0.242 ms per request, 42 allocations
+and about 8.39 MB allocated per request (roughly 2x the body: the parser's
+buffer plus the copy returned by `Field::bytes`). Throughput is memory-bound
+(tens of GiB/s in-process); real uploads are limited by the network. Capacity
+planning: budget about 3x the route's `body_limit` per concurrent upload (the
+buffered body itself plus the parser's working copies).
