@@ -25,6 +25,11 @@ All notable changes to this project are documented here. The format follows
 - `App::multipart_fields` / `MultipartField`: document the form fields of a
   `multipart/form-data` route (buffered or raw) in the OpenAPI document.
 
+- `AppRuntime::serve_unix` (Unix): HTTP/1.1 on a Unix domain socket with the
+  shared accept loop.
+- `AppRuntime::h2c` (feature `http2`): HTTP/2 with prior knowledge on
+  `serve_listener` / `serve_unix`, next to HTTP/1.1.
+
 ### Changed
 - **Schema changes for existing derives** (they now match what serde writes):
   `#[serde(default)]` and `skip_serializing_if` fields are no longer

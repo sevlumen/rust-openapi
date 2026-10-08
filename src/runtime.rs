@@ -10,6 +10,8 @@ pub struct AppRuntime<S = ()> {
     pub(crate) connection_error_observer: Option<ErrorObserver>,
     #[cfg(feature = "http2")]
     pub(crate) http2_max_concurrent_streams: Option<u32>,
+    #[cfg(feature = "http2")]
+    pub(crate) h2c: bool,
     #[cfg(feature = "tls")]
     pub(crate) handshake_timeout: Duration,
 }
@@ -390,6 +392,43 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         self.serve_listener(listener, std::future::pending()).await
     }
 
+    /// Serves HTTP/1.1 (and HTTP/2 when [`h2c`](Self::h2c) is on) on a Unix
+    /// domain socket, for example behind a reverse proxy on the same host,
+    /// with the same shutdown, timeout, connection limit and observer
+    /// behaviour as [`serve_listener`](Self::serve_listener).
+    ///
+    /// The socket file is created by `bind` with the process umask (often
+    /// connectable by everyone: restrict it with `chmod` or the umask), a
+    /// stale one must be removed before binding, and it is not removed on
+    /// shutdown. Peer credentials are not exposed to handlers.
+    #[cfg(unix)]
+    pub async fn serve_unix<F>(
+        self,
+        listener: tokio::net::UnixListener,
+        shutdown: F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        serve_runtime(self, listener, shutdown).await
+    }
+
+    /// Accepts HTTP/2 over plain TCP "with prior knowledge" (h2c) on
+    /// [`serve_listener`](Self::serve_listener) and
+    /// `serve_unix`, next to HTTP/1.1 on the same port;
+    /// the protocol is picked from the first bytes of each connection. Off by
+    /// default. Meant for a trusted proxy or load balancer that speaks h2c to
+    /// its upstream; browsers do not. The Upgrade-based h2c of RFC 7540 is not
+    /// supported. A connection must send its first bytes within
+    /// [`header_read_timeout`](Self::header_read_timeout) (that deadline also
+    /// covers a partial preface), after which the timeout applies to HTTP/1.1
+    /// requests only.
+    #[cfg(feature = "http2")]
+    pub fn h2c(mut self, enabled: bool) -> Self {
+        self.h2c = enabled;
+        self
+    }
+
     pub async fn serve_listener<F>(
         self,
         listener: tokio::net::TcpListener,
@@ -489,6 +528,43 @@ enum AcceptAction {
     Fatal,
 }
 
+/// A source of connections: a TCP listener or, on Unix, a Unix socket
+/// listener. Everything after `accept` is the same for both.
+pub(crate) trait Listener {
+    type Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static;
+
+    fn accept(&self) -> impl Future<Output = std::io::Result<Self::Io>> + Send;
+
+    /// `TCP_NODELAY` where it exists; a no-op otherwise.
+    fn set_nodelay(_io: &Self::Io) {}
+}
+
+impl Listener for tokio::net::TcpListener {
+    type Io = tokio::net::TcpStream;
+
+    async fn accept(&self) -> std::io::Result<Self::Io> {
+        tokio::net::TcpListener::accept(self)
+            .await
+            .map(|(stream, _)| stream)
+    }
+
+    fn set_nodelay(io: &Self::Io) {
+        // Failing only leaves the operating system default in place.
+        let _ = io.set_nodelay(true);
+    }
+}
+
+#[cfg(unix)]
+impl Listener for tokio::net::UnixListener {
+    type Io = tokio::net::UnixStream;
+
+    async fn accept(&self) -> std::io::Result<Self::Io> {
+        tokio::net::UnixListener::accept(self)
+            .await
+            .map(|(stream, _)| stream)
+    }
+}
+
 /// Holds one of the `max_connections` slots until dropped.
 pub(crate) type ConnectionSlot = tokio::sync::OwnedSemaphorePermit;
 
@@ -554,13 +630,14 @@ fn classify_accept_error(error: &std::io::Error) -> AcceptAction {
 /// With a connection `limit`, a slot is taken before accepting and handed back
 /// with the stream: hold it as long as the connection lives. While every slot
 /// is taken this waits (racing `shutdown`) and accepts nothing.
-pub(crate) async fn accept_next<F>(
-    listener: &tokio::net::TcpListener,
+pub(crate) async fn accept_next<L, F>(
+    listener: &L,
     shutdown: &mut Pin<&mut F>,
     nodelay: bool,
     limit: Option<&Arc<tokio::sync::Semaphore>>,
-) -> Result<Option<(tokio::net::TcpStream, Option<ConnectionSlot>)>, std::io::Error>
+) -> Result<Option<(L::Io, Option<ConnectionSlot>)>, std::io::Error>
 where
+    L: Listener,
     F: Future<Output = ()>,
 {
     let slot = match limit {
@@ -576,9 +653,9 @@ where
         tokio::select! {
             _ = shutdown.as_mut() => return Ok(None),
             accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => {
+                Ok(stream) => {
                     if nodelay {
-                        let _ = stream.set_nodelay(true);
+                        L::set_nodelay(&stream);
                     }
                     return Ok(Some((stream, slot)));
                 }
@@ -595,15 +672,18 @@ where
     }
 }
 
-async fn serve_runtime<S, F>(
+async fn serve_runtime<S, L, F>(
     runtime: AppRuntime<S>,
-    listener: tokio::net::TcpListener,
+    listener: L,
     shutdown: F,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: Send + Sync + 'static,
+    L: Listener,
     F: Future<Output = ()> + Send + 'static,
 {
+    #[cfg(feature = "http2")]
+    let (h2c, max_streams) = (runtime.h2c, runtime.http2_max_concurrent_streams);
     let shutdown_timeout = runtime.shutdown_timeout;
     let nodelay = runtime.tcp_nodelay;
     let header_read_timeout = runtime.header_read_timeout;
@@ -611,16 +691,77 @@ where
     let observer = runtime.connection_error_observer;
     let runtime = runtime.inner;
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+    // Tells connections still sniffing for the h2 preface that shutdown began.
+    #[cfg(feature = "http2")]
+    let (stop, _) = tokio::sync::watch::channel(());
     tokio::pin!(shutdown);
     while let Some((stream, slot)) =
         accept_next(&listener, &mut shutdown, nodelay, limit.as_ref()).await?
     {
         let connection = ConnectionRuntime::new(Arc::clone(&runtime));
-        let io = hyper_util::rt::TokioIo::new(stream);
         let service = hyper::service::service_fn(move |request: Request<Incoming>| {
             let prepared = connection.prepare(request);
             async move { Ok::<_, Infallible>(prepared.await) }
         });
+        #[cfg(feature = "http2")]
+        if h2c {
+            let watcher = graceful.watcher();
+            let observer = observer.clone();
+            let mut stop = stop.subscribe();
+            tokio::spawn(async move {
+                let _slot = slot;
+                let mut stream = stream;
+                let mut seen = Vec::new();
+                let detection = async {
+                    match header_read_timeout {
+                        Some(limit) => {
+                            tokio::time::timeout(limit, detect_h2(&mut stream, &mut seen))
+                                .await
+                                .unwrap_or_else(|_| {
+                                    Err(std::io::Error::new(
+                                        std::io::ErrorKind::TimedOut,
+                                        "no request before header_read_timeout",
+                                    ))
+                                })
+                        }
+                        None => detect_h2(&mut stream, &mut seen).await,
+                    }
+                };
+                let is_h2 = tokio::select! {
+                    // Shutting down while the first bytes are awaited.
+                    _ = stop.changed() => return,
+                    outcome = detection => match outcome {
+                        Ok(is_h2) => is_h2,
+                        Err(error) => {
+                            report_connection_error(&observer, &error);
+                            return;
+                        }
+                    },
+                };
+                let io = hyper_util::rt::TokioIo::new(Rewind {
+                    prefix: Bytes::from(seen),
+                    inner: stream,
+                });
+                let outcome = if is_h2 {
+                    let mut builder = hyper::server::conn::http2::Builder::new(
+                        hyper_util::rt::TokioExecutor::new(),
+                    );
+                    if let Some(limit) = max_streams {
+                        builder.max_concurrent_streams(limit);
+                    }
+                    watcher.watch(builder.serve_connection(io, service)).await
+                } else {
+                    watcher
+                        .watch(http1_builder(header_read_timeout).serve_connection(io, service))
+                        .await
+                };
+                if let Err(error) = outcome {
+                    report_connection_error(&observer, &error);
+                }
+            });
+            continue;
+        }
+        let io = hyper_util::rt::TokioIo::new(stream);
         let connection = http1_builder(header_read_timeout).serve_connection(io, service);
         let connection = graceful.watch(connection);
         let observer = observer.clone();
@@ -631,8 +772,100 @@ where
             }
         });
     }
+    #[cfg(feature = "http2")]
+    let _ = stop.send(());
     let _ = tokio::time::timeout(shutdown_timeout, graceful.shutdown()).await;
     Ok(())
+}
+
+/// The HTTP/2 connection preface a client sends first with prior knowledge.
+#[cfg(feature = "http2")]
+const H2_PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+/// Reads from `io` until the h2 preface is confirmed or ruled out, keeping
+/// what was read in `seen`. A first byte that cannot start the preface means
+/// HTTP/1.1 at once, so ordinary requests are not delayed.
+#[cfg(feature = "http2")]
+async fn detect_h2<T: tokio::io::AsyncRead + Unpin>(
+    io: &mut T,
+    seen: &mut Vec<u8>,
+) -> std::io::Result<bool> {
+    use tokio::io::AsyncReadExt;
+    let mut chunk = [0u8; 24];
+    while seen.len() < H2_PREFACE.len() {
+        if !H2_PREFACE.starts_with(seen) {
+            return Ok(false);
+        }
+        let want = H2_PREFACE.len() - seen.len();
+        let read = io.read(&mut chunk[..want]).await?;
+        if read == 0 {
+            // Closed early: HTTP/1.1 handling reports it like any other.
+            return Ok(false);
+        }
+        seen.extend_from_slice(&chunk[..read]);
+    }
+    Ok(seen.as_slice() == H2_PREFACE)
+}
+
+/// An I/O object that first replays bytes that were already read from it.
+#[cfg(feature = "http2")]
+struct Rewind<T> {
+    prefix: Bytes,
+    inner: T,
+}
+
+#[cfg(feature = "http2")]
+impl<T: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Rewind<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if !self.prefix.is_empty() {
+            let count = self.prefix.len().min(buffer.remaining());
+            let replay = self.prefix.split_to(count);
+            buffer.put_slice(&replay);
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.inner).poll_read(context, buffer)
+    }
+}
+
+#[cfg(feature = "http2")]
+impl<T: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Rewind<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(context, data)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(context)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffers: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_vectored(context, buffers)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
 }
 
 /// A response returned by [`App::oneshot`] for concise integration tests.

@@ -239,6 +239,8 @@ impl<S: Send + Sync + 'static> App<S> {
             connection_error_observer: None,
             #[cfg(feature = "http2")]
             http2_max_concurrent_streams: None,
+            #[cfg(feature = "http2")]
+            h2c: false,
             #[cfg(feature = "tls")]
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
         })

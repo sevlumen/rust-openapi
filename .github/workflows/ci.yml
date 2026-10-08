@@ -72,3 +72,18 @@ jobs:
 
       - name: Audit dependencies, licenses and sources
         uses: EmbarkStudios/cargo-deny-action@v2
+
+  semver:
+    # Compares the public API with the latest published release; a breaking
+    # change needs a version bump that allows it (a minor bump while 0.x).
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check semver compatibility
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: oas-rs
+          feature-group: all-features

@@ -30,8 +30,10 @@ It removes `target/` and those two volumes (everything is rebuilt on demand).
 ## Guidelines
 
 - Keep changes focused; add a test for every behavior change.
-- Public API and HTTP semantics are frozen for the `0.1` line. Open an issue
-  before proposing a breaking change.
+- While the crate is `0.x`, a breaking change to the public API or to HTTP
+  semantics needs a minor version bump and a `### Changed` entry in the
+  changelog; open an issue first. CI runs `cargo semver-checks` on pull
+  requests against the latest published release.
 - Every `unsafe` block needs a `// SAFETY:` comment, and changes to
   `src/handler.rs` must keep the Miri job green.
 - Performance-sensitive changes should include `cargo bench --bench router`
