@@ -894,6 +894,29 @@ async fn main() {
         );
     }
 
+    // Scoped layers: the same no-op layers registered with a path scope that
+    // either covers the request ("match") or does not ("skip").
+    for (kind, scope) in [("match", "/plaintext"), ("skip", "/other")] {
+        for layers in [1usize, 3, 5] {
+            let mut app = App::new();
+            app.get("/plaintext", plaintext);
+            for _ in 0..layers {
+                app.layer_for(scope, noop_layer);
+            }
+            let runtime = app.build().unwrap();
+            let iterations = 100_000;
+            measure_app(&runtime, Method::GET, "/plaintext", &[], 1_000).await;
+            let (elapsed, allocations, bytes) =
+                measure_app(&runtime, Method::GET, "/plaintext", &[], iterations).await;
+            println!(
+                "case=middleware_scoped kind={kind} layers={layers} iterations={iterations} ns_per_op={:.2} allocations_per_op={:.4} bytes_per_op={:.2}",
+                elapsed as f64 / iterations as f64,
+                allocations as f64 / iterations as f64,
+                bytes as f64 / iterations as f64,
+            );
+        }
+    }
+
     #[cfg(feature = "multipart")]
     {
         use oas_rs::Multipart;
