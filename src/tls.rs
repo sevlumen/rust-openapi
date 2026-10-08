@@ -51,11 +51,23 @@ impl std::error::Error for TlsError {
 /// Server-side TLS settings: a certificate chain and its private key.
 ///
 /// TLS 1.2 and 1.3 are enabled with rustls' safe defaults and the `ring`
-/// crypto provider; the server speaks HTTP/1.1 only and does not request
-/// client certificates.
+/// crypto provider; the server speaks HTTP/1.1, plus HTTP/2 when the `http2`
+/// feature is enabled (see `enable_http2`), and does not request client
+/// certificates.
 #[derive(Clone)]
 pub struct TlsConfig {
     config: Arc<rustls::ServerConfig>,
+}
+
+/// The ALPN protocols offered to clients: `h2` first when HTTP/2 is enabled
+/// (only possible with the `http2` feature), then `http/1.1`.
+fn alpn_protocols(http2: bool) -> Vec<Vec<u8>> {
+    #[cfg(feature = "http2")]
+    if http2 {
+        return vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    }
+    let _ = http2;
+    vec![b"http/1.1".to_vec()]
 }
 
 impl TlsConfig {
@@ -89,10 +101,20 @@ impl TlsConfig {
             .with_no_client_auth()
             .with_single_cert(certs, key)
             .map_err(|error| TlsError::with_source("using the certificate and key", error))?;
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        config.alpn_protocols = alpn_protocols(cfg!(feature = "http2"));
         Ok(Self {
             config: Arc::new(config),
         })
+    }
+
+    /// Offer HTTP/2 (`h2`) next to `http/1.1` through ALPN. On by default when
+    /// the `http2` feature is enabled; pass `false` to serve HTTP/1.1 only.
+    #[cfg(feature = "http2")]
+    pub fn enable_http2(mut self, enabled: bool) -> Self {
+        let mut config = (*self.config).clone();
+        config.alpn_protocols = alpn_protocols(enabled);
+        self.config = Arc::new(config);
+        self
     }
 
     pub(crate) fn acceptor(&self) -> TlsAcceptor {
@@ -116,7 +138,9 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
 
     /// Serves HTTPS on `listener` until `shutdown` completes, then waits for
     /// in-flight requests like [`AppRuntime::serve_listener`], bounded by
-    /// [`AppRuntime::shutdown_timeout`]. HTTP/1.1 only.
+    /// [`AppRuntime::shutdown_timeout`]. HTTP/1.1, plus HTTP/2 when the
+    /// `http2` feature is enabled and the client negotiates `h2` through ALPN
+    /// (see [`TlsConfig::enable_http2`]).
     ///
     /// The handshake runs inside the per-connection task, so a slow client
     /// never blocks the accept loop; a failed or timed-out handshake closes
@@ -159,11 +183,28 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
                     // Shutting down during the handshake.
                     _ = stop.changed() => return,
                 };
+                // The ALPN result picks the protocol; anything but `h2` is HTTP/1.1.
+                #[cfg(feature = "http2")]
+                let negotiated_h2 = tls_stream.get_ref().1.alpn_protocol() == Some(b"h2");
                 let io = hyper_util::rt::TokioIo::new(tls_stream);
                 let service = hyper::service::service_fn(move |request: Request<Incoming>| {
                     let prepared = connection.prepare(request);
                     async move { Ok::<_, Infallible>(prepared.await) }
                 });
+                #[cfg(feature = "http2")]
+                if negotiated_h2 {
+                    let conn = hyper::server::conn::http2::Builder::new(
+                        hyper_util::rt::TokioExecutor::new(),
+                    )
+                    .serve_connection(io, service);
+                    tokio::pin!(conn);
+                    tokio::select! {
+                        _ = conn.as_mut() => return,
+                        _ = stop.changed() => conn.as_mut().graceful_shutdown(),
+                    }
+                    let _ = conn.await;
+                    return;
+                }
                 let conn = hyper::server::conn::http1::Builder::new().serve_connection(io, service);
                 tokio::pin!(conn);
                 tokio::select! {
