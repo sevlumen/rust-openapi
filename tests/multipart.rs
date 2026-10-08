@@ -397,3 +397,62 @@ async fn readme_example_works() {
         r#"[{"bytes":3,"file":"fw.bin"}]"#
     );
 }
+
+// Holding the previous Field while asking for the next one is a handler bug,
+// not a client error: it must not be reported as 400.
+async fn holds_the_previous_field(mut form: Multipart) -> Result<String, ApiError> {
+    let first = form.next_field().await?.expect("first part");
+    let second = form.next_field().await;
+    drop(first);
+    second.map(|_| "ok".to_owned())
+}
+
+#[tokio::test]
+async fn holding_a_field_while_requesting_the_next_is_a_500_not_a_400() {
+    let mut app = App::new();
+    app.post("/upload", holds_the_previous_field);
+    let runtime = app.build().unwrap();
+    let body = multipart_body(
+        "XB",
+        &[
+            Part {
+                name: "a",
+                file_name: None,
+                content_type: None,
+                data: b"1",
+            },
+            Part {
+                name: "b",
+                file_name: None,
+                content_type: None,
+                data: b"2",
+            },
+        ],
+    );
+    let (status, text) = upload(&runtime, Some("multipart/form-data; boundary=XB"), body).await;
+    assert_eq!(status, 500, "{text}");
+}
+
+#[tokio::test]
+async fn quoted_file_names_follow_rfc_2046_quoted_string_rules() {
+    // (sent inside filename="...", returned by `Field::file_name`)
+    for (sent, expected) in [
+        ("quo\\\"te.bin", "quo\"te.bin"), // a backslash-escaped quote is unescaped
+        ("quo%22te.bin", "quo%22te.bin"), // percent-encoding is left as sent
+        (r"back\\slash.bin", r"back\\slash.bin"), // only `\"` is unescaped; other backslashes stay
+    ] {
+        let body = multipart_body(
+            "XB",
+            &[Part {
+                name: "f",
+                file_name: Some(sent),
+                content_type: None,
+                data: b"x",
+            }],
+        );
+        let (status, text) =
+            upload(&runtime(), Some("multipart/form-data; boundary=XB"), body).await;
+        assert_eq!(status, 200, "{sent}: {text}");
+        assert_eq!(text, format!("f|{expected}|-|1"), "{sent}");
+    }
+}

@@ -78,3 +78,15 @@ async fn body_limit_on_a_route_without_a_buffered_body_is_a_no_op() {
     let response = runtime.oneshot(Method::GET, "/", &[], None).await;
     assert_eq!(response.status(), 200);
 }
+
+#[tokio::test]
+async fn a_later_max_body_size_resets_earlier_per_route_limits() {
+    let mut app = App::new();
+    app.post("/big", echo).body_limit(2 * 1024 * 1024);
+    app.max_body_size(512 * 1024);
+    let runtime = app.build().unwrap();
+
+    // `max_body_size` rewrites every buffered route, including `/big`.
+    assert_eq!(post(&runtime, "/big", json_of_len(600 * 1024)).await, 413);
+    assert_eq!(post(&runtime, "/big", json_of_len(512 * 1024)).await, 200);
+}

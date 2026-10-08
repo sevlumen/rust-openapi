@@ -15,6 +15,13 @@ impl Stream for OnceBody {
 
 fn map_error(error: multer::Error) -> ApiError {
     match error {
+        // The handler asked for the next part while still holding the previous
+        // `Field`: a programming error, not a client error.
+        multer::Error::LockFailure => ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal Server Error",
+            "drop the previous multipart Field before requesting the next one",
+        ),
         multer::Error::FieldSizeExceeded { .. } | multer::Error::StreamSizeExceeded { .. } => {
             ApiError::new(
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -35,6 +42,11 @@ pub struct Multipart {
 
 impl Multipart {
     /// The next part, or `None` after the last one.
+    ///
+    /// The previous [`Field`] must be dropped (or consumed with
+    /// [`Field::bytes`] / [`Field::text`]) before calling this again; holding
+    /// it makes this return a `500` error, because that is a bug in the
+    /// handler rather than a bad request.
     pub async fn next_field(&mut self) -> Result<Option<Field>, ApiError> {
         self.inner
             .next_field()
@@ -54,8 +66,9 @@ impl Field {
         self.inner.name()
     }
 
-    /// The client-supplied file name, returned verbatim (never used by the
-    /// framework).
+    /// The client-supplied file name as sent, with only the quoted-string
+    /// escape `\"` removed (never used by the framework). Treat it as
+    /// untrusted input: do not use it as a filesystem path unsanitized.
     pub fn file_name(&self) -> Option<&str> {
         self.inner.file_name()
     }

@@ -179,17 +179,22 @@ async fn upload(mut form: Multipart) -> Result<Json<serde_json::Value>, ApiError
     Ok(Json(serde_json::json!(stored)))
 }
 
+app.openapi().bearer_auth("BearerAuth"); // declare the scheme used below
 app.post("/firmwares", upload)
     .body_limit(4 * 1024 * 1024) // this route only
     .security(["BearerAuth"]);
 ```
 
-- `app.max_body_size(bytes)` changes the limit of **every** buffered route;
-  `.body_limit(bytes)` overrides it for the route just registered.
+- `app.max_body_size(bytes)` changes the limit of **every** buffered route
+  (including earlier `.body_limit(...)` overrides, so call it before the
+  routes); `.body_limit(bytes)` overrides it for the route just registered.
 - A body over the limit returns `413`, a non-multipart `Content-Type` returns
   `415`, a missing boundary or malformed body returns `400`.
-- `Field::file_name` returns the client-supplied name verbatim; never use it as
-  a filesystem path without sanitizing it.
+- `Field::file_name` returns the client-supplied name as sent (only a
+  backslash-escaped quote `\"` is unescaped); never use it as a filesystem
+  path without sanitizing it.
+- Drop (or consume with `bytes()`/`text()`) the previous `Field` before calling
+  `next_field()` again; holding it is a handler bug and returns `500`.
 - Uploads are buffered, not streamed: budget about 3x the route's `body_limit`
   of memory per concurrent upload. For very large files use a raw handler.
 - The route is documented in OpenAPI as a `multipart/form-data` request body.
