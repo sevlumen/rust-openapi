@@ -30,6 +30,9 @@ All notable changes to this project are documented here. The format follows
 - `AppRuntime::h2c` (feature `http2`): HTTP/2 with prior knowledge on
   `serve_listener` / `serve_unix`, next to HTTP/1.1.
 
+- Feature `compression-brotli`: `Compress` also negotiates `br` (quality
+  values, brotli wins a tie; `Compress::brotli_quality`).
+
 ### Changed
 - **Schema changes for existing derives** (they now match what serde writes):
   `#[serde(default)]` and `skip_serializing_if` fields are no longer

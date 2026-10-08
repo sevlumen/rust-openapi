@@ -112,7 +112,7 @@ async fn small_bodies_and_unaccepting_clients_get_the_plain_body_but_still_vary(
     assert!(small.header("content-encoding").is_none());
     assert_eq!(small.body_string().await, "tiny");
 
-    for accept in [None, Some("identity"), Some("gzip;q=0"), Some("br")] {
+    for accept in [None, Some("identity"), Some("gzip;q=0"), Some("deflate")] {
         let response = get(&runtime, "/big", accept).await;
         assert!(response.header("content-encoding").is_none(), "{accept:?}");
         assert!(vary_has(&response, "accept-encoding"), "{accept:?}");
@@ -123,15 +123,26 @@ async fn small_bodies_and_unaccepting_clients_get_the_plain_body_but_still_vary(
 #[tokio::test]
 async fn quality_values_and_wildcards_are_understood() {
     let runtime = runtime(Compress::new());
-    for accept in ["*", "br, gzip;q=0.5", "GZIP", "gzip;q=1.0, *;q=0"] {
+    // With brotli built in, `*` also admits `br`, which wins a quality tie.
+    let star = if cfg!(feature = "compression-brotli") {
+        "br"
+    } else {
+        "gzip"
+    };
+    for (accept, expected) in [
+        ("*", star),
+        ("deflate, gzip;q=0.5", "gzip"),
+        ("GZIP", "gzip"),
+        ("gzip;q=1.0, *;q=0", "gzip"),
+    ] {
         let response = get(&runtime, "/big", Some(accept)).await;
         assert_eq!(
             response.header("content-encoding"),
-            Some("gzip"),
+            Some(expected),
             "{accept}"
         );
     }
-    for accept in ["*;q=0", "gzip;q=0, *"] {
+    for accept in ["*;q=0", "gzip;q=0, *;q=0"] {
         let response = get(&runtime, "/big", Some(accept)).await;
         assert!(response.header("content-encoding").is_none(), "{accept}");
     }
@@ -201,7 +212,13 @@ async fn multiple_accept_encoding_lines_are_read_as_one_list() {
             None,
         )
         .await;
-    assert!(response.header("content-encoding").is_none());
+    // `gzip;q=0` plus `*`: gzip is forbidden, anything else is allowed.
+    let expected = if cfg!(feature = "compression-brotli") {
+        Some("br")
+    } else {
+        None
+    };
+    assert_eq!(response.header("content-encoding"), expected);
 }
 
 #[tokio::test]
