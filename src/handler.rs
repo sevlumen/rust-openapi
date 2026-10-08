@@ -1,3 +1,4 @@
+use crate::*;
 use std::{
     future::Future,
     marker::PhantomPinned,
@@ -116,3 +117,175 @@ impl Future for HandlerFuture {
         }
     }
 }
+
+/// A handler implementation is monomorphized at registration time and stored
+/// as a single erased service only at the router boundary.
+pub trait Handler<S, Args>: Send + Sync + 'static {
+    type Response: ResponseMetadata;
+    const NEEDS_PARAMS: bool = false;
+    /// Whether any extractor reads path captures from the router.
+    const NEEDS_CAPTURE: bool = false;
+    const NEEDS_BODY: bool = false;
+
+    fn openapi_request() -> OpenApiRequest {
+        OpenApiRequest::default()
+    }
+
+    fn call(&self, request: &mut Request<Bytes>, params: &Params, state: &Arc<S>) -> HandlerFuture;
+
+    fn zero_handler(&self) -> Option<ErasedZeroHandler> {
+        None
+    }
+}
+
+/// An escape hatch for handlers that need Hyper's original streaming request
+/// body. Unlike typed extractors, a raw handler receives `Incoming` without
+/// the framework collecting it first.
+pub trait RawHandler<S>: Send + Sync + 'static {
+    type Response: ResponseMetadata;
+
+    fn call(&self, request: Request<Incoming>) -> HandlerFuture;
+}
+
+impl<S, F, Fut, R> RawHandler<S> for F
+where
+    S: Send + Sync + 'static,
+    F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoResponse + ResponseMetadata,
+{
+    type Response = R;
+
+    fn call(&self, request: Request<Incoming>) -> HandlerFuture {
+        let future = (self)(request);
+        HandlerFuture::from_response_future(future)
+    }
+}
+
+impl<S, F, Fut, R> Handler<S, ()> for F
+where
+    S: Send + Sync + 'static,
+    F: Fn() -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoResponse + ResponseMetadata,
+{
+    type Response = R;
+    const NEEDS_PARAMS: bool = false;
+    const NEEDS_BODY: bool = false;
+
+    fn openapi_request() -> OpenApiRequest {
+        OpenApiRequest::default()
+    }
+
+    fn call(
+        &self,
+        _request: &mut Request<Bytes>,
+        _params: &Params,
+        _state: &Arc<S>,
+    ) -> HandlerFuture {
+        let future = (self)();
+        HandlerFuture::from_response_future(future)
+    }
+
+    fn zero_handler(&self) -> Option<ErasedZeroHandler> {
+        let handler = self.clone();
+        Some(Box::new(move || {
+            let future = (handler)();
+            HandlerFuture::from_response_future(future)
+        }))
+    }
+}
+
+impl<S, F, Fut, R, E1> Handler<S, (E1,)> for F
+where
+    S: Send + Sync + 'static,
+    F: Fn(E1) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoResponse + ResponseMetadata,
+    E1: FromRequest<S>,
+{
+    type Response = R;
+    const NEEDS_PARAMS: bool = E1::NEEDS_PARAMS;
+    const NEEDS_CAPTURE: bool = E1::NEEDS_CAPTURE;
+    const NEEDS_BODY: bool = E1::NEEDS_BODY;
+
+    fn openapi_request() -> OpenApiRequest {
+        E1::openapi_request()
+    }
+
+    fn call(&self, request: &mut Request<Bytes>, params: &Params, state: &Arc<S>) -> HandlerFuture {
+        let value = match E1::from_request(request, params, state) {
+            Ok(value) => value,
+            Err(error) => return HandlerFuture::from_response_future(future::ready(error)),
+        };
+        HandlerFuture::from_response_future((self)(value))
+    }
+}
+
+macro_rules! impl_extractor_handler {
+    (
+        $first:ident : $first_arg:ident
+        $(, $rest:ident : $rest_arg:ident)+ $(,)?
+    ) => {
+        impl<S, F, Fut, R, $first $(, $rest)*> Handler<S, ($first $(, $rest)*,)> for F
+        where
+            S: Send + Sync + 'static,
+            F: Fn($first $(, $rest)*) -> Fut + Send + Sync + 'static,
+            Fut: Future<Output = R> + Send + 'static,
+            R: IntoResponse + ResponseMetadata,
+            $first: FromRequest<S>,
+            $($rest: FromRequest<S>,)*
+        {
+            type Response = R;
+            const NEEDS_PARAMS: bool =
+                <$first as FromRequest<S>>::NEEDS_PARAMS
+                $(|| <$rest as FromRequest<S>>::NEEDS_PARAMS)*;
+            const NEEDS_CAPTURE: bool =
+                <$first as FromRequest<S>>::NEEDS_CAPTURE
+                $(|| <$rest as FromRequest<S>>::NEEDS_CAPTURE)*;
+            const NEEDS_BODY: bool =
+                <$first as FromRequest<S>>::NEEDS_BODY
+                $(|| <$rest as FromRequest<S>>::NEEDS_BODY)*;
+
+            fn openapi_request() -> OpenApiRequest {
+                let mut metadata = <$first as FromRequest<S>>::openapi_request();
+                $(metadata.merge(<$rest as FromRequest<S>>::openapi_request());)*
+                metadata
+            }
+
+            fn call(
+                &self,
+                request: &mut Request<Bytes>,
+                params: &Params,
+                state: &Arc<S>,
+            ) -> HandlerFuture {
+                let $first_arg = match <$first as FromRequest<S>>::from_request(
+                    request, params, state,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => return HandlerFuture::from_response_future(future::ready(error)),
+                };
+                $(
+                    let $rest_arg = match <$rest as FromRequest<S>>::from_request(
+                        request, params, state,
+                    ) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            return HandlerFuture::from_response_future(future::ready(error));
+                        }
+                    };
+                )*
+                let future = (self)($first_arg $(, $rest_arg)*);
+                HandlerFuture::from_response_future(future)
+            }
+        }
+    };
+}
+
+impl_extractor_handler!(E1: first, E2: second);
+impl_extractor_handler!(E1: first, E2: second, E3: third);
+impl_extractor_handler!(E1: first, E2: second, E3: third, E4: fourth);
+impl_extractor_handler!(E1: first, E2: second, E3: third, E4: fourth, E5: fifth);
+impl_extractor_handler!(E1: first, E2: second, E3: third, E4: fourth, E5: fifth, E6: sixth);
+impl_extractor_handler!(E1: first, E2: second, E3: third, E4: fourth, E5: fifth, E6: sixth, E7: seventh);
+impl_extractor_handler!(E1: first, E2: second, E3: third, E4: fourth, E5: fifth, E6: sixth, E7: seventh, E8: eighth);

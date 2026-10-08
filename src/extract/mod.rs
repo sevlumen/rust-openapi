@@ -212,3 +212,27 @@ where
         }
     }
 }
+
+/// Typed state extractor.
+#[derive(Clone, Debug)]
+pub struct State<T>(pub Arc<T>);
+
+/// Typed path extractor. The first form is convenient for a one-capture route;
+/// named multi-capture extraction is available through [`Params`].
+#[derive(Clone, Debug)]
+pub struct Path<T>(pub T);
+
+/// Typed query extractor backed by serde.
+#[derive(Clone, Debug)]
+pub struct Query<T>(pub T);
+
+/// Typed header extractor. Implement [`HeaderSpec`] for application-specific
+/// header types to keep header names resolved once at startup.
+#[derive(Clone, Debug)]
+pub struct Header<T>(pub T);
+
+pub trait HeaderSpec: Sized + Send + 'static {
+    const NAME: &'static str;
+    const HEADER_NAME: header::HeaderName = header::HeaderName::from_static(Self::NAME);
+    fn parse(value: &str) -> Result<Self, ApiError>;
+}

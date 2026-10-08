@@ -809,3 +809,13 @@ impl<S: Send + Sync + 'static> App<S> {
         maybe_head_flag(is_head, response)
     }
 }
+
+#[derive(Clone, Default)]
+pub(crate) struct Operation {
+    pub(crate) tag: Option<String>,
+    pub(crate) summary: Option<String>,
+    pub(crate) operation_id: Option<String>,
+    pub(crate) response_status: StatusCode,
+    pub(crate) response_schema: Option<Value>,
+    pub(crate) request: OpenApiRequest,
+}
