@@ -20,10 +20,10 @@ Without Docker, the same steps (feature flags matter — many tests/benches/exam
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --features "uuid test-util swagger"
+cargo test --workspace --all-targets --features "uuid test-util swagger multipart"
 cargo test --doc --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
-cargo test --features "uuid test-util swagger" percent_decode   # single test by name filter
+cargo test --features "uuid test-util swagger multipart" percent_decode   # single test by name filter
 cargo test --test derive                                         # single integration test file
 cargo bench --bench router --features uuid,test-util,swagger     # microbenchmark (release profile)
 cargo +nightly miri test --lib inline_future --                  # CI gate for the unsafe inline-future code

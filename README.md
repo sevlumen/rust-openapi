@@ -250,7 +250,7 @@ benchmark on your own hardware for absolute values.
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --features 'uuid test-util swagger'
+cargo test --workspace --all-targets --features 'uuid test-util swagger multipart'
 cargo test --doc --workspace
 cargo build --workspace --examples --features 'uuid swagger'
 ```
