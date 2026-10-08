@@ -31,9 +31,19 @@ pub enum Message {
 
 /// The status code and reason of a close message.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CloseFrame {
     pub code: u16,
     pub reason: String,
+}
+
+impl CloseFrame {
+    pub fn new(code: u16, reason: impl Into<String>) -> Self {
+        Self {
+            code,
+            reason: reason.into(),
+        }
+    }
 }
 
 /// A failure while reading from or writing to a WebSocket.

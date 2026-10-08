@@ -55,7 +55,13 @@ All notable changes to this project are documented here. The format follows
   channel (as the TLS loop already did) instead of `GracefulShutdown::watch`,
   so upgraded connections can be served; shutdown behaviour is unchanged.
 
+- `AppRuntime::body_read_timeout` (default 60 s): buffered request bodies that
+  do not arrive in time get `408` and the connection is closed.
+
 ### Changed
+- **Behavior:** a buffered request body now has 60 seconds to arrive in full.
+  Call `body_read_timeout(None)` (or a larger value for slow large uploads) to
+  change it.
 - **Schema changes for existing derives** (they now match what serde writes):
   `#[serde(default)]` and `skip_serializing_if` fields are no longer
   `required` (and a query struct with a `default` field is parsed by serde, so a

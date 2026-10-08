@@ -95,8 +95,15 @@ let runtime = app
   nothing for that long is closed, so behind a proxy set it above the proxy's
   idle timeout toward this server (nginx `keepalive_timeout` 75 s, AWS ALB
   60 s) or the proxy may reuse a connection just closed and answer 502. It
-  applies to HTTP/1.1, plain or over TLS; it does not cover reading a request
-  body, and HTTP/2 connections have no such timeout yet.
+  applies to HTTP/1.1, plain or over TLS; reading a request body is bounded by
+  `body_read_timeout` below, and HTTP/2 connections have no header timeout yet.
+- `body_read_timeout` (default 60 s, `None` disables) bounds how long a
+  *buffered* request body (`Json`, `Form`, `Multipart`) may take to arrive in
+  full; a body still incomplete then gets `408` and the connection is closed,
+  so a header followed by a trickle (or nothing) cannot hold a handler task and
+  a `max_connections` slot. It is a deadline for the whole body: raise it for
+  routes that take large uploads over slow links. Raw handlers and streaming
+  uploads read their own body: use `tokio::time::timeout` around their reads.
 - `http2_max_concurrent_streams(Some(n))` (feature `http2`) lowers the 200
   streams one h2 connection may have open; excess streams are refused with
   `REFUSED_STREAM`. Each open stream can buffer up to its route's body limit,
