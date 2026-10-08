@@ -32,7 +32,37 @@ struct Limiter {
     max_keys: usize,
     key: Arc<KeyFn>,
     hasher: RandomState,
-    state: Mutex<State>,
+    /// The key table, split by key hash so concurrent requests for different
+    /// keys rarely contend on one lock. A small `max_keys` keeps a single
+    /// shard (its exact cap matters more than the contention then).
+    shards: Box<[Mutex<State>]>,
+    /// The most buckets one shard keeps.
+    shard_cap: usize,
+}
+
+/// Tables of at least this many keys are split into [`SHARDS`] shards.
+const SHARD_THRESHOLD: usize = 1024;
+const SHARDS: usize = 16;
+
+fn build_shards(max_keys: usize, burst: f64) -> (Box<[Mutex<State>]>, usize) {
+    let count = if max_keys >= SHARD_THRESHOLD {
+        SHARDS
+    } else {
+        1
+    };
+    let shards = (0..count)
+        .map(|_| {
+            Mutex::new(State {
+                buckets: HashMap::new(),
+                overflow: Bucket {
+                    tokens: burst,
+                    last: Instant::now(),
+                },
+                last_sweep: Instant::now(),
+            })
+        })
+        .collect();
+    (shards, max_keys.div_ceil(count))
 }
 
 /// A token-bucket rate limiter: `limit` requests per `per`, with a burst
@@ -45,6 +75,11 @@ struct Limiter {
 /// limit each client (an API key, a forwarded address) separately; requests
 /// without a key share one anonymous bucket. The state lives in this
 /// process: with several instances each one enforces its own limit.
+///
+/// The key table is split into 16 independently locked shards once
+/// `max_keys` is 1,024 or more (the default is 10,000), so requests for
+/// different keys rarely wait on each other; the cap then applies per shard
+/// (`max_keys / 16` each, with one overflow bucket per shard).
 ///
 /// To bound memory, at most [`max_keys`](Self::max_keys) buckets are kept
 /// (each is a fixed-size entry under a hash of the key, however long the key
@@ -74,6 +109,7 @@ impl RateLimit {
         assert!(limit >= 1, "the rate limit must be at least 1 request");
         assert!(!per.is_zero(), "the rate limit period must not be zero");
         let burst = f64::from(limit);
+        let (shards, shard_cap) = build_shards(DEFAULT_MAX_KEYS, burst);
         Self {
             limiter: Arc::new(Limiter {
                 rate: burst / per.as_secs_f64(),
@@ -81,40 +117,30 @@ impl RateLimit {
                 max_keys: DEFAULT_MAX_KEYS,
                 key: Arc::new(|_| None),
                 hasher: RandomState::new(),
-                state: Mutex::new(State {
-                    buckets: HashMap::new(),
-                    overflow: Bucket {
-                        tokens: burst,
-                        last: Instant::now(),
-                    },
-                    last_sweep: Instant::now(),
-                }),
+                shards,
+                shard_cap,
             }),
         }
     }
 
     fn edit(self, change: impl FnOnce(&mut Limiter)) -> Self {
         let old = &*self.limiter;
+        let (shards, shard_cap) = build_shards(old.max_keys, old.burst);
         let mut limiter = Limiter {
             rate: old.rate,
             burst: old.burst,
             max_keys: old.max_keys,
             key: Arc::clone(&old.key),
             hasher: RandomState::new(),
-            state: Mutex::new(State {
-                buckets: HashMap::new(),
-                overflow: Bucket {
-                    tokens: old.burst,
-                    last: Instant::now(),
-                },
-                last_sweep: Instant::now(),
-            }),
+            shards,
+            shard_cap,
         };
         change(&mut limiter);
-        let burst = limiter.burst;
-        if let Ok(state) = limiter.state.get_mut() {
-            state.overflow.tokens = burst;
-        }
+        // `max_keys` or `burst` may have changed: size the table for the final
+        // values.
+        let (shards, shard_cap) = build_shards(limiter.max_keys, limiter.burst);
+        limiter.shards = shards;
+        limiter.shard_cap = shard_cap;
         Self {
             limiter: Arc::new(limiter),
         }
@@ -186,12 +212,12 @@ impl Limiter {
     /// Takes a token, or returns how long until one is available.
     fn take(&self, key: &str, now: Instant) -> Result<(), Duration> {
         let id = self.hasher.hash_one(key);
-        let mut state = self
-            .state
+        let shard = &self.shards[(id % self.shards.len() as u64) as usize];
+        let mut state = shard
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let known = state.buckets.contains_key(&id);
-        if !known && state.buckets.len() >= self.max_keys {
+        if !known && state.buckets.len() >= self.shard_cap {
             // Sweeping is O(table), so a full table is swept at most once per
             // token interval (and at least a second apart): a flood of new keys
             // cannot make every request rescan it under the lock.
@@ -210,7 +236,7 @@ impl Limiter {
                 });
             }
         }
-        let overflow = !known && state.buckets.len() >= self.max_keys;
+        let overflow = !known && state.buckets.len() >= self.shard_cap;
         let mut bucket = if overflow {
             state.overflow
         } else {

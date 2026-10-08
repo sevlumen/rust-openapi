@@ -219,14 +219,13 @@ pub struct WebSocketUpgrade {
     idle_timeout: Option<Duration>,
 }
 
-/// A subprotocol name is an HTTP token: no spaces, commas or controls.
+/// A subprotocol name is an HTTP token: one or more `tchar`
+/// (RFC 9110 5.6.2: letters, digits and ``!#$%&'*+-.^_`|~``).
 fn validate_protocol(protocol: &str) {
+    let tchar = |byte: u8| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte);
     assert!(
-        !protocol.is_empty()
-            && protocol
-                .bytes()
-                .all(|byte| byte.is_ascii_graphic() && byte != b',' && byte != b';'),
-        "invalid WebSocket subprotocol name {protocol:?}"
+        !protocol.is_empty() && protocol.bytes().all(tchar),
+        "invalid WebSocket subprotocol name {protocol:?}: only HTTP token characters are allowed"
     );
 }
 
@@ -267,8 +266,8 @@ impl WebSocketUpgrade {
     ///
     /// # Panics
     ///
-    /// Panics if a name is not a valid token (empty, or containing spaces,
-    /// commas or control characters).
+    /// Panics if a name is not a valid HTTP token (empty, or containing
+    /// anything but letters, digits and ``!#$%&'*+-.^_`|~``).
     pub fn protocols<I, T>(mut self, protocols: I) -> Self
     where
         I: IntoIterator<Item = T>,
@@ -432,6 +431,21 @@ mod tests {
     #[should_panic(expected = "subprotocol")]
     fn a_subprotocol_name_with_a_space_is_rejected() {
         validate_protocol("bad protocol");
+    }
+
+    #[test]
+    fn only_http_token_characters_are_valid_in_a_subprotocol() {
+        for bad in [
+            "a/b", "a=b", "a(b)", "a\"b", "a b", "a,b", "a;b", "a:b", "a@b", "a[b]", "\u{fc}",
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| validate_protocol(bad)).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+        for good in ["chat", "v2.json-patch", "graphql-ws", "a!#$%&'*+^_`|~b"] {
+            validate_protocol(good);
+        }
     }
 
     #[test]

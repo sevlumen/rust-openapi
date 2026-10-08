@@ -190,6 +190,45 @@ impl<T: ApiSchema> ApiSchema for Option<T> {
     }
 }
 
+/// The query parameters a flattened struct contributes: the properties of its
+/// object schema (following `allOf` for nested flattens), each required when
+/// the schema says so and the flattened field is not optional.
+#[doc(hidden)]
+pub fn query_parameters_from_schema(schema: &Value, optional: bool) -> Vec<Value> {
+    let mut parameters = Vec::new();
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .map(|names| names.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if let Some(properties) = schema["properties"].as_object() {
+        for (name, property) in properties {
+            parameters.push(json!({
+                "in": "query",
+                "name": name,
+                "required": !optional && required.contains(&name.as_str()),
+                "schema": property,
+            }));
+        }
+    }
+    if let Some(parts) = schema["allOf"].as_array() {
+        for part in parts {
+            parameters.extend(query_parameters_from_schema(part, optional));
+        }
+    }
+    parameters
+}
+
+/// Drops later parameters whose name an earlier one already used.
+#[doc(hidden)]
+pub fn dedup_parameters(parameters: &mut Vec<Value>) {
+    let mut seen = std::collections::HashSet::new();
+    parameters.retain(|parameter| {
+        parameter["name"]
+            .as_str()
+            .is_none_or(|name| seen.insert(name.to_owned()))
+    });
+}
+
 /// Merges the schema of a `#[serde(flatten)]` field (or an internally tagged
 /// newtype payload) into the object `schema` being built. A plain map becomes
 /// the object's `additionalProperties`; anything else goes into `all_of`,

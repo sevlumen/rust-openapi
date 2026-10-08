@@ -331,11 +331,15 @@ async fn serve(
     }
     let length = metadata.len();
     let modified = metadata.modified().ok();
+    // Size and the modification time to the nanosecond the file system keeps,
+    // so a same-size rewrite within one second still changes the validator.
+    // (`Last-Modified` and `If-Modified-Since` stay at HTTP-date precision,
+    // which is why `If-None-Match` takes precedence.)
     let etag = modified.map(|modified| {
-        let seconds = modified
+        let nanos = modified
             .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs());
-        format!("W/\"{length:x}-{seconds:x}\"")
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        format!("W/\"{length:x}-{nanos:x}\"")
     });
     let mut builder = Response::builder()
         .header(header::CONTENT_TYPE, content_type(&path))

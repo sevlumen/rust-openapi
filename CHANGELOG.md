@@ -5,6 +5,50 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-08
+
+### Fixed
+- A `#[serde(flatten)]` struct in a query struct now contributes its fields as
+  OpenAPI query parameters (nested flattens included, repeated names listed
+  once, optional when the flattened field is `Option`); before, the API
+  accepted parameters the document did not publish. The serde fallback keeps
+  a second attempt that turns numeric-looking values into numbers, because
+  serde's `flatten` cannot parse numbers from text.
+- `#[serde(rename(serialize = "a", deserialize = "b"))]` and
+  `rename_all(serialize = .., deserialize = ..)` with different names are now a
+  compile error instead of silently documenting the wrong name (one schema
+  serves requests and responses); equal names are honored. Implement
+  `ApiSchema` by hand if the two directions really differ.
+- WebSocket subprotocol names are validated with the HTTP token rule (`tchar`):
+  `/`, `=`, `(`, `"`, `:`, `@` and the like are rejected at configuration time.
+- `Query<T>` on the serde fallback path (a query struct with a `default`,
+  `skip`, `flatten` or non-simple field) coerced every value that looked like
+  a number or bool into a JSON number/bool, so a `String` field receiving
+  `password=123456` or `user=true` was rejected with `400`. Each value is now
+  parsed into its own field's type (`+` stays a literal plus, bad
+  percent-encoding is still `400`).
+- Untagged enums are described with `anyOf` instead of `oneOf`: their payloads
+  can overlap (a `u32` also validates as a number), and `oneOf` demands exactly
+  one match. Tagged forms stay `oneOf` (disjoint by construction).
+- `ServeDir` ETags now include the modification time to the nanosecond, so a
+  same-size rewrite within one second no longer yields a stale `304`.
+  (`If-Modified-Since` is still HTTP-date precision; `If-None-Match` takes
+  precedence when both are sent.)
+
+### Changed
+- `RateLimit` splits its key table into 16 independently locked shards when
+  `max_keys` is 1,024 or more (the default is 10,000); the cap and overflow
+  bucket then apply per shard. In `benches/rate_limit.rs` (16 threads, 400
+  keys, in-process) this raised throughput from about 3.0 to 6.6 million
+  requests/s.
+- README: removed the stale `0.5`/`0.1.0` versioning sentence.
+
+### Added
+- Stress tests: 100 keep-alive HTTP/1.1 clients, 400 streams over 4 h2c
+  connections, 150 WebSocket sessions, 16 concurrent 3 MiB streaming uploads
+  and connection-limit churn.
+- `benches/rate_limit.rs`.
+
 ## [0.8.0] - 2026-10-08
 
 ### Added

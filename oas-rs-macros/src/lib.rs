@@ -233,6 +233,17 @@ fn derive_struct<'a>(
     let mut direct_query_parser = true;
     for (index, field) in fields.enumerate() {
         let serde = serde_attrs::parse(&field.attrs)?;
+        if serde.flatten && !serde.skipped() {
+            // A flattened struct contributes its fields as parameters too (the
+            // serde fallback parses them); names that repeat are listed once.
+            let (flattened, flattened_optional) = option_inner(&field.ty);
+            parameters.push(quote! {
+                __oas_parameters.extend(::oas_rs::__private::query_parameters_from_schema(
+                    &<#flattened as ::oas_rs::ApiSchema>::schema(),
+                    #flattened_optional,
+                ));
+            });
+        }
         if serde.skipped() || serde.flatten || serde.skip_deserializing {
             direct_query_parser = false;
             continue;
@@ -316,6 +327,7 @@ fn derive_struct<'a>(
             fn parameters() -> Vec<#json::Value> {
                 let mut __oas_parameters = Vec::new();
                 #(#parameters)*
+                ::oas_rs::__private::dedup_parameters(&mut __oas_parameters);
                 __oas_parameters
             }
 
@@ -524,6 +536,14 @@ fn derive_enum(
         };
         alternatives.push(alternative);
     }
+    // Untagged payloads can overlap (a `u32` also validates as a number), and
+    // `oneOf` demands exactly one match, so they are `anyOf`; the tagged forms
+    // are disjoint by construction.
+    let combinator = if matches!(tagging, Tagging::Untagged) {
+        "anyOf"
+    } else {
+        "oneOf"
+    };
     let description = description.map(|text| {
         quote! { __oas_schema.insert("description".to_owned(), #json::json!(#text)); }
     });
@@ -531,7 +551,7 @@ fn derive_enum(
         {
             let mut __oas_schema = #json::Map::new();
             #description
-            __oas_schema.insert("oneOf".to_owned(), #json::Value::Array(vec![#(#alternatives),*]));
+            __oas_schema.insert(#combinator.to_owned(), #json::Value::Array(vec![#(#alternatives),*]));
             #json::Value::Object(__oas_schema)
         }
     };
