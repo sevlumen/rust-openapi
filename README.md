@@ -747,6 +747,27 @@ extraction and schema support), `multipart` (`multipart/form-data` uploads),
 `tls` (HTTPS via `serve_tls`), `http2` (HTTP/2 over TLS), `test-util` (in-process `oneshot` testing).
 The minimum supported Rust version is 1.88.
 
+## Stability and support policy
+
+- **Versioning.** Semantic versioning. While the crate is `0.x`, a breaking
+  change to the public API or to documented HTTP/OpenAPI behaviour is a minor
+  bump and is listed under `### Changed` in the changelog; patch releases only
+  fix bugs. From `1.0` breaking changes need a major version. CI checks the
+  public API against the latest release with `cargo semver-checks`.
+- **What is public API.** Everything re-exported from the crate root, plus the
+  `Cargo` features documented here. `#[doc(hidden)]` items (for example
+  `__private`, used by the derive) are not. The shape of the generated
+  `openapi.json` is documented behaviour; its key order is not.
+- **MSRV.** Rust 1.88. Raising it is a minor release (never a patch) and is
+  noted in the changelog; the previous release keeps working.
+- **Security fixes.** The latest minor release gets them. Report problems
+  privately through the repository's security advisory page.
+- **Testing your app.** The `test-util` feature (`AppRuntime::oneshot`,
+  `TestResponse`) is supported API for in-process tests; it cannot call raw
+  routes, which need a real listener (`serve_listener` on port 0).
+- **Not provided:** HTTP/3, zstd, and an in-repository HTTP load laboratory
+  (see `docs/benchmark-design.md`: it lives in a separate project).
+
 ## Performance
 
 The core repository contains the release-profile router microbenchmark used as
@@ -790,8 +811,9 @@ version) before committing.
 ## Roadmap
 
 Not provided, and not planned for now: HTTP/3 (a QUIC stack) and zstd
-compression (a C dependency). Still open: the full HTTP acceptance benchmark
-matrix.
+compression (a C dependency). The paired HTTP acceptance benchmark against a raw
+Hyper server is designed (see `docs/benchmark-design.md`) to live in a separate
+`oas-rs-perf` project and has not been run for this release line.
 
 ## Contributing and license
 
