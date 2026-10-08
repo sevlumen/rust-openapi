@@ -148,6 +148,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 .into_boxed_slice(),
             static_routes: self.static_routes,
             dynamic_routes: self.dynamic_routes,
+            shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
         })
     }
 

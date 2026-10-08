@@ -7,7 +7,12 @@ pub struct AppRuntime<S = ()> {
     pub(crate) capture_names: Box<[Option<Arc<[String]>>]>,
     pub(crate) static_routes: HashMap<String, RouteSet>,
     pub(crate) dynamic_routes: DynamicRouteTrie,
+    pub(crate) shutdown_timeout: Duration,
 }
+
+/// How long [`AppRuntime::serve_listener`] waits for in-flight requests after
+/// the shutdown signal before giving up on the remaining connections.
+pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) struct RuntimeRef<'a, S> {
     state: &'a Arc<S>,
@@ -193,6 +198,14 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
 }
 
 impl<S: Send + Sync + 'static> AppRuntime<S> {
+    /// Sets how long a graceful shutdown waits for in-flight requests to
+    /// finish (default [`DEFAULT_SHUTDOWN_TIMEOUT`]). Connections still busy
+    /// after the timeout are abandoned.
+    pub fn shutdown_timeout(mut self, timeout: Duration) -> Self {
+        self.shutdown_timeout = timeout;
+        self
+    }
+
     fn runtime_ref(&self) -> RuntimeRef<'_, S> {
         RuntimeRef {
             state: &self.state,
@@ -321,6 +334,38 @@ impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum AcceptAction {
+    /// The failed connection is gone; accept the next one right away.
+    Retry,
+    /// The process is out of descriptors or memory; wait for it to recover.
+    Backoff,
+    /// The listener itself is broken; stop serving.
+    Fatal,
+}
+
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+
+fn classify_accept_error(error: &std::io::Error) -> AcceptAction {
+    use std::io::ErrorKind;
+    match error.kind() {
+        ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset | ErrorKind::Interrupted => {
+            return AcceptAction::Retry;
+        }
+        ErrorKind::OutOfMemory => return AcceptAction::Backoff,
+        _ => {}
+    }
+    match error.raw_os_error() {
+        // EMFILE, ENFILE, ENOMEM, ENOBUFS (Linux, macOS/BSD)
+        #[cfg(unix)]
+        Some(23 | 24 | 12 | 105 | 55) => AcceptAction::Backoff,
+        // WSAEMFILE, WSAENOBUFS
+        #[cfg(windows)]
+        Some(10024 | 10055) => AcceptAction::Backoff,
+        _ => AcceptAction::Fatal,
+    }
+}
+
 async fn serve_runtime<S, F>(
     runtime: AppRuntime<S>,
     listener: tokio::net::TcpListener,
@@ -330,29 +375,43 @@ where
     S: Send + Sync + 'static,
     F: Future<Output = ()> + Send + 'static,
 {
+    let shutdown_timeout = runtime.shutdown_timeout;
     let runtime = Arc::new(runtime);
+    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
             _ = &mut shutdown => break,
             accepted = listener.accept() => {
-                let (stream, _) = accepted?;
-                let connection = ConnectionRuntime::new(Arc::clone(&runtime));
-                tokio::spawn(async move {
-                    let io = hyper_util::rt::TokioIo::new(stream);
-                    let service = hyper::service::service_fn(move |request: Request<Incoming>| {
-                        let prepared = connection.prepare(request);
-                        async move {
-                            Ok::<_, Infallible>(prepared.await)
+                let stream = match accepted {
+                    Ok((stream, _)) => stream,
+                    Err(error) => match classify_accept_error(&error) {
+                        AcceptAction::Retry => continue,
+                        AcceptAction::Backoff => {
+                            tokio::time::sleep(ACCEPT_BACKOFF).await;
+                            continue;
                         }
-                    });
-                    let _ = hyper::server::conn::http1::Builder::new()
-                        .serve_connection(io, service)
-                        .await;
+                        AcceptAction::Fatal => return Err(error.into()),
+                    },
+                };
+                let connection = ConnectionRuntime::new(Arc::clone(&runtime));
+                let io = hyper_util::rt::TokioIo::new(stream);
+                let service = hyper::service::service_fn(move |request: Request<Incoming>| {
+                    let prepared = connection.prepare(request);
+                    async move {
+                        Ok::<_, Infallible>(prepared.await)
+                    }
+                });
+                let connection = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(io, service);
+                let connection = graceful.watch(connection);
+                tokio::spawn(async move {
+                    let _ = connection.await;
                 });
             }
         }
     }
+    let _ = tokio::time::timeout(shutdown_timeout, graceful.shutdown()).await;
     Ok(())
 }
 
@@ -387,5 +446,47 @@ impl TestResponse {
                 .to_vec(),
         )
         .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod accept_tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn connection_level_errors_retry_immediately() {
+        for kind in [
+            ErrorKind::ConnectionAborted,
+            ErrorKind::ConnectionReset,
+            ErrorKind::Interrupted,
+        ] {
+            assert_eq!(
+                classify_accept_error(&Error::from(kind)),
+                AcceptAction::Retry,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resource_exhaustion_backs_off_instead_of_exiting() {
+        // EMFILE, ENFILE, ENOBUFS (Linux), ENOMEM
+        for code in [24, 23, 105, 12] {
+            assert_eq!(
+                classify_accept_error(&Error::from_raw_os_error(code)),
+                AcceptAction::Backoff,
+                "os error {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn unrecoverable_errors_still_stop_the_server() {
+        assert_eq!(
+            classify_accept_error(&Error::from(ErrorKind::InvalidInput)),
+            AcceptAction::Fatal
+        );
     }
 }

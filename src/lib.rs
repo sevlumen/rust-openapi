@@ -19,6 +19,7 @@ use std::{
     str::FromStr,
     sync::Arc,
     task::{Context, Poll},
+    time::Duration,
 };
 
 mod app;
@@ -59,11 +60,11 @@ use router::{
 };
 #[cfg(test)]
 use router::{DynamicRouteNode, NodeId};
-pub use runtime::AppRuntime;
 #[cfg(test)]
 use runtime::ConnectionRuntime;
 #[cfg(any(test, feature = "test-util"))]
 pub use runtime::TestResponse;
+pub use runtime::{AppRuntime, DEFAULT_SHUTDOWN_TIMEOUT};
 pub use schema::*;
 
 pub use http::Method;
