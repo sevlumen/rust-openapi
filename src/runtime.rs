@@ -400,6 +400,34 @@ fn classify_accept_error(error: &std::io::Error) -> AcceptAction {
     }
 }
 
+/// Waits for the next connection. `Ok(None)` means `shutdown` completed.
+/// Transient accept errors are absorbed (see [`classify_accept_error`]); only
+/// a broken listener is returned as an error.
+pub(crate) async fn accept_next<F>(
+    listener: &tokio::net::TcpListener,
+    shutdown: &mut Pin<&mut F>,
+) -> Result<Option<tokio::net::TcpStream>, std::io::Error>
+where
+    F: Future<Output = ()>,
+{
+    loop {
+        tokio::select! {
+            _ = shutdown.as_mut() => return Ok(None),
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) => return Ok(Some(stream)),
+                Err(error) => match classify_accept_error(&error) {
+                    AcceptAction::Retry => continue,
+                    AcceptAction::Backoff => {
+                        tokio::time::sleep(ACCEPT_BACKOFF).await;
+                        continue;
+                    }
+                    AcceptAction::Fatal => return Err(error),
+                },
+            },
+        }
+    }
+}
+
 async fn serve_runtime<S, F>(
     runtime: AppRuntime<S>,
     listener: tokio::net::TcpListener,
@@ -413,37 +441,18 @@ where
     let runtime = runtime.inner;
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
     tokio::pin!(shutdown);
-    loop {
-        tokio::select! {
-            _ = &mut shutdown => break,
-            accepted = listener.accept() => {
-                let stream = match accepted {
-                    Ok((stream, _)) => stream,
-                    Err(error) => match classify_accept_error(&error) {
-                        AcceptAction::Retry => continue,
-                        AcceptAction::Backoff => {
-                            tokio::time::sleep(ACCEPT_BACKOFF).await;
-                            continue;
-                        }
-                        AcceptAction::Fatal => return Err(error.into()),
-                    },
-                };
-                let connection = ConnectionRuntime::new(Arc::clone(&runtime));
-                let io = hyper_util::rt::TokioIo::new(stream);
-                let service = hyper::service::service_fn(move |request: Request<Incoming>| {
-                    let prepared = connection.prepare(request);
-                    async move {
-                        Ok::<_, Infallible>(prepared.await)
-                    }
-                });
-                let connection = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(io, service);
-                let connection = graceful.watch(connection);
-                tokio::spawn(async move {
-                    let _ = connection.await;
-                });
-            }
-        }
+    while let Some(stream) = accept_next(&listener, &mut shutdown).await? {
+        let connection = ConnectionRuntime::new(Arc::clone(&runtime));
+        let io = hyper_util::rt::TokioIo::new(stream);
+        let service = hyper::service::service_fn(move |request: Request<Incoming>| {
+            let prepared = connection.prepare(request);
+            async move { Ok::<_, Infallible>(prepared.await) }
+        });
+        let connection = hyper::server::conn::http1::Builder::new().serve_connection(io, service);
+        let connection = graceful.watch(connection);
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
     }
     let _ = tokio::time::timeout(shutdown_timeout, graceful.shutdown()).await;
     Ok(())
