@@ -18,6 +18,13 @@ async fn plaintext() -> &'static str {
     "OK"
 }
 
+async fn noop_layer(
+    request: Request<oas_rs::RequestBody>,
+    next: oas_rs::Next,
+) -> oas_rs::HttpResponse {
+    next.run(request).await
+}
+
 async fn raw_plaintext() -> Response<Full<Bytes>> {
     raw_plaintext_with_request("/plaintext", &[]).await
 }
@@ -864,5 +871,26 @@ async fn main() {
                 start.elapsed().as_nanos() as f64 / dynamic_iterations as f64,
             );
         }
+    }
+
+    // Middleware overhead: N no-op layers around a plaintext route.
+    for layers in [0usize, 1, 3, 5] {
+        let mut app = App::new();
+        app.get("/plaintext", plaintext);
+        for _ in 0..layers {
+            app.layer(noop_layer);
+        }
+        let runtime = app.build().unwrap();
+        let iterations = 100_000;
+        // Warm up so the first measured iteration is not a cold start.
+        measure_app(&runtime, Method::GET, "/plaintext", &[], 1_000).await;
+        let (elapsed, allocations, bytes) =
+            measure_app(&runtime, Method::GET, "/plaintext", &[], iterations).await;
+        println!(
+            "case=middleware layers={layers} iterations={iterations} ns_per_op={:.2} allocations_per_op={:.4} bytes_per_op={:.2}",
+            elapsed as f64 / iterations as f64,
+            allocations as f64 / iterations as f64,
+            bytes as f64 / iterations as f64,
+        );
     }
 }

@@ -23,9 +23,11 @@ use std::{
 };
 
 mod app;
+mod bearer;
 mod codec;
 mod extract;
 mod handler;
+mod middleware;
 mod openapi;
 mod params;
 mod path;
@@ -33,8 +35,10 @@ mod response;
 mod router;
 mod runtime;
 mod schema;
+mod trace;
 pub use app::App;
 use app::Operation;
+pub use bearer::BearerAuth;
 pub use codec::*;
 pub use extract::FromRequest;
 pub use extract::{Header, HeaderSpec, Path, Query, State};
@@ -42,6 +46,8 @@ use handler::{BoxFuture, HandlerFuture};
 pub use handler::{Handler, RawHandler};
 #[cfg(test)]
 use handler::{HandlerFutureKind, INLINE_FUTURE_SIZE, InlineFuture};
+use middleware::Host;
+pub use middleware::{Middleware, Next, RequestBody};
 use openapi::OpenApiConfig;
 #[cfg(any(test, feature = "swagger"))]
 use openapi::SwaggerConfig;
@@ -61,12 +67,13 @@ use router::{
 };
 #[cfg(test)]
 use router::{DynamicRouteNode, NodeId};
-#[cfg(test)]
 use runtime::ConnectionRuntime;
+use runtime::RuntimeInner;
 #[cfg(any(test, feature = "test-util"))]
 pub use runtime::TestResponse;
 pub use runtime::{AppRuntime, DEFAULT_SHUTDOWN_TIMEOUT};
 pub use schema::*;
+pub use trace::{Trace, TraceRecord};
 
 pub use http::Method;
 pub use oas_rs_macros::ApiSchema;
@@ -231,7 +238,7 @@ mod tests {
 
         let runtime = app.build().expect("test app builds");
 
-        assert_eq!(runtime.plans.len(), 1);
+        assert_eq!(runtime.inner.plans.len(), 1);
     }
 
     #[test]
@@ -245,7 +252,7 @@ mod tests {
     fn connection_runtime_reuses_one_runtime_owner_for_request_borrows() {
         let mut app = App::new();
         app.get("/zero", || async { "OK" });
-        let runtime = Arc::new(app.build().expect("test app builds"));
+        let runtime = app.build().expect("test app builds").inner;
         let connection = ConnectionRuntime::new(Arc::clone(&runtime));
 
         assert_eq!(Arc::strong_count(&runtime), 2);

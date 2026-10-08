@@ -2,7 +2,7 @@
 
 Typed HTTP routing on Hyper + Tokio with startup-generated OpenAPI 3.1
 metadata. The V1 release line is Cargo `0.1.0`; the public API and HTTP
-semantics are frozen for the `0.1` line. Licensed under the MIT License.
+semantics follow semver within the `0.2` line. Licensed under the MIT License.
 
 ## Quick start
 
@@ -159,11 +159,62 @@ an alternative (logical OR). Referencing a scheme that was never declared makes
 `security_scheme(name, SecurityScheme::...)` (`bearer_with_format("JWT")`,
 `basic()`, `api_key(...)`).
 
+## Middleware
+
+Register global layers with `App::layer`. A layer is an `async fn` (or any type
+implementing `Middleware`) that receives the request and a `Next` handle:
+
+```rust
+use oas_rs::{BearerAuth, Next, RequestBody, Trace};
+use http::Request;
+
+async fn timing(request: Request<RequestBody>, next: Next) -> oas_rs::HttpResponse {
+    let started = std::time::Instant::now();
+    let response = next.run(request).await;
+    eprintln!("{} in {:?}", response.status(), started.elapsed());
+    response
+}
+
+app.layer(Trace::stderr()); // outermost: first registered runs first
+app.layer(
+    BearerAuth::new(|token: String| async move {
+        // Validate against your own store, comparing secrets in constant time
+        // (or compare hashes). Return an ApiError to reject.
+        if token == "secret" {
+            Ok(())
+        } else {
+            Err(oas_rs::ApiError::new(http::StatusCode::UNAUTHORIZED, "Unauthorized", "bad token"))
+        }
+    })
+    .exempt_paths(["/health", "/openapi.json"]),
+);
+app.layer(timing);
+```
+
+Layers run before routing, so they also see `404`, `405`, automatic `OPTIONS`
+and `HEAD` requests. A layer may answer without calling `next` (for example
+`401`). It can read or change the request head and read the body (which
+consumes it for the handler and extractors downstream), but cannot substitute a
+different body. There is no per-route layer yet, and panics are
+not caught. `BearerAuth` *enforces* a bearer token; `OpenApiOptions::bearer_auth`
+only *documents* the scheme, so use both for a protected, documented API.
+
+With no layers registered, the request path is unchanged. The first layer adds a
+fixed cost of about 120 ns and two allocations (the boxed end of the chain);
+each further layer adds about 40 ns and one allocation (see
+`docs/middleware-design.md` for measurements).
+
+`BearerAuth` answers `401` to any non-exempt request without a token, including
+CORS preflight `OPTIONS` requests, which browsers send without credentials.
+Register a layer that answers preflights before `BearerAuth`, or list the
+paths in `exempt_paths`. `Trace::new(|record| ...)` receives the method, path,
+status and elapsed time of every request.
+
 ## Installation
 
 ```toml
 [dependencies]
-oas-rs = "0.1"
+oas-rs = "0.2"
 ```
 
 Enable optional features as needed: `swagger` (Swagger UI), `uuid` (UUID

@@ -2,12 +2,31 @@ use super::*;
 
 /// An immutable application runtime produced by [`App::build`].
 pub struct AppRuntime<S = ()> {
+    pub(crate) inner: Arc<RuntimeInner<S>>,
+    pub(crate) shutdown_timeout: Duration,
+}
+
+/// The immutable routing state, shared (by `Arc`) with every connection and
+/// with any middleware chain in flight.
+pub(crate) struct RuntimeInner<S> {
     pub(crate) state: Arc<S>,
     pub(crate) plans: Box<[RoutePlan<S>]>,
     pub(crate) capture_names: Box<[Option<Arc<[String]>>]>,
     pub(crate) static_routes: HashMap<String, RouteSet>,
     pub(crate) dynamic_routes: DynamicRouteTrie,
-    pub(crate) shutdown_timeout: Duration,
+    pub(crate) middleware: Box<[Arc<dyn Middleware>]>,
+}
+
+impl<S: Send + Sync + 'static> RuntimeInner<S> {
+    pub(crate) fn runtime_ref(&self) -> RuntimeRef<'_, S> {
+        RuntimeRef {
+            state: &self.state,
+            plans: &self.plans,
+            capture_names: &self.capture_names,
+            static_routes: &self.static_routes,
+            dynamic_routes: &self.dynamic_routes,
+        }
+    }
 }
 
 /// How long [`AppRuntime::serve_listener`] waits for in-flight requests after
@@ -23,10 +42,10 @@ pub(crate) struct RuntimeRef<'a, S> {
 }
 
 pub(crate) struct ConnectionRuntime<S> {
-    runtime: Arc<AppRuntime<S>>,
+    runtime: Arc<RuntimeInner<S>>,
 }
 
-enum PreparedDispatch {
+pub(crate) enum PreparedDispatch {
     Ready(Option<HttpResponse>),
     Handler {
         is_head: bool,
@@ -57,7 +76,7 @@ impl Future for PreparedDispatch {
 }
 
 impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
-    pub(crate) fn new(runtime: Arc<AppRuntime<S>>) -> Self {
+    pub(crate) fn new(runtime: Arc<RuntimeInner<S>>) -> Self {
         Self { runtime }
     }
 
@@ -66,6 +85,17 @@ impl<S: Send + Sync + 'static> ConnectionRuntime<S> {
     }
 
     fn prepare(&self, request: Request<Incoming>) -> PreparedDispatch {
+        if self.runtime.middleware.is_empty() {
+            return self.prepare_direct(request);
+        }
+        let (parts, body) = request.into_parts();
+        let request = Request::from_parts(parts, RequestBody::incoming(body));
+        let host: Arc<dyn Host> = self.runtime.clone();
+        PreparedDispatch::Buffered(Next::new(host).run(request))
+    }
+
+    /// Dispatch without the middleware chain; also the end of the chain.
+    pub(crate) fn prepare_direct(&self, request: Request<Incoming>) -> PreparedDispatch {
         let method = request.method();
         let is_head = *method == Method::HEAD;
         let path_end = normalize_request_path(request.uri().path()).len();
@@ -206,14 +236,9 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         self
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     fn runtime_ref(&self) -> RuntimeRef<'_, S> {
-        RuntimeRef {
-            state: &self.state,
-            plans: &self.plans,
-            capture_names: &self.capture_names,
-            static_routes: &self.static_routes,
-            dynamic_routes: &self.dynamic_routes,
-        }
+        self.inner.runtime_ref()
     }
 
     #[cfg(any(test, feature = "test-util"))]
@@ -233,8 +258,16 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         let request = builder
             .body(body.unwrap_or_default())
             .expect("valid test request");
+        let response = if self.inner.middleware.is_empty() {
+            self.runtime_ref().handle(request).await
+        } else {
+            let (parts, body) = request.into_parts();
+            let request = Request::from_parts(parts, RequestBody::full(body));
+            let host: Arc<dyn Host> = self.inner.clone();
+            Next::new(host).run(request).await
+        };
         TestResponse {
-            response: Some(self.runtime_ref().handle(request).await),
+            response: Some(response),
         }
     }
 
@@ -259,8 +292,9 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
 }
 
 impl<'a, S: Send + Sync + 'static> RuntimeRef<'a, S> {
-    #[cfg(any(test, feature = "test-util"))]
-    async fn handle(&self, request: Request<Bytes>) -> HttpResponse {
+    /// In-memory dispatch: used by `oneshot` and as the end of a middleware
+    /// chain for buffered requests.
+    pub(crate) async fn handle(&self, request: Request<Bytes>) -> HttpResponse {
         let is_head = request.method() == Method::HEAD;
         let path = normalize_request_path(request.uri().path());
         if let Some(routes) = self.static_routes.get(path) {
@@ -376,7 +410,7 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     let shutdown_timeout = runtime.shutdown_timeout;
-    let runtime = Arc::new(runtime);
+    let runtime = runtime.inner;
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
     tokio::pin!(shutdown);
     loop {

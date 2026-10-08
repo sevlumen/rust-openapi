@@ -12,6 +12,7 @@ pub struct App<S = ()> {
     pub(crate) openapi_config: Option<OpenApiConfig>,
     pub(crate) openapi_bytes: Option<Bytes>,
     pub(crate) route_error: Option<BuildError>,
+    pub(crate) middleware: Vec<Arc<dyn Middleware>>,
     #[cfg(any(test, feature = "swagger"))]
     pub(crate) swagger_config: Option<SwaggerConfig>,
     #[cfg(any(test, feature = "swagger"))]
@@ -31,6 +32,7 @@ impl App<()> {
             openapi_config: None,
             openapi_bytes: None,
             route_error: None,
+            middleware: Vec::new(),
             #[cfg(any(test, feature = "swagger"))]
             swagger_config: None,
             #[cfg(any(test, feature = "swagger"))]
@@ -54,6 +56,7 @@ impl App<()> {
             openapi_config: self.openapi_config,
             openapi_bytes: self.openapi_bytes,
             route_error: self.route_error,
+            middleware: self.middleware,
             #[cfg(any(test, feature = "swagger"))]
             swagger_config: self.swagger_config,
             #[cfg(any(test, feature = "swagger"))]
@@ -166,16 +169,19 @@ impl<S: Send + Sync + 'static> App<S> {
         self.prepare_swagger();
         self.install_generated_routes()?;
         Ok(AppRuntime {
-            state: self.state,
-            plans: self.plans.into_boxed_slice(),
-            capture_names: self
-                .metadata
-                .iter()
-                .map(|metadata| metadata.capture_names.clone())
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-            static_routes: self.static_routes,
-            dynamic_routes: self.dynamic_routes,
+            inner: Arc::new(RuntimeInner {
+                state: self.state,
+                plans: self.plans.into_boxed_slice(),
+                capture_names: self
+                    .metadata
+                    .iter()
+                    .map(|metadata| metadata.capture_names.clone())
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                static_routes: self.static_routes,
+                dynamic_routes: self.dynamic_routes,
+                middleware: self.middleware.into_boxed_slice(),
+            }),
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
         })
     }
@@ -273,6 +279,13 @@ impl<S: Send + Sync + 'static> App<S> {
         H: RawHandler<S>,
     {
         self.raw(Method::GET, path, handler)
+    }
+
+    /// Registers a global layer. Layers run before routing; the first one
+    /// registered is the outermost. See [`Middleware`].
+    pub fn layer(&mut self, middleware: impl Middleware) -> &mut Self {
+        self.middleware.push(Arc::new(middleware));
+        self
     }
 
     pub fn tag(&mut self, tag: impl Into<String>) -> &mut Self {
