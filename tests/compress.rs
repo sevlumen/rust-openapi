@@ -189,3 +189,47 @@ async fn min_size_and_level_are_configurable() {
 fn a_level_above_nine_is_rejected() {
     let _ = Compress::new().level(10);
 }
+
+#[tokio::test]
+async fn multiple_accept_encoding_lines_are_read_as_one_list() {
+    let runtime = runtime(Compress::new());
+    let response = runtime
+        .oneshot(
+            Method::GET,
+            "/big",
+            &[("accept-encoding", "gzip;q=0"), ("accept-encoding", "*")],
+            None,
+        )
+        .await;
+    assert!(response.header("content-encoding").is_none());
+}
+
+#[tokio::test]
+async fn head_responses_still_vary_on_accept_encoding() {
+    let runtime = runtime(Compress::new());
+    let head = runtime
+        .oneshot(Method::HEAD, "/big", &[("accept-encoding", "gzip")], None)
+        .await;
+    assert!(vary_has(&head, "accept-encoding"));
+}
+
+#[tokio::test]
+async fn no_transform_is_respected() {
+    let mut app = App::new();
+    app.get("/big", big);
+    app.layer(Compress::new());
+    app.layer(|request: Request<RequestBody>, next: Next| async move {
+        let mut response = next.run(request).await;
+        response.headers_mut().insert(
+            "cache-control",
+            HeaderValue::from_static("public, no-transform"),
+        );
+        response
+    });
+    let response = app
+        .build()
+        .unwrap()
+        .oneshot(Method::GET, "/big", &[("accept-encoding", "gzip")], None)
+        .await;
+    assert!(response.header("content-encoding").is_none());
+}

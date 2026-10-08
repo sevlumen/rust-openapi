@@ -112,3 +112,39 @@ async fn idle_keys_are_forgotten_so_the_table_does_not_fill_for_good() {
 fn a_zero_limit_is_rejected() {
     let _ = RateLimit::new(0, Duration::from_secs(1));
 }
+
+#[tokio::test(start_paused = true)]
+async fn an_enormous_period_does_not_panic() {
+    let runtime = runtime(RateLimit::new(1, Duration::MAX));
+    assert_eq!(status(&runtime, None).await, 200);
+    assert_eq!(status(&runtime, None).await, 429);
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_after_survives_error_format() {
+    let mut app = App::new();
+    app.get("/", hello);
+    app.layer(oas_rs::ErrorFormat::new(|info: &oas_rs::ErrorInfo| {
+        info.respond(serde_json::json!({ "error": info.detail }))
+    }));
+    app.layer(RateLimit::new(1, Duration::from_secs(30)));
+    let runtime = app.build().unwrap();
+    assert_eq!(status(&runtime, None).await, 200);
+    let limited = runtime.oneshot(Method::GET, "/", &[], None).await;
+    assert_eq!(limited.status(), 429);
+    assert_eq!(limited.header("retry-after"), Some("30"));
+    let body: Value = serde_json::from_str(&limited.body_string().await).unwrap();
+    assert!(body["error"].is_string());
+}
+
+#[tokio::test(start_paused = true)]
+async fn very_long_keys_are_limited_without_being_stored() {
+    let runtime = runtime(
+        RateLimit::new(1, Duration::from_secs(60))
+            .key_by_header("x-api-key")
+            .max_keys(4),
+    );
+    let long = "k".repeat(4096);
+    assert_eq!(status(&runtime, Some(&long)).await, 200);
+    assert_eq!(status(&runtime, Some(&long)).await, 429);
+}

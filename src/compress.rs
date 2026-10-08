@@ -6,7 +6,7 @@ use crate::*;
 
 /// Bodies above this size are compressed on the blocking thread pool so a
 /// large response does not stall the async worker.
-const BLOCKING_THRESHOLD: usize = 64 * 1024;
+const BLOCKING_THRESHOLD: usize = 16 * 1024;
 
 /// Gzip response compression.
 ///
@@ -131,37 +131,49 @@ fn gzip(bytes: &[u8], level: u32) -> Vec<u8> {
 
 impl Middleware for Compress {
     fn handle(&self, request: Request<RequestBody>, next: Next) -> BoxFuture<HttpResponse> {
-        let accepts = request
+        // Several header lines mean one comma-separated list.
+        let accept_encoding = request
             .headers()
             .get_all(header::ACCEPT_ENCODING)
             .iter()
             .filter_map(|value| value.to_str().ok())
-            .any(accepts_gzip);
+            .collect::<Vec<_>>()
+            .join(",");
+        let accepts = accepts_gzip(&accept_encoding);
         let is_head = request.method() == Method::HEAD;
         let (min_size, level) = (self.min_size, self.level);
         Box::pin(async move {
             let mut response = next.run(request).await;
             let status = response.status();
-            if is_head
+            let encoded = response.headers().contains_key(header::CONTENT_ENCODING);
+            let is_compressible = !encoded
+                && response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(compressible);
+            if !is_compressible {
+                return response;
+            }
+            // The representation depends on `Accept-Encoding` even when this
+            // response is not compressed (HEAD, 304, a client without gzip).
+            add_vary(response.headers_mut());
+            let no_transform = response
+                .headers()
+                .get_all(header::CACHE_CONTROL)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .flat_map(|value| value.split(','))
+                .any(|directive| directive.trim().eq_ignore_ascii_case("no-transform"));
+            if !accepts
+                || no_transform
+                || is_head
                 || status.is_informational()
                 || status == StatusCode::NO_CONTENT
                 || status == StatusCode::NOT_MODIFIED
                 || status == StatusCode::PARTIAL_CONTENT
-                || response.headers().contains_key(header::CONTENT_ENCODING)
                 || response.headers().contains_key(header::CONTENT_RANGE)
             {
-                return response;
-            }
-            let is_compressible = response
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(compressible);
-            if !is_compressible {
-                return response;
-            }
-            add_vary(response.headers_mut());
-            if !accepts {
                 return response;
             }
             let ResponseBody::Full(slot) = response.body_mut() else {

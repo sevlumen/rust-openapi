@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-08
+
 ### Added
 - `Cors` middleware: preflight handling, `Access-Control-*` headers,
   credentials, exposed headers, `Vary`.
@@ -15,7 +17,8 @@ All notable changes to this project are documented here. The format follows
   weak `ETag`, blocking-pool compression for large bodies.
 - `TestResponse::body_bytes` (test-util).
 - `RateLimit` middleware: token bucket per key (header or custom), `429` with
-  `Retry-After`, bounded memory.
+  `Retry-After`, bounded memory (keys are hashed; a full table is swept at most
+  once per token interval).
 - `ErrorFormat` middleware and `ErrorInfo`: rewrite framework-generated error
   responses to keep an existing error contract.
 

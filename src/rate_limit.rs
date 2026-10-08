@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::{BuildHasher, RandomState};
 use std::sync::Mutex;
 
 use tokio::time::Instant;
@@ -16,8 +17,12 @@ struct Bucket {
 }
 
 struct State {
-    buckets: HashMap<String, Bucket>,
+    /// Keyed by a randomly seeded 64-bit hash of the key, so memory per
+    /// bucket is fixed however long the key is.
+    buckets: HashMap<u64, Bucket>,
     overflow: Bucket,
+    /// When idle buckets were last swept out of a full table.
+    last_sweep: Instant,
 }
 
 struct Limiter {
@@ -26,6 +31,7 @@ struct Limiter {
     burst: f64,
     max_keys: usize,
     key: Arc<KeyFn>,
+    hasher: RandomState,
     state: Mutex<State>,
 }
 
@@ -40,11 +46,17 @@ struct Limiter {
 /// without a key share one anonymous bucket. The state lives in this
 /// process: with several instances each one enforces its own limit.
 ///
-/// To bound memory, at most [`max_keys`](Self::max_keys) buckets are kept;
-/// idle ones are dropped first, and once the table is full of busy keys new
-/// keys share a single overflow bucket, so varying the key cannot bypass the
-/// limit. Register it early so rejected requests cost as little as possible,
-/// and after `Cors` so browsers can read the `429`.
+/// To bound memory, at most [`max_keys`](Self::max_keys) buckets are kept
+/// (each is a fixed-size entry under a hash of the key, however long the key
+/// is); idle ones are dropped first, and once the table is full of busy keys
+/// new keys share a single overflow bucket, so varying the key cannot bypass
+/// the limit. The flip side: a client that can pick its own key freely can
+/// keep the table full and push every *new* legitimate key into that shared
+/// bucket, so key on something the client cannot choose (a proxy-set header,
+/// or an identity checked by a layer registered before this one). Register it
+/// early so rejected requests cost as little as possible, and after `Cors` so
+/// browsers can read the `429` and preflights are not counted. `Retry-After`
+/// is the wait rounded up to whole seconds.
 ///
 /// There is no built-in key for the peer address (the middleware does not see
 /// the socket); behind a proxy key on the header it sets, and only trust
@@ -68,12 +80,14 @@ impl RateLimit {
                 burst,
                 max_keys: DEFAULT_MAX_KEYS,
                 key: Arc::new(|_| None),
+                hasher: RandomState::new(),
                 state: Mutex::new(State {
                     buckets: HashMap::new(),
                     overflow: Bucket {
                         tokens: burst,
                         last: Instant::now(),
                     },
+                    last_sweep: Instant::now(),
                 }),
             }),
         }
@@ -86,12 +100,14 @@ impl RateLimit {
             burst: old.burst,
             max_keys: old.max_keys,
             key: Arc::clone(&old.key),
+            hasher: RandomState::new(),
             state: Mutex::new(State {
                 buckets: HashMap::new(),
                 overflow: Bucket {
                     tokens: old.burst,
                     last: Instant::now(),
                 },
+                last_sweep: Instant::now(),
             }),
         };
         change(&mut limiter);
@@ -149,28 +165,42 @@ impl Limiter {
     fn refill(&self, bucket: &mut Bucket, now: Instant) {
         let elapsed = now.saturating_duration_since(bucket.last).as_secs_f64();
         bucket.tokens = (bucket.tokens + elapsed * self.rate).min(self.burst);
-        bucket.last = now;
+        // `now` was read before taking the lock; never move the clock back.
+        bucket.last = bucket.last.max(now);
     }
 
     /// Takes a token, or returns how long until one is available.
     fn take(&self, key: &str, now: Instant) -> Result<(), Duration> {
+        let id = self.hasher.hash_one(key);
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !state.buckets.contains_key(key) && state.buckets.len() >= self.max_keys {
-            // A bucket that would be full again carries no information.
-            let (rate, burst) = (self.rate, self.burst);
-            state.buckets.retain(|_, bucket| {
-                let elapsed = now.saturating_duration_since(bucket.last).as_secs_f64();
-                bucket.tokens + elapsed * rate < burst
-            });
+        let known = state.buckets.contains_key(&id);
+        if !known && state.buckets.len() >= self.max_keys {
+            // Sweeping is O(table), so a full table is swept at most once per
+            // token interval (and at least a second apart): a flood of new keys
+            // cannot make every request rescan it under the lock.
+            let interval = (1.0 / self.rate).max(1.0);
+            if now
+                .saturating_duration_since(state.last_sweep)
+                .as_secs_f64()
+                >= interval
+            {
+                state.last_sweep = now;
+                // A bucket that would be full again carries no information.
+                let (rate, burst) = (self.rate, self.burst);
+                state.buckets.retain(|_, bucket| {
+                    let elapsed = now.saturating_duration_since(bucket.last).as_secs_f64();
+                    bucket.tokens + elapsed * rate < burst
+                });
+            }
         }
-        let overflow = !state.buckets.contains_key(key) && state.buckets.len() >= self.max_keys;
+        let overflow = !known && state.buckets.len() >= self.max_keys;
         let mut bucket = if overflow {
             state.overflow
         } else {
-            state.buckets.get(key).copied().unwrap_or(Bucket {
+            state.buckets.get(&id).copied().unwrap_or(Bucket {
                 tokens: self.burst,
                 last: now,
             })
@@ -180,12 +210,15 @@ impl Limiter {
             bucket.tokens -= 1.0;
             Ok(())
         } else {
-            Err(Duration::from_secs_f64((1.0 - bucket.tokens) / self.rate))
+            Err(
+                Duration::try_from_secs_f64((1.0 - bucket.tokens) / self.rate)
+                    .unwrap_or(Duration::MAX),
+            )
         };
         if overflow {
             state.overflow = bucket;
         } else {
-            state.buckets.insert(key.to_owned(), bucket);
+            state.buckets.insert(id, bucket);
         }
         outcome
     }
