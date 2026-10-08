@@ -202,6 +202,8 @@ runtime
 - Shutdown behaves like `serve_listener`: stop accepting, let in-flight
   requests finish, bounded by `shutdown_timeout`; idle keep-alive connections
   are closed and half-finished handshakes are dropped.
+- A runnable example lives in [`examples/tls.rs`](examples/tls.rs)
+  (`cargo run --example tls --features tls`).
 - On a loopback benchmark, steady-state TLS throughput was about 9% below plain
   TCP; with short connections the handshake dominates (see
   `docs/tls-design.md`). Reuse connections where you can.
@@ -338,7 +340,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --features 'uuid test-util swagger multipart tls'
 cargo test --doc --workspace
-cargo build --workspace --examples --features 'uuid swagger'
+cargo build --workspace --examples --features 'uuid swagger tls'
 ```
 
 The Miri inline-future safety job is a permanent CI gate.
