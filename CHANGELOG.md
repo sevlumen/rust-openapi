@@ -5,6 +5,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [Unreleased]
+
+### Added
+- `#[derive(ApiSchema)]` for enums with data (`oneOf`; externally, internally
+  and adjacently tagged and untagged), serde `skip`, `skip_serializing`,
+  `skip_deserializing`, `default`, `skip_serializing_if` and `flatten`
+  (`allOf`), doc comments as descriptions, and field-level
+  `#[api_schema(description, example, minimum, maximum, min_length,
+  max_length, pattern, min_items, max_items, format, deprecated)]`.
+
+### Changed
+- The derive's generated query parser uses hygienic local names, so a query
+  field may be called `key`, `value` or `pair`.
+
 ## [0.7.0] - 2026-10-08
 
 ### Added

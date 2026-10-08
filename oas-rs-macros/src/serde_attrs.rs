@@ -6,6 +6,23 @@ use syn::{Attribute, Ident, LitStr, Token, ext::IdentExt, meta::ParseNestedMeta}
 pub(crate) struct SerdeAttrs {
     pub(crate) rename: Option<String>,
     pub(crate) rename_all: Option<String>,
+    pub(crate) skip_serializing: bool,
+    pub(crate) skip_deserializing: bool,
+    /// `default`, in any form: the field may be missing on input.
+    pub(crate) default: bool,
+    /// `skip_serializing_if = "..."`: the field may be missing on output.
+    pub(crate) skip_serializing_if: bool,
+    pub(crate) flatten: bool,
+    pub(crate) tag: Option<String>,
+    pub(crate) content: Option<String>,
+    pub(crate) untagged: bool,
+}
+
+impl SerdeAttrs {
+    /// `#[serde(skip)]`, or both directions skipped.
+    pub(crate) fn skipped(&self) -> bool {
+        self.skip_serializing && self.skip_deserializing
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -18,10 +35,32 @@ pub(crate) fn parse(attrs: &[Attribute]) -> syn::Result<SerdeAttrs> {
     let mut found = SerdeAttrs::default();
     for attr in attrs.iter().filter(|attr| attr.path().is_ident("serde")) {
         attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("rename") && meta.input.peek(Token![=]) {
+            let has_value = meta.input.peek(Token![=]);
+            if meta.path.is_ident("rename") && has_value {
                 found.rename = Some(meta.value()?.parse::<LitStr>()?.value());
-            } else if meta.path.is_ident("rename_all") && meta.input.peek(Token![=]) {
+            } else if meta.path.is_ident("rename_all") && has_value {
                 found.rename_all = Some(meta.value()?.parse::<LitStr>()?.value());
+            } else if meta.path.is_ident("tag") && has_value {
+                found.tag = Some(meta.value()?.parse::<LitStr>()?.value());
+            } else if meta.path.is_ident("content") && has_value {
+                found.content = Some(meta.value()?.parse::<LitStr>()?.value());
+            } else if meta.path.is_ident("untagged") {
+                found.untagged = true;
+            } else if meta.path.is_ident("skip") {
+                found.skip_serializing = true;
+                found.skip_deserializing = true;
+            } else if meta.path.is_ident("skip_serializing") {
+                found.skip_serializing = true;
+            } else if meta.path.is_ident("skip_deserializing") {
+                found.skip_deserializing = true;
+            } else if meta.path.is_ident("flatten") {
+                found.flatten = true;
+            } else if meta.path.is_ident("default") {
+                found.default = true;
+                skip_meta(&meta)?;
+            } else if meta.path.is_ident("skip_serializing_if") {
+                found.skip_serializing_if = true;
+                skip_meta(&meta)?;
             } else {
                 skip_meta(&meta)?;
             }

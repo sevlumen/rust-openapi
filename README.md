@@ -173,14 +173,38 @@ app.swagger().path("/swagger");
 Enable `swagger` for the UI and `uuid` for UUID extraction/schema support.
 `ApiSchema` derives are provided by the companion `oas-rs-macros` crate.
 
-`#[derive(ApiSchema)]` supports structs with named fields. Field types may be
-scalars (`String`, `bool`, integers, `f32`/`f64`, `Uuid`), `Option`, `Vec`,
-`Box`, string-keyed maps, `serde_json::Value`, or another `ApiSchema` type.
-Unit-variant enums derive a string `enum` schema. `#[serde(rename = "...")]`
-and `#[serde(rename_all = "...")]` (all serde casing rules) are honored for
-schema names, query parameter names and the direct query parser. Other serde
-attributes (`flatten`, `skip`, tagged enums) are not yet reflected; see the
-roadmap below.
+`#[derive(ApiSchema)]` supports structs with named fields and enums. Field
+types may be scalars (`String`, `bool`, integers, `f32`/`f64`, `Uuid`),
+`Option`, `Vec`, `Box`, string-keyed maps, `serde_json::Value`, or another
+`ApiSchema` type. Unit-variant enums derive a string `enum` schema; enums with
+data derive `oneOf` for serde's four representations: externally tagged (the
+default), internally tagged (`tag = "..."`), adjacently tagged (`tag`
+and `content`) and `untagged`.
+
+Serde attributes reflected in the schema: `rename`, `rename_all`, `skip`
+(field omitted), `skip_serializing` (`writeOnly`), `skip_deserializing`
+(`readOnly`, not required), `default` and `skip_serializing_if` (not
+required), `flatten` (merged with `allOf`), and the enum `tag`/`content`/
+`untagged` forms. Doc comments become `description`s. Field-level
+`#[api_schema(...)]` adds `description`, `example`, `minimum`, `maximum`,
+`min_length`, `max_length`, `pattern`, `min_items`, `max_items`, `format` and
+`deprecated`:
+
+```rust
+/// A user account.
+#[derive(Serialize, Deserialize, ApiSchema)]
+struct Account {
+    /// Login name.
+    #[api_schema(example = "ada", min_length = 2, pattern = "^[a-z]+$")]
+    login: String,
+    #[serde(flatten)]
+    audit: Audit,
+}
+```
+
+Query structs with `skip`, `flatten` or `default` fields fall back to serde
+for parsing and list only the plain fields as parameters. Serde's `alias`,
+`with` and `rename_all_fields` are not interpreted.
 
 Named schemas (structs and enums that derive `ApiSchema`) are written once under
 `components.schemas` and referenced with `$ref`, so a type used in several
