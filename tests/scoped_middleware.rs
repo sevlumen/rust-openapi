@@ -233,3 +233,27 @@ async fn odd_request_targets_never_reach_a_guarded_route_over_tcp() {
         );
     }
 }
+
+#[tokio::test]
+async fn route_layer_affects_only_that_route_and_method() {
+    let mut app = App::new();
+    app.get("/export", ok).route_layer(auth);
+    app.post("/export", ok);
+    app.get("/export/{id}", ok);
+    let runtime = app.build().unwrap();
+    assert_eq!(status(&runtime, Method::GET, "/export").await, 401);
+    assert_eq!(status(&runtime, Method::HEAD, "/export").await, 401); // HEAD falls back to GET
+    assert_eq!(status(&runtime, Method::POST, "/export").await, 200);
+    assert_eq!(status(&runtime, Method::GET, "/export/7").await, 200);
+    assert_eq!(status(&runtime, Method::GET, "/export/").await, 401); // trailing slash: same route
+}
+
+#[tokio::test]
+async fn route_layer_uses_the_routes_capture_pattern() {
+    let mut app = App::new();
+    app.get("/items/{id}", ok).route_layer(auth);
+    app.get("/items", ok);
+    let runtime = app.build().unwrap();
+    assert_eq!(status(&runtime, Method::GET, "/items/9").await, 401);
+    assert_eq!(status(&runtime, Method::GET, "/items").await, 200);
+}

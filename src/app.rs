@@ -313,6 +313,24 @@ impl<S: Send + Sync + 'static> App<S> {
         self
     }
 
+    /// Scopes a layer to the last registered route: its path pattern and method
+    /// (a `HEAD` request also matches a `GET` route). Other methods on the same
+    /// path are not affected, and automatic `OPTIONS` answers do not match a
+    /// method-scoped layer. Does nothing if no route has been registered yet.
+    pub fn route_layer(&mut self, middleware: impl Middleware) -> &mut Self {
+        if let Some(index) = self.last_route {
+            let metadata = &self.metadata[index];
+            self.middleware.push(ScopedLayer {
+                scope: Scope::Route {
+                    method: metadata.method.clone(),
+                    segments: Scope::parse(&metadata.template),
+                },
+                layer: Arc::new(middleware),
+            });
+        }
+        self
+    }
+
     /// Registers a layer that applies only to requests whose path starts with
     /// `prefix`, which may contain `{capture}` segments. A prefix matches whole
     /// segments (`/admin` covers `/admin` and `/admin/x`, not `/administrator`)
