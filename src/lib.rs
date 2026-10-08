@@ -123,8 +123,8 @@ pub use oas_rs_macros::ApiSchema;
 #[doc(hidden)]
 pub mod __private {
     pub use crate::{
-        OpenApiQuery, decode_query_component, dedup_parameters, flatten_schema, parse_query_value,
-        query_parameters_from_schema,
+        OpenApiQuery, decode_query_component, dedup_parameters, flatten_schema, parse_query_guided,
+        parse_query_value, query_parameters_from_schema,
     };
     pub use serde_json;
 }

@@ -110,7 +110,7 @@ pub trait OpenApiQuery: Sized {
     where
         Self: DeserializeOwned,
     {
-        parse_query(query)
+        parse_query(query, &Self::parameters())
     }
 }
 
@@ -213,6 +213,13 @@ pub fn query_parameters_from_schema(schema: &Value, optional: bool) -> Vec<Value
     if let Some(parts) = schema["allOf"].as_array() {
         for part in parts {
             parameters.extend(query_parameters_from_schema(part, optional));
+        }
+    }
+    // An optional flatten is `anyOf [T, {"type": "object"}]`: the fields of
+    // `T` are parameters too, and none of them is required.
+    if let Some(alternatives) = schema["anyOf"].as_array() {
+        for alternative in alternatives {
+            parameters.extend(query_parameters_from_schema(alternative, true));
         }
     }
     parameters

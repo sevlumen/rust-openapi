@@ -4,7 +4,16 @@ use crate::*;
 /// value is parsed into its own field's type (`serde_urlencoded`), so a
 /// `String` field keeps `123456` or `true` as text. A `+` is a literal plus in
 /// a query string here (not a space), and invalid percent-encoding is a `400`.
-pub(crate) fn parse_query<T: DeserializeOwned>(query: &str) -> Result<T, ApiError> {
+///
+/// `parameters` are the struct's declared query parameters (names and schema
+/// types). They matter for the second attempt: serde's `flatten` buffers
+/// values as text and cannot turn them into numbers, so a flattened struct is
+/// retried with values converted to JSON numbers/booleans *only where a
+/// parameter declares that type*; every other value stays a string.
+pub(crate) fn parse_query<T: DeserializeOwned>(
+    query: &str,
+    parameters: &[Value],
+) -> Result<T, ApiError> {
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         percent_decode(key)?;
@@ -12,34 +21,82 @@ pub(crate) fn parse_query<T: DeserializeOwned>(query: &str) -> Result<T, ApiErro
     }
     match serde_urlencoded::from_str(&query.replace('+', "%2B")) {
         Ok(value) => Ok(value),
-        Err(error) => {
-            // serde's `flatten` buffers values as text and cannot turn them
-            // into numbers, so a flattened struct needs the second attempt
-            // below, where numeric-looking values are real JSON numbers.
-            parse_query_coercing(query).map_err(|_| ApiError::bad_request(error.to_string()))
-        }
+        Err(error) => parse_query_typed(query, parameters)
+            .map_err(|_| ApiError::bad_request(error.to_string())),
     }
 }
 
-/// Second attempt: numbers and booleans become JSON numbers and booleans.
-fn parse_query_coercing<T: DeserializeOwned>(query: &str) -> Result<T, ApiError> {
+/// For query structs with `#[serde(flatten)]`, generated code calls this
+/// directly: serde buffers flattened values as text, cannot parse numbers out
+/// of them, and an `Option` flatten swallows that failure as `None`, so the
+/// text attempt is not safe there and values are typed from the start.
+pub fn parse_query_guided<T: DeserializeOwned>(
+    query: &str,
+    parameters: &[Value],
+) -> Result<T, ApiError> {
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        percent_decode(key)?;
+        percent_decode(value)?;
+    }
+    parse_query_typed(query, parameters)
+}
+
+/// The JSON type a parameter schema declares, looking through the
+/// `oneOf`/`anyOf` that a nullable (`Option`) field produces.
+fn declared_type(schema: &Value) -> Option<&str> {
+    if let Some(kind) = schema["type"].as_str() {
+        return Some(kind);
+    }
+    ["oneOf", "anyOf"]
+        .iter()
+        .filter_map(|key| schema[*key].as_array())
+        .flatten()
+        .filter_map(declared_type)
+        .find(|kind| *kind != "null")
+}
+
+/// Second attempt: values become numbers or booleans where the declared
+/// parameter type says so (everything else, and every value of an unknown
+/// parameter, stays a string). Without declared parameters (a hand-written
+/// `OpenApiQuery`) any numeric-looking value is converted.
+fn parse_query_typed<T: DeserializeOwned>(
+    query: &str,
+    parameters: &[Value],
+) -> Result<T, ApiError> {
+    let declared = |name: &str| {
+        parameters
+            .iter()
+            .find(|parameter| parameter["name"] == name)
+            .and_then(|parameter| declared_type(&parameter["schema"]))
+    };
     let mut object = Map::new();
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let key = percent_decode(key)?;
         let value = percent_decode(value)?;
-        let json_value = match value.as_str() {
-            "true" => Value::Bool(true),
-            "false" => Value::Bool(false),
-            text => {
-                if let Ok(number) = text.parse::<i64>() {
-                    json!(number)
-                } else if let Ok(number) = text.parse::<f64>() {
-                    json!(number)
-                } else {
-                    Value::String(value)
-                }
+        let kind = if parameters.is_empty() {
+            Some("any")
+        } else {
+            declared(&key)
+        };
+        let number = |text: &str| -> Option<Value> {
+            text.parse::<i64>()
+                .map(|number| json!(number))
+                .or_else(|_| text.parse::<u64>().map(|number| json!(number)))
+                .ok()
+        };
+        let json_value = match (kind, value.as_str()) {
+            (Some("boolean" | "any"), "true") => Value::Bool(true),
+            (Some("boolean" | "any"), "false") => Value::Bool(false),
+            (Some("integer" | "any"), text) if number(text).is_some() => {
+                number(text).unwrap_or(Value::Null)
             }
+            (Some("number" | "any"), text) => match text.parse::<f64>() {
+                Ok(parsed) if parsed.is_finite() => number(text).unwrap_or_else(|| json!(parsed)),
+                _ => Value::String(value),
+            },
+            _ => Value::String(value),
         };
         object.insert(key, json_value);
     }

@@ -5,6 +5,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- A query struct with a `#[serde(flatten)]` field no longer fails on a `String`
+  that looks like a number or bool (`?q=123&size=10` with a flattened
+  `size: u32`), and an `Option<Struct>` flatten no longer silently becomes
+  `None` when its fields are numbers (serde buffers flattened values as text
+  and hides the failure). Such structs now type each value from its declared
+  OpenAPI parameter: only integer/number/boolean parameters are converted,
+  every other value stays a string (nullable `Option` parameters included).
+- Query parameters of nested optional flattens (`Option<Mid>` whose struct
+  flattens another struct) are listed in the OpenAPI document, all optional.
+- `RateLimit::max_keys` is an exact ceiling again: the shard capacities now
+  add up to `max_keys` (the remainder is spread over the first shards) instead
+  of each shard rounding up.
+- `RateLimit` docs no longer say there is no peer-address key.
+
+### Added
+- Stress tests for an upload dropped halfway (the connection slot comes back),
+  a stalled HTTP/2 request body (`408`) and 100 silent WebSocket sessions that
+  all end at their idle timeout.
+
 ## [0.8.1] - 2026-10-08
 
 ### Fixed

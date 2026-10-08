@@ -231,9 +231,11 @@ fn derive_struct<'a>(
     let mut raw_query_arms = Vec::new();
     let mut query_fields = Vec::new();
     let mut direct_query_parser = true;
+    let mut has_flatten = false;
     for (index, field) in fields.enumerate() {
         let serde = serde_attrs::parse(&field.attrs)?;
         if serde.flatten && !serde.skipped() {
+            has_flatten = true;
             // A flattened struct contributes its fields as parameters too (the
             // serde fallback parses them); names that repeat are listed once.
             let (flattened, flattened_optional) = option_inner(&field.ty);
@@ -313,6 +315,18 @@ fn derive_struct<'a>(
                 Ok(Self {
                     #(#query_fields,)*
                 })
+            }
+        }
+    } else if has_flatten {
+        // serde's `flatten` cannot parse numbers from text (and an optional
+        // flatten hides the failure), so type the values from the declared
+        // parameters instead.
+        quote! {
+            fn parse(query: &str) -> Result<Self, ::oas_rs::ApiError> {
+                ::oas_rs::__private::parse_query_guided(
+                    query,
+                    &<Self as ::oas_rs::__private::OpenApiQuery>::parameters(),
+                )
             }
         }
     } else {
