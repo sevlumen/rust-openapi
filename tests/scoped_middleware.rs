@@ -257,3 +257,135 @@ async fn route_layer_uses_the_routes_capture_pattern() {
     assert_eq!(status(&runtime, Method::GET, "/items/9").await, 401);
     assert_eq!(status(&runtime, Method::GET, "/items").await, 200);
 }
+
+#[tokio::test]
+async fn group_prefixes_routes_and_scopes_its_layer() {
+    let mut app = App::new();
+    app.get("/public", ok);
+    app.group("/admin", |g| {
+        g.layer(auth);
+        g.get("/users", ok);
+        g.group("/v1", |g| {
+            g.post("/reset", ok);
+        });
+    });
+    let runtime = app.build().unwrap();
+    assert_eq!(status(&runtime, Method::GET, "/admin/users").await, 401);
+    assert_eq!(status(&runtime, Method::POST, "/admin/v1/reset").await, 401);
+    assert_eq!(status(&runtime, Method::GET, "/public").await, 200);
+    let with_token = runtime
+        .oneshot(Method::GET, "/admin/users", &[("x-token", "yes")], None)
+        .await;
+    assert_eq!(with_token.status(), 200);
+}
+
+#[tokio::test]
+async fn chained_group_registration_keeps_the_prefix() {
+    let mut app = App::new();
+    app.group("/admin", |g| {
+        g.get("/a", ok).get("/b", ok).post("/c", ok);
+    });
+    let runtime = app.build().unwrap();
+    assert_eq!(status(&runtime, Method::GET, "/admin/a").await, 200);
+    assert_eq!(status(&runtime, Method::GET, "/admin/b").await, 200);
+    assert_eq!(status(&runtime, Method::POST, "/admin/c").await, 200);
+    assert_eq!(status(&runtime, Method::GET, "/a").await, 404);
+    assert_eq!(status(&runtime, Method::GET, "/b").await, 404);
+}
+
+#[test]
+fn group_metadata_lands_on_the_prefixed_route() {
+    let mut app = App::new();
+    app.openapi().title("t").version("1").bearer_auth("Bearer");
+    app.group("/admin", |g| {
+        g.get("/users", ok)
+            .tag("admin")
+            .summary("List")
+            .security(["Bearer"]);
+        g.get("/open", ok).public();
+    });
+    let doc = app.openapi_document();
+    assert_eq!(doc["paths"]["/admin/users"]["get"]["tags"][0], "admin");
+    assert_eq!(doc["paths"]["/admin/users"]["get"]["summary"], "List");
+    assert_eq!(
+        doc["paths"]["/admin/users"]["get"]["security"][0]["Bearer"]
+            .as_array()
+            .map(|schemes| schemes.len()),
+        Some(0)
+    );
+    assert_eq!(
+        doc["paths"]["/admin/open"]["get"]["security"],
+        serde_json::json!([])
+    );
+}
+
+#[tokio::test]
+async fn group_route_layer_applies_to_the_prefixed_route() {
+    let mut app = App::new();
+    app.group("/api", |g| {
+        g.get("/export", ok).route_layer(auth);
+        g.get("/other", ok);
+    });
+    let runtime = app.build().unwrap();
+    assert_eq!(status(&runtime, Method::GET, "/api/export").await, 401);
+    assert_eq!(status(&runtime, Method::GET, "/api/other").await, 200);
+}
+
+#[tokio::test]
+async fn group_prefixes_may_contain_captures_and_join_paths_cleanly() {
+    let mut app = App::new();
+    app.group("/tenants/{id}/", |g| {
+        g.layer(auth);
+        g.get("/", ok); // the group root
+        g.get("/items", ok);
+    });
+    let runtime = app.build().unwrap();
+    assert_eq!(status(&runtime, Method::GET, "/tenants/7").await, 401);
+    assert_eq!(status(&runtime, Method::GET, "/tenants/7/items").await, 401);
+    let with_token = runtime
+        .oneshot(Method::GET, "/tenants/7/items", &[("x-token", "yes")], None)
+        .await;
+    assert_eq!(with_token.status(), 200);
+}
+
+#[test]
+fn group_supports_every_registration_method() {
+    async fn raw(_request: http::Request<hyper::body::Incoming>) -> &'static str {
+        "raw"
+    }
+    let mut app = App::new();
+    app.openapi().title("t").version("1");
+    app.group("/g", |g| {
+        g.get("/get", ok)
+            .post("/post", ok)
+            .put("/put", ok)
+            .patch("/patch", ok)
+            .delete("/delete", ok)
+            .head("/head", ok)
+            .options("/options", ok)
+            .raw_get("/raw-get", raw)
+            .raw(Method::POST, "/raw-post", raw)
+            .static_text("/text", "hi")
+            .static_json("/json", bytes::Bytes::from_static(b"{}"));
+        g.get("/documented", ok)
+            .operation_id("documented")
+            .body_limit(10);
+    });
+    let doc = app.openapi_document();
+    for path in [
+        "/g/get",
+        "/g/post",
+        "/g/put",
+        "/g/patch",
+        "/g/delete",
+        "/g/head",
+        "/g/options",
+        "/g/raw-get",
+        "/g/raw-post",
+        "/g/text",
+        "/g/json",
+        "/g/documented",
+    ] {
+        assert!(doc["paths"].get(path).is_some(), "missing {path}");
+    }
+}

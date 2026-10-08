@@ -303,6 +303,26 @@ impl<S: Send + Sync + 'static> App<S> {
         self.raw(Method::GET, path, handler)
     }
 
+    /// Registers routes under a shared path prefix, with layers scoped to it.
+    /// The closure receives a [`Group`]; layers added to it (and routes it
+    /// registers) apply under `prefix` only.
+    ///
+    /// ```
+    /// # use oas_rs::App;
+    /// # async fn list() -> &'static str { "users" }
+    /// # let mut app = App::new();
+    /// app.group("/admin", |g| {
+    ///     g.get("/users", list).tag("admin"); // registered as /admin/users
+    /// });
+    /// ```
+    pub fn group<R>(&mut self, prefix: &str, f: impl FnOnce(&mut Group<'_, S>) -> R) -> R {
+        let mut group = Group {
+            app: self,
+            prefix: prefix.to_owned(),
+        };
+        f(&mut group)
+    }
+
     /// Registers a global layer. Layers run before routing; the first one
     /// registered is the outermost. See [`Middleware`].
     pub fn layer(&mut self, middleware: impl Middleware) -> &mut Self {

@@ -26,6 +26,7 @@ mod app;
 mod bearer;
 mod codec;
 mod extract;
+mod group;
 mod handler;
 mod middleware;
 #[cfg(feature = "multipart")]
@@ -46,6 +47,7 @@ pub use bearer::BearerAuth;
 pub use codec::*;
 pub use extract::FromRequest;
 pub use extract::{Header, HeaderSpec, Path, Query, State};
+pub use group::Group;
 use handler::{BoxFuture, HandlerFuture};
 pub use handler::{Handler, RawHandler};
 #[cfg(test)]
