@@ -179,12 +179,44 @@ impl ApiSchema for uuid::Uuid {
 }
 
 impl<T: ApiSchema> ApiSchema for Option<T> {
+    /// The inner schema: an optional query parameter is just absent.
     fn schema() -> Value {
         T::schema()
     }
 
+    /// Nullable: serde writes `None` as `null` (and reads `null` back).
     fn schema_with(registry: &mut SchemaRegistry) -> Value {
-        T::schema_with(registry)
+        json!({ "oneOf": [T::schema_with(registry), { "type": "null" }] })
+    }
+}
+
+/// Merges the schema of a `#[serde(flatten)]` field (or an internally tagged
+/// newtype payload) into the object `schema` being built. A plain map becomes
+/// the object's `additionalProperties`; anything else goes into `all_of`,
+/// loosened to "this or any object" when the field is optional.
+#[doc(hidden)]
+pub fn flatten_schema(
+    schema: &mut Map<String, Value>,
+    all_of: &mut Vec<Value>,
+    flattened: Value,
+    optional: bool,
+) {
+    let pure_map = flattened.as_object().is_some_and(|object| {
+        object.contains_key("additionalProperties")
+            && ["properties", "$ref", "allOf", "oneOf", "anyOf"]
+                .iter()
+                .all(|key| !object.contains_key(*key))
+    });
+    if pure_map {
+        if let Some(extra) = flattened.get("additionalProperties") {
+            schema.insert("additionalProperties".to_owned(), extra.clone());
+        }
+        return;
+    }
+    if optional {
+        all_of.push(json!({ "anyOf": [flattened, { "type": "object" }] }));
+    } else {
+        all_of.push(flattened);
     }
 }
 

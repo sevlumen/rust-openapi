@@ -274,3 +274,217 @@ fn in_a_document_nested_types_are_referenced() {
     assert!(doc["components"]["schemas"]["Meta"].is_object());
     assert!(doc["components"]["schemas"]["Shape"]["oneOf"].is_array());
 }
+
+use std::collections::HashMap;
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+struct FlatMap {
+    id: u32,
+    #[serde(flatten)]
+    rest: HashMap<String, String>,
+}
+
+#[test]
+fn a_flattened_map_becomes_additional_properties_of_the_object() {
+    let schema = FlatMap::schema();
+    assert_eq!(schema["additionalProperties"], json!({ "type": "string" }));
+    assert!(schema.get("allOf").is_none());
+    assert_eq!(schema["properties"]["id"]["type"], "integer");
+}
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+struct Inner {
+    x: String,
+}
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+struct FlatOpt {
+    id: u32,
+    #[serde(flatten)]
+    extra: Option<Inner>,
+}
+
+#[test]
+fn a_flattened_option_does_not_require_the_inner_fields() {
+    let schema = FlatOpt::schema();
+    let entry = &schema["allOf"][0];
+    let alternatives = entry["anyOf"].as_array().unwrap();
+    assert_eq!(alternatives.len(), 2);
+    assert_eq!(alternatives[0]["required"], json!(["x"]));
+    assert_eq!(alternatives[1], json!({ "type": "object" }));
+}
+
+#[derive(Serialize, Deserialize, Default, ApiSchema)]
+#[serde(default)]
+struct Defaulted {
+    name: String,
+    count: u32,
+}
+
+#[test]
+fn a_container_default_makes_every_field_optional() {
+    let schema = Defaulted::schema();
+    assert!(schema.get("required").is_none(), "{schema}");
+    let parameters = <Defaulted as oas_rs::OpenApiQuery>::parameters();
+    assert!(parameters.iter().all(|p| p["required"] == false));
+    let parsed = <Defaulted as oas_rs::OpenApiQuery>::parse("").unwrap();
+    assert_eq!(parsed.count, 0);
+}
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+struct OptField {
+    q: Option<String>,
+}
+
+#[test]
+fn an_option_field_is_nullable_but_not_required() {
+    let schema = OptField::schema_for_document();
+    assert_eq!(
+        schema["properties"]["q"],
+        json!({ "oneOf": [{ "type": "string" }, { "type": "null" }] })
+    );
+    assert!(schema.get("required").is_none());
+}
+
+trait DocumentSchema {
+    fn schema_for_document() -> Value;
+}
+
+impl<T: ApiSchema> DocumentSchema for T {
+    fn schema_for_document() -> Value {
+        let mut registry = oas_rs::SchemaRegistry::inline();
+        T::schema_with(&mut registry)
+    }
+}
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+enum Holds {
+    Map(HashMap<String, u32>),
+    Wrapped(Inner),
+}
+
+#[test]
+fn an_internally_tagged_map_variant_is_one_satisfiable_object() {
+    let schema = Holds::schema();
+    assert_eq!(
+        schema["oneOf"][0],
+        json!({
+            "type": "object",
+            "properties": { "type": { "type": "string", "enum": ["map"] } },
+            "required": ["type"],
+            "additionalProperties": { "type": "integer", "format": "int32" }
+        })
+    );
+    assert!(schema["oneOf"][1]["allOf"].is_array());
+}
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+#[serde(transparent)]
+struct Wrapper {
+    inner: u32,
+}
+
+#[test]
+fn a_transparent_struct_has_its_field_schema() {
+    assert_eq!(
+        Wrapper::schema(),
+        json!({ "type": "integer", "format": "int32" })
+    );
+}
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+struct Examples {
+    #[api_schema(example = ["a", "b"])]
+    tags: Vec<String>,
+    /**
+     * Block doc.
+     * Second line.
+     */
+    note: String,
+}
+
+#[test]
+fn array_examples_and_block_doc_comments_work() {
+    let schema = Examples::schema();
+    assert_eq!(schema["properties"]["tags"]["example"], json!(["a", "b"]));
+    assert_eq!(
+        schema["properties"]["note"]["description"],
+        "Block doc.\nSecond line."
+    );
+}
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+#[serde(deny_unknown_fields)]
+struct Strict {
+    a: u32,
+}
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+#[serde(rename_all_fields = "camelCase")]
+enum Fields {
+    V { long_name: u32 },
+}
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+enum Mixed {
+    A {
+        v: u32,
+    },
+    #[serde(untagged)]
+    B {
+        w: u32,
+    },
+}
+
+#[test]
+fn strictness_field_renames_and_untagged_variants_are_honored() {
+    assert_eq!(Strict::schema()["additionalProperties"], false);
+    let fields = Fields::schema();
+    assert!(fields["oneOf"][0]["properties"]["V"]["properties"]["longName"].is_object());
+    let mixed = Mixed::schema();
+    assert!(mixed["oneOf"][0]["properties"]["A"].is_object());
+    assert!(mixed["oneOf"][1]["properties"]["w"].is_object());
+    assert!(mixed["oneOf"][1]["properties"].get("B").is_none());
+}
+
+#[allow(non_upper_case_globals)]
+mod hygiene {
+    use super::*;
+
+    const registry: u32 = 1;
+    const property: u32 = 2;
+    const schema: u32 = 3;
+    const query: u32 = 4;
+    const parameters: u32 = 5;
+    const required: u32 = 7;
+    const properties: u32 = 8;
+    const all_of: u32 = 9;
+
+    #[derive(Serialize, Deserialize, ApiSchema)]
+    pub struct Hygienic {
+        /// Doc.
+        #[api_schema(example = 1)]
+        pub a: u32,
+        pub b: Option<String>,
+    }
+
+    #[derive(Serialize, Deserialize, ApiSchema)]
+    #[serde(tag = "t")]
+    pub enum HygienicEnum {
+        One { x: u32 },
+        Two,
+    }
+
+    pub fn used() -> u32 {
+        registry + property + schema + query + parameters + required + properties + all_of
+    }
+}
+
+#[test]
+fn generated_code_does_not_collide_with_user_constants() {
+    assert_eq!(hygiene::used(), 39);
+    assert_eq!(hygiene::Hygienic::schema()["properties"]["a"]["example"], 1);
+    assert!(hygiene::HygienicEnum::schema()["oneOf"].is_array());
+    assert!(<hygiene::Hygienic as oas_rs::OpenApiQuery>::parse("a=1").is_ok());
+}

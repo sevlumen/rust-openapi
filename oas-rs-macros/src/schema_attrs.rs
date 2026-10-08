@@ -25,7 +25,22 @@ pub(crate) fn doc_comment(attrs: &[Attribute]) -> Option<String> {
             }) = &name_value.value
         {
             let value = text.value();
-            lines.push(value.strip_prefix(' ').unwrap_or(&value).to_owned());
+            if value.contains('\n') {
+                // A block doc comment: drop the ` * ` decoration of each line.
+                for line in value.lines() {
+                    let line = line.trim_start();
+                    let line = line.strip_prefix('*').unwrap_or(line);
+                    lines.push(line.strip_prefix(' ').unwrap_or(line).trim_end().to_owned());
+                }
+            } else {
+                lines.push(
+                    value
+                        .strip_prefix(' ')
+                        .unwrap_or(&value)
+                        .trim_end()
+                        .to_owned(),
+                );
+            }
         }
     }
     let text = lines.join("\n");
@@ -86,16 +101,16 @@ impl FieldDoc {
     /// Statements that decorate a schema value held in the variable `property`.
     pub(crate) fn decorate(&self) -> TokenStream {
         let description = self.description.as_ref().map(|text| {
-            quote! { object.insert("description".to_owned(), ::oas_rs::__private::serde_json::json!(#text)); }
+            quote! { __oas_object.insert("description".to_owned(), ::oas_rs::__private::serde_json::json!(#text)); }
         });
         let deprecated = self.deprecated.then(|| {
-            quote! { object.insert("deprecated".to_owned(), ::oas_rs::__private::serde_json::json!(true)); }
+            quote! { __oas_object.insert("deprecated".to_owned(), ::oas_rs::__private::serde_json::json!(true)); }
         });
         let entries = self.entries.iter().map(|(keyword, value)| {
-            quote! { object.insert(#keyword.to_owned(), ::oas_rs::__private::serde_json::json!(#value)); }
+            quote! { __oas_object.insert(#keyword.to_owned(), ::oas_rs::__private::serde_json::json!(#value)); }
         });
         quote! {
-            if let ::oas_rs::__private::serde_json::Value::Object(object) = &mut property {
+            if let ::oas_rs::__private::serde_json::Value::Object(__oas_object) = &mut __oas_property {
                 #description
                 #deprecated
                 #(#entries)*

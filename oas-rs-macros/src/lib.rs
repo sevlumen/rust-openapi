@@ -58,6 +58,12 @@ pub fn derive_api_schema(input: TokenStream) -> TokenStream {
 }
 
 fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &input.generics,
+            "ApiSchema does not support generic types; implement `ApiSchema` by hand",
+        ));
+    }
     let component = schema_name(&input.attrs, &input.ident)?;
     let serde = serde_attrs::parse(&input.attrs)?;
     let description = doc_comment(&input.attrs);
@@ -89,9 +95,9 @@ fn schema_impl(name: &Ident, component: &str, body: TokenStream2) -> TokenStream
                 <Self as ::oas_rs::ApiSchema>::schema_with(&mut ::oas_rs::SchemaRegistry::inline())
             }
 
-            fn schema_with(registry: &mut ::oas_rs::SchemaRegistry) -> #json::Value {
-                registry.define::<Self>(#component, |registry| {
-                    let _ = &registry;
+            fn schema_with(__oas_registry: &mut ::oas_rs::SchemaRegistry) -> #json::Value {
+                __oas_registry.define::<Self>(#component, |__oas_registry| {
+                    let _ = &__oas_registry;
                     #body
                 })
             }
@@ -106,13 +112,16 @@ fn object_schema<'a>(
     rename_all: Option<&str>,
     tag: Option<(&str, &str)>,
     description: Option<&str>,
+    container_default: bool,
+    deny_unknown: bool,
 ) -> syn::Result<TokenStream2> {
     let json = json();
     let mut statements = Vec::new();
+    let mut has_flatten = false;
     if let Some((key, value)) = tag {
         statements.push(quote! {
-            properties.insert(#key.to_owned(), #json::json!({ "type": "string", "enum": [#value] }));
-            required.push(#key.to_owned());
+            __oas_properties.insert(#key.to_owned(), #json::json!({ "type": "string", "enum": [#value] }));
+            __oas_required.push(#key.to_owned());
         });
     }
     for field in fields {
@@ -122,59 +131,72 @@ fn object_schema<'a>(
         }
         let (schema_type, is_optional) = option_inner(&field.ty);
         if serde.flatten {
+            has_flatten = true;
             statements.push(quote! {
-                all_of.push(<#schema_type as ::oas_rs::ApiSchema>::schema_with(registry));
+                ::oas_rs::__private::flatten_schema(
+                    &mut __oas_schema,
+                    &mut __oas_all_of,
+                    <#schema_type as ::oas_rs::ApiSchema>::schema_with(__oas_registry),
+                    #is_optional,
+                );
             });
             continue;
         }
+        // The full type (an `Option` is nullable on the wire).
+        let field_type = &field.ty;
         let ident = field.ident.as_ref().expect("named field");
         let wire = wire_name(&field.attrs, ident, rename_all, NameBase::Snake)?;
         let doc = field_doc(&field.attrs)?;
         let decorate = doc.decorate();
         let direction = if serde.skip_serializing {
-            quote! { object.insert("writeOnly".to_owned(), #json::json!(true)); }
+            quote! { __oas_object.insert("writeOnly".to_owned(), #json::json!(true)); }
         } else if serde.skip_deserializing {
-            quote! { object.insert("readOnly".to_owned(), #json::json!(true)); }
+            quote! { __oas_object.insert("readOnly".to_owned(), #json::json!(true)); }
         } else {
             quote! {}
         };
         let is_required = !(is_optional
             || serde.default
+            || container_default
             || serde.skip_serializing_if
             || serde.skip_deserializing);
-        let require = is_required.then(|| quote! { required.push(#wire.to_owned()); });
+        let require = is_required.then(|| quote! { __oas_required.push(#wire.to_owned()); });
         statements.push(quote! {
             {
-                let mut property = <#schema_type as ::oas_rs::ApiSchema>::schema_with(registry);
+                let mut __oas_property = <#field_type as ::oas_rs::ApiSchema>::schema_with(__oas_registry);
                 #decorate
-                if let #json::Value::Object(object) = &mut property {
+                if let #json::Value::Object(__oas_object) = &mut __oas_property {
                     #direction
                 }
-                properties.insert(#wire.to_owned(), property);
+                __oas_properties.insert(#wire.to_owned(), __oas_property);
                 #require
             }
         });
     }
     let description = description.map(|text| {
-        quote! { schema.insert("description".to_owned(), #json::json!(#text)); }
+        quote! { __oas_schema.insert("description".to_owned(), #json::json!(#text)); }
+    });
+    let strict = (deny_unknown && !has_flatten).then(|| {
+        quote! { __oas_schema.insert("additionalProperties".to_owned(), #json::json!(false)); }
     });
     Ok(quote! {
         {
-            let mut properties = #json::Map::new();
-            let mut required: Vec<String> = Vec::new();
-            let mut all_of: Vec<#json::Value> = Vec::new();
+            let mut __oas_properties = #json::Map::new();
+            let mut __oas_required: Vec<String> = Vec::new();
+            let mut __oas_all_of: Vec<#json::Value> = Vec::new();
+            let mut __oas_schema = #json::Map::new();
             #(#statements)*
-            let mut schema = #json::Map::new();
-            schema.insert("type".to_owned(), #json::json!("object"));
+            __oas_schema.insert("type".to_owned(), #json::json!("object"));
             #description
-            schema.insert("properties".to_owned(), #json::Value::Object(properties));
-            if !required.is_empty() {
-                schema.insert("required".to_owned(), #json::json!(required));
+            __oas_schema.insert("properties".to_owned(), #json::Value::Object(__oas_properties));
+            if !__oas_required.is_empty() {
+                __oas_schema.insert("required".to_owned(), #json::json!(__oas_required));
             }
-            if !all_of.is_empty() {
-                schema.insert("allOf".to_owned(), #json::Value::Array(all_of));
+            if !__oas_all_of.is_empty() {
+                __oas_schema.insert("allOf".to_owned(), #json::Value::Array(__oas_all_of));
             }
-            #json::Value::Object(schema)
+            #strict
+            #json::Value::Object(__oas_schema)
         }
     })
 }
@@ -188,7 +210,17 @@ fn derive_struct<'a>(
 ) -> syn::Result<TokenStream2> {
     let rename_all = container.rename_all.as_deref();
     let json = json();
-    let schema = object_schema(fields.clone(), rename_all, None, description.as_deref())?;
+    if container.transparent {
+        return derive_transparent(name, fields);
+    }
+    let schema = object_schema(
+        fields.clone(),
+        rename_all,
+        None,
+        description.as_deref(),
+        container.default,
+        container.deny_unknown_fields,
+    )?;
 
     // Query parameters and the direct query parser: skipped and flattened
     // fields are left out, and any of them disables the direct parser (the
@@ -208,9 +240,9 @@ fn derive_struct<'a>(
         let field_name = field.ident.as_ref().expect("named field");
         let wire = wire_name(&field.attrs, field_name, rename_all, NameBase::Snake)?;
         let (schema_type, is_optional) = option_inner(&field.ty);
-        let required_flag = !is_optional && !serde.default;
+        let required_flag = !is_optional && !serde.default && !container.default;
         parameters.push(quote! {
-            parameters.push(#json::json!({
+            __oas_parameters.push(#json::json!({
                 "in": "query",
                 "name": #wire,
                 "required": #required_flag,
@@ -218,7 +250,7 @@ fn derive_struct<'a>(
             }));
         });
         // `default` fields are filled by serde, not by the direct parser.
-        if serde.default {
+        if serde.default || container.default {
             direct_query_parser = false;
         }
         direct_query_parser &= supports_query_value(schema_type);
@@ -251,9 +283,9 @@ fn derive_struct<'a>(
 
     let query_parser = if direct_query_parser {
         quote! {
-            fn parse(query: &str) -> Result<Self, ::oas_rs::ApiError> {
+            fn parse(__oas_query: &str) -> Result<Self, ::oas_rs::ApiError> {
                 #(#query_variables)*
-                for __oas_pair in query.split('&').filter(|pair| !pair.is_empty()) {
+                for __oas_pair in __oas_query.split('&').filter(|pair| !pair.is_empty()) {
                     let (__oas_key, __oas_raw) = __oas_pair.split_once('=').unwrap_or((__oas_pair, ""));
                     match __oas_key {
                         #(#raw_query_arms,)*
@@ -282,9 +314,9 @@ fn derive_struct<'a>(
 
         impl ::oas_rs::__private::OpenApiQuery for #name {
             fn parameters() -> Vec<#json::Value> {
-                let mut parameters = Vec::new();
+                let mut __oas_parameters = Vec::new();
                 #(#parameters)*
-                parameters
+                __oas_parameters
             }
 
             #query_parser
@@ -325,6 +357,19 @@ fn derive_enum(
         .filter(|(_, serde)| !serde.skipped())
         .collect();
 
+    for (variant, _) in &variants {
+        if let Some(attr) = variant
+            .attrs
+            .iter()
+            .find(|attr| attr.path().is_ident("api_schema"))
+        {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "api_schema attributes are not supported on enum variants",
+            ));
+        }
+    }
+
     // Unit-only enums keep the plain string enum.
     if matches!(tagging, Tagging::External)
         && variants
@@ -351,19 +396,28 @@ fn derive_enum(
     let mut alternatives = Vec::new();
     for (variant, serde) in &variants {
         let wire = wire_name(&variant.attrs, &variant.ident, rename_all, NameBase::Pascal)?;
-        let variant_rename_all = serde.rename_all.as_deref();
+        let variant_rename_all = serde
+            .rename_all
+            .as_deref()
+            .or(container.rename_all_fields.as_deref());
+        // `#[serde(untagged)]` on a variant opts that variant out of the tag.
+        let tagging = if serde.untagged {
+            &Tagging::Untagged
+        } else {
+            &tagging
+        };
         // The payload: what the variant carries, as a schema expression.
         let payload: Option<TokenStream2> = match &variant.fields {
             Fields::Unit => None,
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
-                let (ty, _) = option_inner(&fields.unnamed[0].ty);
-                Some(quote! { <#ty as ::oas_rs::ApiSchema>::schema_with(registry) })
+                let ty = &fields.unnamed[0].ty;
+                Some(quote! { <#ty as ::oas_rs::ApiSchema>::schema_with(__oas_registry) })
             }
             Fields::Unnamed(fields) => {
                 let count = fields.unnamed.len();
                 let items = fields.unnamed.iter().map(|field| {
-                    let (ty, _) = option_inner(&field.ty);
-                    quote! { <#ty as ::oas_rs::ApiSchema>::schema_with(registry) }
+                    let ty = &field.ty;
+                    quote! { <#ty as ::oas_rs::ApiSchema>::schema_with(__oas_registry) }
                 });
                 Some(quote! {
                     #json::json!({
@@ -379,19 +433,21 @@ fn derive_enum(
                 variant_rename_all,
                 None,
                 None,
+                serde.default,
+                false,
             )?),
         };
-        let alternative = match (&tagging, payload) {
+        let alternative = match (tagging, payload) {
             (Tagging::External, None) => {
                 quote! { #json::json!({ "type": "string", "enum": [#wire] }) }
             }
             (Tagging::External, Some(payload)) => quote! {
                 {
-                    let mut properties = #json::Map::new();
-                    properties.insert(#wire.to_owned(), #payload);
+                    let mut __oas_properties = #json::Map::new();
+                    __oas_properties.insert(#wire.to_owned(), #payload);
                     #json::json!({
                         "type": "object",
-                        "properties": #json::Value::Object(properties),
+                        "properties": #json::Value::Object(__oas_properties),
                         "required": [#wire]
                     })
                 }
@@ -409,19 +465,33 @@ fn derive_enum(
                     variant_rename_all,
                     Some((tag, &wire)),
                     None,
+                    serde.default,
+                    false,
                 )?,
                 Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                     let (ty, _) = option_inner(&fields.unnamed[0].ty);
-                    quote! { #json::json!({
-                        "allOf": [
-                            {
-                                "type": "object",
-                                "properties": { #tag: { "type": "string", "enum": [#wire] } },
-                                "required": [#tag]
-                            },
-                            <#ty as ::oas_rs::ApiSchema>::schema_with(registry)
-                        ]
-                    }) }
+                    quote! {
+                        {
+                            let mut __oas_schema = #json::Map::new();
+                            let mut __oas_all_of: Vec<#json::Value> = Vec::new();
+                            __oas_schema.insert("type".to_owned(), #json::json!("object"));
+                            __oas_schema.insert(
+                                "properties".to_owned(),
+                                #json::json!({ #tag: { "type": "string", "enum": [#wire] } }),
+                            );
+                            __oas_schema.insert("required".to_owned(), #json::json!([#tag]));
+                            ::oas_rs::__private::flatten_schema(
+                                &mut __oas_schema,
+                                &mut __oas_all_of,
+                                <#ty as ::oas_rs::ApiSchema>::schema_with(__oas_registry),
+                                false,
+                            );
+                            if !__oas_all_of.is_empty() {
+                                __oas_schema.insert("allOf".to_owned(), #json::Value::Array(__oas_all_of));
+                            }
+                            #json::Value::Object(__oas_schema)
+                        }
+                    }
                 }
                 _ => {
                     return Err(syn::Error::new_spanned(
@@ -439,12 +509,12 @@ fn derive_enum(
             }
             (Tagging::Adjacent(tag, content), Some(payload)) => quote! {
                 {
-                    let mut properties = #json::Map::new();
-                    properties.insert(#tag.to_owned(), #json::json!({ "type": "string", "enum": [#wire] }));
-                    properties.insert(#content.to_owned(), #payload);
+                    let mut __oas_properties = #json::Map::new();
+                    __oas_properties.insert(#tag.to_owned(), #json::json!({ "type": "string", "enum": [#wire] }));
+                    __oas_properties.insert(#content.to_owned(), #payload);
                     #json::json!({
                         "type": "object",
-                        "properties": #json::Value::Object(properties),
+                        "properties": #json::Value::Object(__oas_properties),
                         "required": [#tag, #content]
                     })
                 }
@@ -455,17 +525,55 @@ fn derive_enum(
         alternatives.push(alternative);
     }
     let description = description.map(|text| {
-        quote! { schema.insert("description".to_owned(), #json::json!(#text)); }
+        quote! { __oas_schema.insert("description".to_owned(), #json::json!(#text)); }
     });
     let body = quote! {
         {
-            let mut schema = #json::Map::new();
+            let mut __oas_schema = #json::Map::new();
             #description
-            schema.insert("oneOf".to_owned(), #json::Value::Array(vec![#(#alternatives),*]));
-            #json::Value::Object(schema)
+            __oas_schema.insert("oneOf".to_owned(), #json::Value::Array(vec![#(#alternatives),*]));
+            #json::Value::Object(__oas_schema)
         }
     };
     Ok(schema_impl(name, component, body))
+}
+
+/// `#[serde(transparent)]`: the schema is the single field's.
+fn derive_transparent<'a>(
+    name: &Ident,
+    fields: impl Iterator<Item = &'a Field>,
+) -> syn::Result<TokenStream2> {
+    let json = json();
+    let mut kept = Vec::new();
+    for field in fields {
+        if !serde_attrs::parse(&field.attrs)?.skipped() {
+            kept.push(field);
+        }
+    }
+    let [field] = kept.as_slice() else {
+        return Err(syn::Error::new_spanned(
+            name,
+            "#[serde(transparent)] needs exactly one field that is not skipped",
+        ));
+    };
+    let ty = &field.ty;
+    Ok(quote! {
+        impl ::oas_rs::ApiSchema for #name {
+            fn schema() -> #json::Value {
+                <#ty as ::oas_rs::ApiSchema>::schema()
+            }
+
+            fn schema_with(__oas_registry: &mut ::oas_rs::SchemaRegistry) -> #json::Value {
+                <#ty as ::oas_rs::ApiSchema>::schema_with(__oas_registry)
+            }
+        }
+
+        impl ::oas_rs::__private::OpenApiQuery for #name {
+            fn parameters() -> Vec<#json::Value> {
+                Vec::new()
+            }
+        }
+    })
 }
 
 fn supports_query_value(ty: &Type) -> bool {

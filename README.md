@@ -202,9 +202,15 @@ struct Account {
 }
 ```
 
-Query structs with `skip`, `flatten` or `default` fields fall back to serde
-for parsing and list only the plain fields as parameters. Serde's `alias`,
-`with` and `rename_all_fields` are not interpreted.
+Also understood: `transparent`, container `default`, `deny_unknown_fields`,
+`rename_all_fields` and a variant-level `untagged`. `Option<T>` is nullable
+(`oneOf: [T, null]`). Query structs with `skip`, `flatten` or `default` fields
+fall back to serde for parsing and list only the plain fields as parameters.
+Not interpreted: `alias`, `with`, `serialize_with`/`deserialize_with`,
+`bound`, and generic types (the derive reports an error: implement
+`ApiSchema` by hand). A `flatten`ed externally tagged enum with unit variants
+is not representable. `skip_serializing_if` and `skip_deserializing` make a
+field not `required`, which also loosens what request bodies must contain.
 
 Named schemas (structs and enums that derive `ApiSchema`) are written once under
 `components.schemas` and referenced with `$ref`, so a type used in several
@@ -609,9 +615,8 @@ version) before committing.
 
 ## Roadmap
 
-Planned: `ApiSchema` support for data-carrying enums and more
-serde attributes,
-splitting `src/lib.rs` into modules, middleware, TLS, and the full HTTP
+Planned: streaming multipart uploads, documented multipart fields, h2c and
+other listener options, brotli/zstd compression, and the full HTTP
 acceptance benchmark matrix.
 
 ## Contributing and license

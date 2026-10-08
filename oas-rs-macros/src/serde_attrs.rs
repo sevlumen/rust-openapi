@@ -16,6 +16,9 @@ pub(crate) struct SerdeAttrs {
     pub(crate) tag: Option<String>,
     pub(crate) content: Option<String>,
     pub(crate) untagged: bool,
+    pub(crate) transparent: bool,
+    pub(crate) deny_unknown_fields: bool,
+    pub(crate) rename_all_fields: Option<String>,
 }
 
 impl SerdeAttrs {
@@ -40,6 +43,12 @@ pub(crate) fn parse(attrs: &[Attribute]) -> syn::Result<SerdeAttrs> {
                 found.rename = Some(meta.value()?.parse::<LitStr>()?.value());
             } else if meta.path.is_ident("rename_all") && has_value {
                 found.rename_all = Some(meta.value()?.parse::<LitStr>()?.value());
+            } else if meta.path.is_ident("rename_all_fields") && has_value {
+                found.rename_all_fields = Some(meta.value()?.parse::<LitStr>()?.value());
+            } else if meta.path.is_ident("transparent") {
+                found.transparent = true;
+            } else if meta.path.is_ident("deny_unknown_fields") {
+                found.deny_unknown_fields = true;
             } else if meta.path.is_ident("tag") && has_value {
                 found.tag = Some(meta.value()?.parse::<LitStr>()?.value());
             } else if meta.path.is_ident("content") && has_value {

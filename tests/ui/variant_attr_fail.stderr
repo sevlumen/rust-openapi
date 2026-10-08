@@ -1,0 +1,5 @@
+error: api_schema attributes are not supported on enum variants
+ --> tests/ui/variant_attr_fail.rs:5:5
+  |
+5 |     #[api_schema(description = "nope")]
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
