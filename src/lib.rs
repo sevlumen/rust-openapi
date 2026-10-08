@@ -26,6 +26,7 @@ mod app;
 mod codec;
 mod extract;
 mod handler;
+mod middleware;
 mod openapi;
 mod params;
 mod path;
@@ -42,6 +43,8 @@ use handler::{BoxFuture, HandlerFuture};
 pub use handler::{Handler, RawHandler};
 #[cfg(test)]
 use handler::{HandlerFutureKind, INLINE_FUTURE_SIZE, InlineFuture};
+use middleware::Host;
+pub use middleware::{Middleware, Next, RequestBody};
 use openapi::OpenApiConfig;
 #[cfg(any(test, feature = "swagger"))]
 use openapi::SwaggerConfig;
@@ -61,7 +64,6 @@ use router::{
 };
 #[cfg(test)]
 use router::{DynamicRouteNode, NodeId};
-#[cfg(test)]
 use runtime::ConnectionRuntime;
 use runtime::RuntimeInner;
 #[cfg(any(test, feature = "test-util"))]

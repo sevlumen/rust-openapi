@@ -72,3 +72,7 @@ required-features = ["swagger"]
 [[example]]
 name = "users-api"
 required-features = ["uuid", "swagger"]
+
+[[test]]
+name = "middleware"
+required-features = ["test-util"]
