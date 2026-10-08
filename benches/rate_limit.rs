@@ -54,7 +54,7 @@ fn measure(label: &str, limit: RateLimit, threads: usize, seconds: u64) {
                         .await;
                     count += 1;
                     // Without this the workers never let the timer run.
-                    if count % 64 == 0 {
+                    if count & 63 == 0 {
                         tokio::task::yield_now().await;
                     }
                 }
