@@ -335,21 +335,23 @@ over both protocols.
 ### Listener options
 
 - **Unix domain socket** (Unix only): `runtime.serve_unix(UnixListener::bind(path)?,
-  shutdown).await?` serves HTTP/1.1 with the same shutdown, timeouts,
-  connection limit and observer as `serve_listener`. Remove a stale socket
-  file before binding.
+  shutdown).await?` serves HTTP/1.1 (plus h2c when enabled) with the same
+  shutdown, timeouts, connection limit and observer as `serve_listener`. The
+  socket file gets the process umask (restrict it with `chmod`), a stale file
+  must be removed before binding, and it is not removed on shutdown.
 - **h2c** (feature `http2`): `runtime.h2c(true)` makes `serve_listener` and
   `serve_unix` also accept HTTP/2 with prior knowledge on the same port, picked
   from the first bytes of the connection. For a proxy that speaks h2c to its
-  upstream; browsers do not. `header_read_timeout` covers only the HTTP/1.1
-  side.
+  upstream; browsers do not. A connection must send its first bytes within
+  `header_read_timeout` (a partial preface counts), and after that the timeout
+  applies to HTTP/1.1 requests only.
 - **`SO_REUSEPORT`, backlog, buffers**: you build the listener, so set them
   with Tokio's `TcpSocket` and pass the result to `serve_listener`:
 
 ```rust
 let socket = tokio::net::TcpSocket::new_v4()?;
 socket.set_reuseaddr(true)?;
-#[cfg(unix)]
+#[cfg(all(unix, not(any(target_os = "solaris", target_os = "illumos"))))]
 socket.set_reuseport(true)?;
 socket.bind("0.0.0.0:8080".parse()?)?;
 let listener = socket.listen(1024)?;
