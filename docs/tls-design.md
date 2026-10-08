@@ -84,3 +84,31 @@ SEC1). With the feature disabled the default build is unchanged.
   (rustls, ring, webpki). The `ring` license (ISC/OpenSSL-style terms) may need
   an explicit allow entry in `deny.toml`.
 - MSRV: the chosen rustls version must support Rust 1.88.
+
+## Results (measured 2026-10-08, Docker Linux, Rust 1.88, release profile)
+
+Default-path gate, microbenchmark (`benches/router.rs`), mean of 3 runs each:
+
+| Case | features without `tls` | with `multipart,tls` |
+|---|---|---|
+| `plaintext` | 258.3 ns, 3 allocations | 260.7 ns, 3 allocations |
+| `static_route_count` (1 route) | 258.5 ns, 3 allocations | 261.0 ns, 3 allocations |
+
+Both are within run-to-run noise (about +/-5%): the feature adds nothing to the
+request path of plain connections.
+
+Plain TCP loopback before/after extracting the shared accept loop (16
+connections, 3 s, mean of 3 alternating runs): keep-alive 220,800 vs 219,900
+req/s (-0.4%), short connections 59,400 vs 60,400 req/s (+1.8%), i.e. unchanged.
+
+TLS loopback (same harness, TLS 1.3, `ring`, self-signed certificate, mean of
+3 alternating runs against plain TCP from the same session):
+
+| Scenario | plain TCP | TLS | TLS vs plain |
+|---|---|---|---|
+| Keep-alive (handshake once per connection) | 219,600 req/s | 200,700 req/s | -8.6% |
+| Short connections (one handshake per request) | 60,200 conn/s | 12,900 handshakes+requests/s | about 21% |
+
+Steady-state TLS costs about 9% throughput on this loopback setup; short
+connections are dominated by the handshake (key exchange and certificate
+signing), which is why keep-alive and session reuse matter for TLS clients.
