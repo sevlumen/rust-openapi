@@ -449,7 +449,7 @@ app.get("/export", export).route_layer(audit);  // this route's path and method
 
 ```toml
 [dependencies]
-oas-rs = "0.5"
+oas-rs = "0.6"
 ```
 
 Enable optional features as needed: `swagger` (Swagger UI), `uuid` (UUID

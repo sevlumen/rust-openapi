@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-08
+
 ### Added
 - `AppRuntime::header_read_timeout` (default 30 s, `None` disables),
   `AppRuntime::max_connections` (default unlimited) and
