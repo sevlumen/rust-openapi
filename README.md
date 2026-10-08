@@ -425,6 +425,28 @@ headers. `allow_any_origin()` cannot be combined with `allow_credentials(true)`
 (it panics; list the origins instead), and `allow_origin` panics on anything
 but `scheme://host[:port]`.
 
+### Rate limiting
+
+```rust
+app.layer(Cors::new().allow_origin("https://app.example"));
+app.layer(
+    RateLimit::new(100, Duration::from_secs(60))   // 100 requests a minute
+        .burst(20)
+        .key_by_header("x-api-key"),
+);
+```
+
+`RateLimit` is a token bucket held in this process: a request that finds the
+bucket empty gets `429` with `Retry-After` and goes no further. By default one
+bucket serves everyone; `key_by_header` / `key_by` give each client its own
+(requests without a key share an anonymous bucket). At most `max_keys`
+(10,000) buckets are kept: idle ones are dropped first and, when the table is
+full of busy keys, new keys share one overflow bucket, so varying the key
+cannot bypass the limit. The middleware does not see the socket, so there is
+no per-address key: behind a proxy key on the header it sets (and only if it
+overwrites what clients send). With several instances each enforces its own
+limit.
+
 ### Custom error format
 
 ```rust

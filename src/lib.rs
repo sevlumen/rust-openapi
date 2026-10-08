@@ -37,6 +37,7 @@ mod multipart;
 mod openapi;
 mod params;
 mod path;
+mod rate_limit;
 mod request_id;
 mod response;
 mod router;
@@ -74,6 +75,7 @@ use openapi::swagger_html;
 pub use openapi::{ApiKeyLocation, BuildError, OpenApiOptions, SecurityScheme};
 pub use params::*;
 use path::*;
+pub use rate_limit::RateLimit;
 pub use request_id::RequestId;
 pub use response::*;
 use router::{

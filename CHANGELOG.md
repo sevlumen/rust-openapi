@@ -10,6 +10,8 @@ All notable changes to this project are documented here. The format follows
   credentials, exposed headers, `Vary`.
 - `TestResponse::header_all` (test-util) for headers that repeat.
 - `Headers` extractor exposing the request's `HeaderMap`.
+- `RateLimit` middleware: token bucket per key (header or custom), `429` with
+  `Retry-After`, bounded memory.
 - `ErrorFormat` middleware and `ErrorInfo`: rewrite framework-generated error
   responses to keep an existing error contract.
 

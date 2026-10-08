@@ -58,7 +58,7 @@ hyper = { version = "1", features = ["client", "http1", "http2"] }
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
 trybuild = "1.0"
 uuid = { version = "1.17", features = ["serde", "v4"] }
-tokio = { version = "1.45", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.45", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
 
 [[bench]]
 name = "router"
@@ -127,4 +127,8 @@ required-features = ["test-util"]
 
 [[test]]
 name = "error_format"
+required-features = ["test-util"]
+
+[[test]]
+name = "rate_limit"
 required-features = ["test-util"]
