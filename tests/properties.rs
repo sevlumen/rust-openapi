@@ -167,7 +167,7 @@ fn percent_decode(text: &str) -> String {
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'%'
-            && index + 2 < bytes.len() + 0
+            && index + 2 < bytes.len()
             && let Ok(value) = u8::from_str_radix(&text[index + 1..index + 3], 16)
         {
             out.push(value);
