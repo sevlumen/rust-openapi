@@ -307,19 +307,21 @@ to clients that negotiate `h2` through ALPN; everything else keeps working as
 HTTP/1.1. Routing, extractors, middleware and graceful shutdown behave the same
 over both protocols.
 
-- It is HTTP/2 **over TLS** only: cleartext HTTP/2 (h2c) is not supported on
-  `serve_listener`, and the plain HTTP/1.1 path is unchanged.
+- By default it is HTTP/2 **over TLS** only and the plain HTTP/1.1 path is
+  unchanged; cleartext HTTP/2 for a trusted proxy is opt-in (see "Listener
+  options" below).
 - `TlsConfig::from_pem_files(..)?.enable_http2(false)` offers HTTP/1.1 only; a
   client that offers only `h2` is then rejected during the handshake.
 - HTTP/2 requests carry the authority in the request URI and have no `Host`
   header.
 - Capacity: Hyper allows up to 200 concurrent streams per HTTP/2 connection
-  and this crate exposes no knob to lower it, so one h2 connection can hold up
-  to 200 times a route's `body_limit` of buffered request bodies (about 3x that
-  for multipart) and 200 handler tasks, versus one of each on an HTTP/1.1
-  connection. No idle or header-read timeout is configured on either protocol
-  (a stream that sends headers and never finishes holds its slot), so bound
-  this with a reverse proxy or OS limits when exposed to untrusted clients.
+  (lower it with `http2_max_concurrent_streams`), so by default one h2
+  connection can hold up to 200 times a route's `body_limit` of buffered
+  request bodies (about 3x that for multipart) and 200 handler tasks, versus
+  one of each on an HTTP/1.1 connection. `header_read_timeout` covers HTTP/1.1
+  only: an h2 stream that sends headers and never finishes holds its slot, so
+  bound this with a reverse proxy or OS limits when exposed to untrusted
+  clients.
 - Hyper limits an h2 request's header list to 16 KiB (larger gets a `431` and a
   reset stream), stricter than the HTTP/1.1 path; clients with very large
   cookies or tokens will notice.
@@ -329,6 +331,30 @@ over both protocols.
 - HTTP/2 multiplexes many requests over one connection, which pays off with many
   concurrent requests; for tiny responses at low concurrency a single h2 stream
   was slower than HTTP/1.1 on a loopback benchmark (see `docs/http2-design.md`).
+
+### Listener options
+
+- **Unix domain socket** (Unix only): `runtime.serve_unix(UnixListener::bind(path)?,
+  shutdown).await?` serves HTTP/1.1 with the same shutdown, timeouts,
+  connection limit and observer as `serve_listener`. Remove a stale socket
+  file before binding.
+- **h2c** (feature `http2`): `runtime.h2c(true)` makes `serve_listener` and
+  `serve_unix` also accept HTTP/2 with prior knowledge on the same port, picked
+  from the first bytes of the connection. For a proxy that speaks h2c to its
+  upstream; browsers do not. `header_read_timeout` covers only the HTTP/1.1
+  side.
+- **`SO_REUSEPORT`, backlog, buffers**: you build the listener, so set them
+  with Tokio's `TcpSocket` and pass the result to `serve_listener`:
+
+```rust
+let socket = tokio::net::TcpSocket::new_v4()?;
+socket.set_reuseaddr(true)?;
+#[cfg(unix)]
+socket.set_reuseport(true)?;
+socket.bind("0.0.0.0:8080".parse()?)?;
+let listener = socket.listen(1024)?;
+runtime.serve_listener(listener, shutdown).await?;
+```
 
 ## Multipart uploads
 
@@ -659,7 +685,7 @@ version) before committing.
 
 ## Roadmap
 
-Planned: h2c and other listener options, brotli/zstd compression, and the full HTTP
+Planned: HTTP/3, brotli/zstd compression, and the full HTTP
 acceptance benchmark matrix.
 
 ## Contributing and license

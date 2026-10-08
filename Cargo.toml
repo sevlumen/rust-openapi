@@ -22,7 +22,7 @@ swagger = []
 multipart = ["dep:multer"]
 tls = ["dep:tokio-rustls", "dep:rustls-pki-types"]
 compression = ["dep:flate2"]
-http2 = ["tls", "hyper/http2", "hyper-util/http2"]
+http2 = ["tls", "hyper/http2", "hyper-util/http2", "hyper-util/server-auto"]
 
 [lib]
 name = "oas_rs"
@@ -146,3 +146,10 @@ required-features = ["test-util"]
 [[test]]
 name = "multipart_stream"
 required-features = ["multipart"]
+
+[[test]]
+name = "h2c"
+required-features = ["http2"]
+
+[[test]]
+name = "unix_socket"

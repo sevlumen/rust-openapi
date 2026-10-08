@@ -10,6 +10,8 @@ pub struct AppRuntime<S = ()> {
     pub(crate) connection_error_observer: Option<ErrorObserver>,
     #[cfg(feature = "http2")]
     pub(crate) http2_max_concurrent_streams: Option<u32>,
+    #[cfg(feature = "http2")]
+    pub(crate) h2c: bool,
     #[cfg(feature = "tls")]
     pub(crate) handshake_timeout: Duration,
 }
@@ -390,6 +392,36 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         self.serve_listener(listener, std::future::pending()).await
     }
 
+    /// Serves HTTP/1.1 on a Unix domain socket (for example behind a reverse
+    /// proxy on the same host) with the same shutdown, timeout, connection
+    /// limit and observer behaviour as [`serve_listener`](Self::serve_listener).
+    /// Removing a stale socket file before binding is up to the caller.
+    #[cfg(unix)]
+    pub async fn serve_unix<F>(
+        self,
+        listener: tokio::net::UnixListener,
+        shutdown: F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        serve_runtime(self, listener, shutdown).await
+    }
+
+    /// Accepts HTTP/2 over plain TCP "with prior knowledge" (h2c) on
+    /// [`serve_listener`](Self::serve_listener) and
+    /// [`serve_unix`](Self::serve_unix), next to HTTP/1.1 on the same port;
+    /// the protocol is picked from the first bytes of each connection. Off by
+    /// default. Meant for a trusted proxy or load balancer that speaks h2c to
+    /// its upstream; browsers do not. The Upgrade-based h2c of RFC 7540 is not
+    /// supported. [`header_read_timeout`](Self::header_read_timeout) covers
+    /// only the HTTP/1.1 side.
+    #[cfg(feature = "http2")]
+    pub fn h2c(mut self, enabled: bool) -> Self {
+        self.h2c = enabled;
+        self
+    }
+
     pub async fn serve_listener<F>(
         self,
         listener: tokio::net::TcpListener,
@@ -489,6 +521,43 @@ enum AcceptAction {
     Fatal,
 }
 
+/// A source of connections: a TCP listener or, on Unix, a Unix socket
+/// listener. Everything after `accept` is the same for both.
+pub(crate) trait Listener {
+    type Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static;
+
+    fn accept(&self) -> impl Future<Output = std::io::Result<Self::Io>> + Send;
+
+    /// `TCP_NODELAY` where it exists; a no-op otherwise.
+    fn set_nodelay(_io: &Self::Io) {}
+}
+
+impl Listener for tokio::net::TcpListener {
+    type Io = tokio::net::TcpStream;
+
+    async fn accept(&self) -> std::io::Result<Self::Io> {
+        tokio::net::TcpListener::accept(self)
+            .await
+            .map(|(stream, _)| stream)
+    }
+
+    fn set_nodelay(io: &Self::Io) {
+        // Failing only leaves the operating system default in place.
+        let _ = io.set_nodelay(true);
+    }
+}
+
+#[cfg(unix)]
+impl Listener for tokio::net::UnixListener {
+    type Io = tokio::net::UnixStream;
+
+    async fn accept(&self) -> std::io::Result<Self::Io> {
+        tokio::net::UnixListener::accept(self)
+            .await
+            .map(|(stream, _)| stream)
+    }
+}
+
 /// Holds one of the `max_connections` slots until dropped.
 pub(crate) type ConnectionSlot = tokio::sync::OwnedSemaphorePermit;
 
@@ -554,13 +623,14 @@ fn classify_accept_error(error: &std::io::Error) -> AcceptAction {
 /// With a connection `limit`, a slot is taken before accepting and handed back
 /// with the stream: hold it as long as the connection lives. While every slot
 /// is taken this waits (racing `shutdown`) and accepts nothing.
-pub(crate) async fn accept_next<F>(
-    listener: &tokio::net::TcpListener,
+pub(crate) async fn accept_next<L, F>(
+    listener: &L,
     shutdown: &mut Pin<&mut F>,
     nodelay: bool,
     limit: Option<&Arc<tokio::sync::Semaphore>>,
-) -> Result<Option<(tokio::net::TcpStream, Option<ConnectionSlot>)>, std::io::Error>
+) -> Result<Option<(L::Io, Option<ConnectionSlot>)>, std::io::Error>
 where
+    L: Listener,
     F: Future<Output = ()>,
 {
     let slot = match limit {
@@ -576,9 +646,9 @@ where
         tokio::select! {
             _ = shutdown.as_mut() => return Ok(None),
             accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => {
+                Ok(stream) => {
                     if nodelay {
-                        let _ = stream.set_nodelay(true);
+                        L::set_nodelay(&stream);
                     }
                     return Ok(Some((stream, slot)));
                 }
@@ -595,15 +665,18 @@ where
     }
 }
 
-async fn serve_runtime<S, F>(
+async fn serve_runtime<S, L, F>(
     runtime: AppRuntime<S>,
-    listener: tokio::net::TcpListener,
+    listener: L,
     shutdown: F,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: Send + Sync + 'static,
+    L: Listener,
     F: Future<Output = ()> + Send + 'static,
 {
+    #[cfg(feature = "http2")]
+    let (h2c, max_streams) = (runtime.h2c, runtime.http2_max_concurrent_streams);
     let shutdown_timeout = runtime.shutdown_timeout;
     let nodelay = runtime.tcp_nodelay;
     let header_read_timeout = runtime.header_read_timeout;
@@ -621,6 +694,31 @@ where
             let prepared = connection.prepare(request);
             async move { Ok::<_, Infallible>(prepared.await) }
         });
+        #[cfg(feature = "http2")]
+        if h2c {
+            // HTTP/2 with prior knowledge: the first bytes tell HTTP/1.1 from
+            // the HTTP/2 preface. The connection borrows its builder, so the
+            // task builds both.
+            let mut builder =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+            if header_read_timeout.is_some() {
+                builder.http1().timer(hyper_util::rt::TokioTimer::new());
+            }
+            builder.http1().header_read_timeout(header_read_timeout);
+            if let Some(limit) = max_streams {
+                builder.http2().max_concurrent_streams(limit);
+            }
+            let watcher = graceful.watcher();
+            let observer = observer.clone();
+            tokio::spawn(async move {
+                let _slot = slot;
+                let connection = watcher.watch(builder.serve_connection(io, service));
+                if let Err(error) = connection.await {
+                    report_connection_error(&observer, error.as_ref());
+                }
+            });
+            continue;
+        }
         let connection = http1_builder(header_read_timeout).serve_connection(io, service);
         let connection = graceful.watch(connection);
         let observer = observer.clone();
