@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-08
+
 ### Added
 - Scoped middleware: `App::group` / `Group` (prefixed routes with layers scoped
   to the prefix), `App::layer_for(prefix, layer)` and `App::route_layer(layer)`.

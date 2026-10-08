@@ -2,7 +2,7 @@
 
 Typed HTTP routing on Hyper + Tokio with startup-generated OpenAPI 3.1
 metadata. The V1 release line is Cargo `0.1.0`; the public API and HTTP
-semantics follow semver within the `0.4` line. Licensed under the MIT License.
+semantics follow semver within the `0.5` line. Licensed under the MIT License.
 
 ## Quick start
 
@@ -381,7 +381,7 @@ app.get("/export", export).route_layer(audit);  // this route's path and method
 
 ```toml
 [dependencies]
-oas-rs = "0.4"
+oas-rs = "0.5"
 ```
 
 Enable optional features as needed: `swagger` (Swagger UI), `uuid` (UUID
