@@ -22,7 +22,7 @@ async fn hello() -> &'static str {
 }
 
 async fn big() -> String {
-    "x".repeat(2 * 1024 * 1024)
+    "x".repeat(8 * 1024 * 1024)
 }
 
 async fn slow() -> &'static str {
@@ -225,10 +225,14 @@ async fn a_large_buffered_response_is_not_idle_while_the_client_reads_slowly() {
     })
     .await;
     let tcp = TcpStream::connect(server.addr).await.unwrap();
-    let (mut sender, connection) =
-        hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tcp))
-            .await
-            .unwrap();
+    // Tiny flow-control windows: the 8 MiB body cannot be buffered by the
+    // client, so most of it is still on the server while the client sleeps.
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .initial_stream_window_size(1024)
+        .initial_connection_window_size(1024)
+        .handshake(TokioIo::new(tcp))
+        .await
+        .unwrap();
     tokio::spawn(async move {
         let _ = connection.await;
     });
@@ -246,6 +250,6 @@ async fn a_large_buffered_response_is_not_idle_while_the_client_reads_slowly() {
         .await
         .expect("the response was cut while the client was slow")
         .to_bytes();
-    assert_eq!(body.len(), 2 * 1024 * 1024);
+    assert_eq!(body.len(), 8 * 1024 * 1024);
     let _ = server.shut_down().await;
 }

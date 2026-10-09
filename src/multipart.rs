@@ -45,11 +45,42 @@ impl Drop for SkipGuard {
 struct GuardedBody {
     inner: http_body_util::BodyDataStream<Incoming>,
     progress: Arc<Progress>,
-    /// CRLF, two dashes and the boundary: while a skipped part is drained,
-    /// its end is the next delimiter, after which the guard applies again.
+    /// While a skipped part is drained, its end is the next delimiter, after
+    /// which the guard applies again.
+    scan: DelimiterScan,
+}
+
+/// Finds a delimiter (CRLF, two dashes and the boundary) in a stream of chunks,
+/// including one that straddles two or more of them.
+struct DelimiterScan {
     delimiter: Vec<u8>,
-    /// The last bytes seen while draining (a delimiter can straddle chunks).
+    /// The last `delimiter.len() - 1` bytes seen.
     carry: Vec<u8>,
+}
+
+impl DelimiterScan {
+    fn new(boundary: &str) -> Self {
+        Self {
+            delimiter: format!("\r\n--{boundary}").into_bytes(),
+            carry: Vec::new(),
+        }
+    }
+
+    /// Feeds the next chunk. Returns how many bytes of it follow the
+    /// delimiter if the delimiter ends inside it.
+    fn feed(&mut self, chunk: &[u8]) -> Option<usize> {
+        let mut window = std::mem::take(&mut self.carry);
+        window.extend_from_slice(chunk);
+        let found = window
+            .windows(self.delimiter.len())
+            .position(|candidate| candidate == self.delimiter.as_slice());
+        if let Some(position) = found {
+            return Some(window.len() - position - self.delimiter.len());
+        }
+        let keep = self.delimiter.len().saturating_sub(1).min(window.len());
+        self.carry = window.split_off(window.len() - keep);
+        None
+    }
 }
 
 impl Stream for GuardedBody {
@@ -65,20 +96,12 @@ impl Stream for GuardedBody {
                     // Skipping a part: its data is not a violation, but only
                     // up to the delimiter that ends it. What follows (the next
                     // part's headers) counts as unproductive again.
-                    let mut window = std::mem::take(&mut self.carry);
-                    window.extend_from_slice(&bytes);
-                    let found = window
-                        .windows(self.delimiter.len())
-                        .position(|candidate| candidate == self.delimiter.as_slice());
-                    if let Some(position) = found {
-                        let after = window.len() - position - self.delimiter.len();
+                    if let Some(after) = self.scan.feed(&bytes) {
                         self.progress.draining.store(false, Ordering::Relaxed);
                         self.progress
                             .unproductive
                             .store(after as u64, Ordering::Relaxed);
                     } else {
-                        let keep = self.delimiter.len().saturating_sub(1).min(window.len());
-                        self.carry = window.split_off(window.len() - keep);
                         self.progress.unproductive.store(0, Ordering::Relaxed);
                     }
                     return Poll::Ready(Some(Ok(bytes)));
@@ -204,8 +227,7 @@ impl Multipart {
         let stream = GuardedBody {
             inner: request.into_body().into_data_stream(),
             progress: Arc::clone(&progress),
-            delimiter: format!("\r\n--{boundary}").into_bytes(),
-            carry: Vec::new(),
+            scan: DelimiterScan::new(&boundary),
         };
         Ok(Multipart {
             inner: multer::Multipart::with_constraints(stream, boundary, constraints),
@@ -452,5 +474,63 @@ impl<S: Send + Sync + 'static> Group<'_, S> {
     ) -> &mut Self {
         self.app.multipart_fields(fields);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DelimiterScan;
+
+    const BODY: &[u8] = b"data data\r\n--XB\r\nHeader: v";
+
+    /// Feeds `BODY` cut into the given chunk sizes and reports what follows
+    /// the delimiter.
+    fn scan(sizes: &[usize]) -> Option<usize> {
+        let mut scan = DelimiterScan::new("XB");
+        let mut rest = BODY;
+        let mut hit = None;
+        for &size in sizes {
+            let (chunk, tail) = rest.split_at(size.min(rest.len()));
+            rest = tail;
+            if let Some(after) = scan.feed(chunk) {
+                assert!(hit.is_none(), "reported twice");
+                hit = Some(after + rest.len());
+            }
+        }
+        if !rest.is_empty()
+            && let Some(after) = scan.feed(rest)
+        {
+            hit = Some(after);
+        }
+        hit
+    }
+
+    #[test]
+    fn a_delimiter_is_found_whatever_the_chunking() {
+        let after = BODY.len() - (b"data data".len() + b"\r\n--XB".len());
+        // One cut at every position, including inside the delimiter.
+        for cut in 0..=BODY.len() {
+            assert_eq!(scan(&[cut]), Some(after), "single cut at {cut}");
+        }
+        // Two cuts at every pair of positions (three chunks).
+        for first in 0..=BODY.len() {
+            for second in 0..=BODY.len() - first {
+                assert_eq!(
+                    scan(&[first, second]),
+                    Some(after),
+                    "cuts at {first}, {second}"
+                );
+            }
+        }
+        // One byte at a time.
+        assert_eq!(scan(&vec![1; BODY.len()]), Some(after));
+    }
+
+    #[test]
+    fn data_without_a_delimiter_never_matches() {
+        let mut scan = DelimiterScan::new("XB");
+        for chunk in [&b"abc\r\n-"[..], b"-X", b"Y", b"\r\n-", b"x"] {
+            assert_eq!(scan.feed(chunk), None);
+        }
     }
 }
