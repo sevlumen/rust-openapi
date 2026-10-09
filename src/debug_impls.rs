@@ -6,6 +6,37 @@ use std::fmt;
 
 use crate::*;
 
+/// Prints as `<redacted>`: stands in for a value that must never reach a log.
+pub(crate) struct Redacted;
+
+impl fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+/// Whether a header's value is a credential that `{:?}` must not print: the
+/// standard ones, and any name that says what it is (`x-api-key`,
+/// `x-auth-token`, `x-csrf-token`, `x-session-id`...).
+pub(crate) fn is_sensitive_header(name: &str) -> bool {
+    const EXACT: [&str; 4] = [
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+    ];
+    const HINTS: [&str; 7] = [
+        "token",
+        "secret",
+        "key",
+        "auth",
+        "password",
+        "session",
+        "signature",
+    ];
+    EXACT.contains(&name) || HINTS.iter().any(|hint| name.contains(hint))
+}
+
 macro_rules! opaque {
     ($(#[$meta:meta])* impl[$($gen:tt)*] $ty:ty) => {
         $(#[$meta])*

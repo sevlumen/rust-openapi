@@ -28,3 +28,67 @@ fn an_app_and_its_runtime_can_be_debug_printed() {
     let runtime = app.build().unwrap();
     assert!(format!("{runtime:?}").starts_with("AppRuntime"));
 }
+
+mod secrets {
+    use oas_rs::{App, Cookies, Headers, Method, SetCookie};
+
+    async fn show_headers(headers: Headers) -> String {
+        format!("{headers:?}")
+    }
+
+    async fn show_cookies(cookies: Cookies) -> String {
+        format!("{cookies:?}")
+    }
+
+    async fn get(path: &str, headers: &[(&str, &str)]) -> String {
+        let mut app = App::new();
+        app.get("/headers", show_headers);
+        app.get("/cookies", show_cookies);
+        let runtime = app.build().unwrap();
+        runtime
+            .oneshot(Method::GET, path, headers, None)
+            .await
+            .body_string()
+            .await
+    }
+
+    #[tokio::test]
+    async fn headers_debug_hides_credentials_but_keeps_everything_else() {
+        let shown = get(
+            "/headers",
+            &[
+                ("authorization", "Bearer s3cr3t-token"),
+                ("cookie", "sid=s3cr3t-session"),
+                ("proxy-authorization", "Basic s3cr3t-proxy"),
+                ("x-api-key", "s3cr3t-key"),
+                ("x-request-id", "request-42"),
+            ],
+        )
+        .await;
+        assert!(!shown.contains("s3cr3t"), "{shown}");
+        // The names stay, so the output is still useful for debugging.
+        for name in ["authorization", "cookie", "x-api-key", "x-request-id"] {
+            assert!(shown.contains(name), "{name} missing from {shown}");
+        }
+        assert!(shown.contains("request-42"), "{shown}");
+    }
+
+    #[tokio::test]
+    async fn cookies_debug_shows_names_not_values() {
+        let shown = get("/cookies", &[("cookie", "sid=s3cr3t-session; theme=dark")]).await;
+        assert!(!shown.contains("s3cr3t"), "{shown}");
+        assert!(!shown.contains("dark"), "{shown}");
+        assert!(shown.contains("sid") && shown.contains("theme"), "{shown}");
+    }
+
+    #[test]
+    fn set_cookie_debug_hides_the_value_but_keeps_the_attributes() {
+        let cookie = SetCookie::new("sid", "s3cr3t-session")
+            .path("/app")
+            .http_only()
+            .secure();
+        let shown = format!("{cookie:?}");
+        assert!(!shown.contains("s3cr3t"), "{shown}");
+        assert!(shown.contains("sid") && shown.contains("/app"), "{shown}");
+    }
+}

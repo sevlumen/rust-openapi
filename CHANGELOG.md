@@ -5,6 +5,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-10-09
+
+### Security
+- `{:?}` no longer prints credentials. `Headers` used to derive `Debug` and
+  printed every header, `Authorization`, `Cookie` and `X-Api-Key` included;
+  `Cookies` printed every cookie value (session tokens); `SetCookie` printed
+  its value. Logging one of them (`tracing::debug!("{headers:?}")`, `dbg!`)
+  therefore leaked the credential. Now `Headers` shows every header name but
+  replaces the value of `Authorization`, `Proxy-Authorization`, `Cookie`,
+  `Set-Cookie` and any header whose name contains `token`, `secret`, `key`,
+  `auth`, `password`, `session` or `signature` with `<redacted>`; `Cookies`
+  shows names only; `SetCookie` hides the value and keeps its attributes. The
+  data itself (`headers.0`, `cookies.get(..)`) is unchanged. If you logged these
+  types, rotate any credential that may have reached your logs.
+
 ## [0.9.4] - 2026-10-09
 
 ### Fixed

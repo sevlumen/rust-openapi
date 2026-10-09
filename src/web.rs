@@ -198,8 +198,8 @@ pub enum SameSite {
 }
 
 /// A `Set-Cookie` header value. Values are written as given: percent-encode
-/// anything outside the cookie-octet set yourself.
-#[derive(Clone, Debug)]
+/// anything outside the cookie-octet set yourself. `{:?}` hides the value.
+#[derive(Clone)]
 pub struct SetCookie {
     name: String,
     value: String,
@@ -209,6 +209,21 @@ pub struct SetCookie {
     http_only: bool,
     secure: bool,
     same_site: Option<SameSite>,
+}
+
+impl std::fmt::Debug for SetCookie {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetCookie")
+            .field("name", &self.name)
+            .field("value", &crate::debug_impls::Redacted)
+            .field("path", &self.path)
+            .field("domain", &self.domain)
+            .field("max_age", &self.max_age)
+            .field("http_only", &self.http_only)
+            .field("secure", &self.secure)
+            .field("same_site", &self.same_site)
+            .finish()
+    }
 }
 
 fn is_token(name: &str) -> bool {
@@ -335,8 +350,20 @@ impl fmt::Display for SetCookie {
 /// removed, invalid UTF-8 replaced) and are not percent-decoded. When a name
 /// repeats, [`get`](Self::get) returns the first, as RFC 6265 asks.
 /// Documents no OpenAPI parameters.
-#[derive(Clone, Debug, Default)]
+///
+/// `{:?}` shows the cookie names and hides the values (session tokens).
+#[derive(Clone, Default)]
 pub struct Cookies(Vec<(String, String)>);
+
+impl std::fmt::Debug for Cookies {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut map = f.debug_map();
+        for (name, _) in &self.0 {
+            map.entry(name, &crate::debug_impls::Redacted);
+        }
+        map.finish()
+    }
+}
 
 impl Cookies {
     /// The first cookie called `name`.
