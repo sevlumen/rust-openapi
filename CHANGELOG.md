@@ -5,6 +5,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- HTTP/2: a large buffered response (over 32 KiB) was still cut off when a
+  slow client let the flow-control window fill for longer than
+  `header_read_timeout` plus the 2 s shutdown grace: hyper hands a one-chunk
+  body to the HTTP/2 layer at once and considers it finished, so the request
+  looked idle while most of the body was still queued. Such bodies are now
+  sent in 16 KiB pieces (with an explicit `Content-Length`) and keep the
+  request in flight until the last piece is accepted. Found by review of 0.8.4;
+  0.8.4's test missed it because default windows let hyper buffer the whole
+  body.
+
+### Added
+- A deterministic unit test cuts a multipart delimiter at every byte position
+  (one and two cuts, one byte at a time) against the skip guard's scanner, now
+  its own `DelimiterScan`; a TLS/ALPN test for the slow-client case above.
+- CI fails if a package would contain `wip*`, `*.py` or `*.log` files.
+
 ## [0.8.4] - 2026-10-09
 
 ### Fixed

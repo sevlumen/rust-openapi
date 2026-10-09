@@ -50,6 +50,17 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --all-features
 
+      - name: Package contents
+        run: |
+          # Scratch files (wip*, *.py, logs) must never be published.
+          for crate in oas-rs oas-rs-macros; do
+            files=$(cargo package --list -p "$crate" --allow-dirty)
+            echo "$files"
+            if echo "$files" | grep -E '(^|/)(wip|.*\.py$|.*\.log$)'; then
+              echo "unexpected files in the $crate package"; exit 1
+            fi
+          done
+
   miri-inline-future:
     runs-on: ubuntu-latest
     timeout-minutes: 20

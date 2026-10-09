@@ -953,21 +953,58 @@ impl ActivityGuard {
 
 impl ActivityGuard {
     /// A streaming body keeps the request in flight until the stream ends or
-    /// is dropped (an SSE or download outlives its handler); a buffered body
-    /// is already complete, so the guard ends here.
+    /// is dropped (an SSE or download outlives its handler). So does a large
+    /// buffered body: flow control can leave most of it unsent while a slow
+    /// client reads, and the connection must not look idle meanwhile. Small
+    /// buffered bodies fit in the first window and end the guard here.
     pub(crate) fn finish_with(guard: Option<Self>, response: HttpResponse) -> HttpResponse {
         let Some(guard) = guard else {
             return response;
         };
-        let (parts, body) = response.into_parts();
+        let (mut parts, body) = response.into_parts();
         let body = match body {
             ResponseBody::Stream(stream) => ResponseBody::stream(Guarded {
                 stream,
                 _guard: guard,
             }),
+            ResponseBody::Full(Some(bytes)) if bytes.len() > LARGE_BUFFERED_BODY => {
+                // The stream has no exact size, so state the length.
+                parts
+                    .headers
+                    .entry(header::CONTENT_LENGTH)
+                    .or_insert_with(|| HeaderValue::from(bytes.len()));
+                ResponseBody::stream(Guarded {
+                    stream: Box::pin(Chunked(bytes)),
+                    _guard: guard,
+                })
+            }
             other => other,
         };
         Response::from_parts(parts, body)
+    }
+}
+
+/// Buffered bodies up to this size fit in HTTP/2's default 64 KiB window.
+const LARGE_BUFFERED_BODY: usize = 32 * 1024;
+
+/// An already buffered body as a stream of HTTP/2-frame-sized chunks. Hyper
+/// treats a one-chunk body as finished once it has handed that chunk to the
+/// HTTP/2 layer, which then queues all of it until the window opens; handing
+/// it over piece by piece keeps the body (and so the request's activity guard)
+/// alive until the last piece has been accepted.
+struct Chunked(Bytes);
+
+const CHUNK: usize = 16 * 1024;
+
+impl futures_core::Stream for Chunked {
+    type Item = Bytes;
+
+    fn poll_next(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Bytes>> {
+        if self.0.is_empty() {
+            return Poll::Ready(None);
+        }
+        let take = CHUNK.min(self.0.len());
+        Poll::Ready(Some(self.0.split_to(take)))
     }
 }
 

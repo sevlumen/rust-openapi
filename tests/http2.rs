@@ -375,3 +375,46 @@ fn zero_concurrent_streams_is_rejected() {
         .unwrap()
         .http2_max_concurrent_streams(Some(0));
 }
+
+async fn big() -> String {
+    "x".repeat(8 * 1024 * 1024)
+}
+
+/// The same lifecycle rule as for h2c: a large buffered response that a slow
+/// client stops reading for longer than the idle timeout plus the shutdown
+/// grace must still arrive whole over TLS/ALPN.
+#[tokio::test]
+async fn a_large_response_survives_a_slow_client_over_tls() {
+    let mut app = App::new();
+    app.get("/big", big);
+    let mut server = start_with(app, true, |runtime| {
+        runtime.header_read_timeout(Some(Duration::from_millis(200)))
+    })
+    .await;
+    let tls = handshake(&server, &[b"h2"]).await.unwrap();
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .initial_stream_window_size(1024)
+        .initial_connection_window_size(1024)
+        .handshake(TokioIo::new(tls))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = http::Request::builder()
+        .uri("https://localhost/big")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("the response was cut while the client was slow")
+        .to_bytes();
+    assert_eq!(body.len(), 8 * 1024 * 1024);
+    if let Some(stop) = server.stop.take() {
+        let _ = stop.send(());
+    }
+}
