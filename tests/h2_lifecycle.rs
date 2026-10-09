@@ -21,6 +21,10 @@ async fn hello() -> &'static str {
     "hello"
 }
 
+async fn medium() -> String {
+    "x".repeat(16 * 1024)
+}
+
 async fn big() -> String {
     "x".repeat(8 * 1024 * 1024)
 }
@@ -68,6 +72,7 @@ async fn start(configure: impl FnOnce(AppRuntime) -> AppRuntime) -> Server {
     app.get("/", hello);
     app.get("/slow", slow);
     app.get("/big", big);
+    app.get("/medium", medium);
     app.get("/events", events);
     let runtime = configure(app.build().unwrap());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -216,8 +221,10 @@ async fn a_streaming_response_is_not_idle_while_its_body_is_still_flowing() {
     let _ = server.shut_down().await;
 }
 
-#[tokio::test]
-async fn a_large_buffered_response_is_not_idle_while_the_client_reads_slowly() {
+/// Tiny flow-control windows (1 KiB): a buffered body larger than that cannot
+/// be sent while the client sleeps, and the connection must not look idle
+/// meanwhile, however small the body is compared with the default window.
+async fn slow_client_still_gets(path: &str, length: usize) {
     let mut server = start(|runtime| {
         runtime
             .h2c(true)
@@ -225,8 +232,6 @@ async fn a_large_buffered_response_is_not_idle_while_the_client_reads_slowly() {
     })
     .await;
     let tcp = TcpStream::connect(server.addr).await.unwrap();
-    // Tiny flow-control windows: the 8 MiB body cannot be buffered by the
-    // client, so most of it is still on the server while the client sleeps.
     let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
         .initial_stream_window_size(1024)
         .initial_connection_window_size(1024)
@@ -237,12 +242,12 @@ async fn a_large_buffered_response_is_not_idle_while_the_client_reads_slowly() {
         let _ = connection.await;
     });
     let request = http::Request::builder()
-        .uri("http://localhost/big")
+        .uri(format!("http://localhost{path}"))
         .body(Full::new(Bytes::new()))
         .unwrap();
     let response = sender.send_request(request).await.unwrap();
-    // The flow-control window (64 KiB) fills, then the client stops reading for
-    // longer than the idle timeout plus the shutdown grace.
+    // The window fills, then the client stops reading for longer than the idle
+    // timeout plus the shutdown grace.
     tokio::time::sleep(Duration::from_millis(3500)).await;
     let body = response
         .into_body()
@@ -250,6 +255,47 @@ async fn a_large_buffered_response_is_not_idle_while_the_client_reads_slowly() {
         .await
         .expect("the response was cut while the client was slow")
         .to_bytes();
-    assert_eq!(body.len(), 8 * 1024 * 1024);
+    assert_eq!(body.len(), length);
+    let _ = server.shut_down().await;
+}
+
+#[tokio::test]
+async fn a_large_buffered_response_is_not_idle_while_the_client_reads_slowly() {
+    slow_client_still_gets("/big", 8 * 1024 * 1024).await;
+}
+
+/// A client that reads slowly but steadily (a frame every 300 ms, 1 KiB
+/// windows, so the 16 KiB body takes ~5 s) is making progress, not idle: its
+/// window updates are socket activity, even though the handler returned long ago.
+#[tokio::test]
+async fn a_slow_but_steady_reader_of_a_small_body_is_never_idle() {
+    let mut server = start(|runtime| {
+        runtime
+            .h2c(true)
+            .header_read_timeout(Some(Duration::from_millis(200)))
+    })
+    .await;
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .initial_stream_window_size(1024)
+        .initial_connection_window_size(1024)
+        .handshake(TokioIo::new(tcp))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = http::Request::builder()
+        .uri("http://localhost/medium")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let mut body = sender.send_request(request).await.unwrap().into_body();
+    let mut received = 0;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.expect("the response was cut while the client was still reading");
+        received += frame.data_ref().map_or(0, Bytes::len);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert_eq!(received, 16 * 1024);
     let _ = server.shut_down().await;
 }

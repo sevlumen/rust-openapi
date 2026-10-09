@@ -858,9 +858,12 @@ where
                         }
                     },
                 };
-                let io = hyper_util::rt::TokioIo::new(Rewind {
-                    prefix: Bytes::from(seen),
-                    inner: stream,
+                let io = hyper_util::rt::TokioIo::new(Tracked {
+                    inner: Rewind {
+                        prefix: Bytes::from(seen),
+                        inner: stream,
+                    },
+                    activity: activity.clone(),
                 });
                 let outcome = if is_h2 {
                     let builder = http2_builder(max_streams);
@@ -916,7 +919,10 @@ where
 #[cfg_attr(not(feature = "http2"), allow(dead_code))]
 pub(crate) struct Activity {
     in_flight: std::sync::atomic::AtomicUsize,
-    idle_since: std::sync::Mutex<std::time::Instant>,
+    /// When the connection was created; `last_ms` counts from here.
+    base: std::time::Instant,
+    /// Milliseconds since `base` of the last request end or socket I/O.
+    last_ms: std::sync::atomic::AtomicU64,
 }
 
 #[cfg_attr(not(feature = "http2"), allow(dead_code))]
@@ -924,18 +930,105 @@ impl Activity {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             in_flight: std::sync::atomic::AtomicUsize::new(0),
-            idle_since: std::sync::Mutex::new(std::time::Instant::now()),
+            base: std::time::Instant::now(),
+            last_ms: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
-    /// How long no request has been in flight, or `None` while one is.
+    fn now_ms(&self) -> u64 {
+        self.base.elapsed().as_millis() as u64
+    }
+
+    /// Records progress: a request ended, or bytes moved on the socket. A
+    /// client that reads a response slowly but steadily keeps sending
+    /// window updates, so it never looks idle.
+    pub(crate) fn touch(&self) {
+        self.last_ms
+            .fetch_max(self.now_ms(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// How long nothing has happened with no request in flight, or `None`
+    /// while one is.
     fn idle_for(&self) -> Option<Duration> {
         (self.in_flight.load(std::sync::atomic::Ordering::Acquire) == 0).then(|| {
-            self.idle_since
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .elapsed()
+            let last = self.last_ms.load(std::sync::atomic::Ordering::Relaxed);
+            Duration::from_millis(self.now_ms().saturating_sub(last))
         })
+    }
+}
+
+/// An I/O object that reports every byte moved to an [`Activity`].
+#[cfg_attr(not(any(feature = "http2", feature = "tls")), allow(dead_code))]
+pub(crate) struct Tracked<T> {
+    pub(crate) inner: T,
+    pub(crate) activity: Option<Arc<Activity>>,
+}
+
+#[cfg_attr(not(any(feature = "http2", feature = "tls")), allow(dead_code))]
+impl<T> Tracked<T> {
+    fn touch(&self) {
+        if let Some(activity) = &self.activity {
+            activity.touch();
+        }
+    }
+}
+
+impl<T: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Tracked<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buffer.filled().len();
+        let result = Pin::new(&mut self.inner).poll_read(context, buffer);
+        if matches!(result, Poll::Ready(Ok(()))) && buffer.filled().len() > before {
+            self.touch();
+        }
+        result
+    }
+}
+
+impl<T: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Tracked<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let result = Pin::new(&mut self.inner).poll_write(context, data);
+        if matches!(result, Poll::Ready(Ok(written)) if written > 0) {
+            self.touch();
+        }
+        result
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffers: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        let result = Pin::new(&mut self.inner).poll_write_vectored(context, buffers);
+        if matches!(result, Poll::Ready(Ok(written)) if written > 0) {
+            self.touch();
+        }
+        result
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(context)
     }
 }
 
@@ -1030,11 +1123,7 @@ impl Drop for ActivityGuard {
             .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
             == 1
         {
-            *self
-                .0
-                .idle_since
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = std::time::Instant::now();
+            self.0.touch();
         }
     }
 }
@@ -1098,7 +1187,11 @@ where
             _ = ticker.tick() => {
                 let idle_for = activity.idle_for();
                 match (closing, idle_for) {
-                    (Some(since), Some(_)) if since.elapsed() >= H2_SHUTDOWN_GRACE => {
+                    // Closing, and nothing has moved on the socket for the
+                    // whole grace period: the peer is gone (or stalled).
+                    (Some(since), Some(idle_for))
+                        if since.elapsed() >= H2_SHUTDOWN_GRACE && idle_for >= H2_SHUTDOWN_GRACE =>
+                    {
                         return Ok(());
                     }
                     (None, Some(idle_for)) if idle.is_some_and(|limit| idle_for >= limit) => {

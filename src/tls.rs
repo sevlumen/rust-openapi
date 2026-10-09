@@ -4,8 +4,8 @@ use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use tokio_rustls::{TlsAcceptor, rustls};
 
 use crate::runtime::{
-    Accepted, Activity, ActivityGuard, accept_next, connection_limit, drive, http1_builder,
-    report_connection_error,
+    Accepted, Activity, ActivityGuard, Tracked, accept_next, connection_limit, drive,
+    http1_builder, report_connection_error,
 };
 #[cfg(feature = "http2")]
 use crate::runtime::{drive_h2, http2_builder};
@@ -237,11 +237,14 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
                 // The ALPN result picks the protocol; anything but `h2` is HTTP/1.1.
                 #[cfg(feature = "http2")]
                 let negotiated_h2 = tls_stream.get_ref().1.alpn_protocol() == Some(b"h2");
-                let io = hyper_util::rt::TokioIo::new(tls_stream);
                 #[cfg(feature = "http2")]
                 let activity = negotiated_h2.then(Activity::new);
                 #[cfg(not(feature = "http2"))]
                 let activity: Option<Arc<Activity>> = None;
+                let io = hyper_util::rt::TokioIo::new(Tracked {
+                    inner: tls_stream,
+                    activity: activity.clone(),
+                });
                 let service = {
                     let activity = activity.clone();
                     hyper::service::service_fn(move |request: Request<Incoming>| {

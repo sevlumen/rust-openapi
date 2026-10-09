@@ -52,6 +52,12 @@ struct GuardedBody {
 
 /// Finds a delimiter (CRLF, two dashes and the boundary) in a stream of chunks,
 /// including one that straddles two or more of them.
+///
+/// It matches the delimiter prefix only, on purpose: `multer` also takes
+/// `\r\n--boundary` for a delimiter whatever follows it (and rejects the part
+/// if what follows is not valid), so a lookalike inside the data can never be
+/// accepted as data by the parser. Stricter matching here would disagree with
+/// the parser instead of agreeing with it.
 struct DelimiterScan {
     delimiter: Vec<u8>,
     /// The last `delimiter.len() - 1` bytes seen.

@@ -5,6 +5,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-09
+
+### Fixed
+- HTTP/2: a client that reads a small buffered response slowly but steadily
+  (tiny flow-control windows) was cut off once the idle timeout passed, because
+  only the handler counted as activity and hyper hands a buffered body to the
+  HTTP/2 layer at once. Bytes moved on the socket (including the client's
+  window updates) now count as activity, and the shutdown grace is measured
+  from the last activity instead of from the moment the connection began to
+  close. A client that stops reading entirely for longer than
+  `header_read_timeout` plus the 2 s grace is still dropped. Found by review of
+  0.9.0.
+
 ## [0.9.0] - 2026-10-09
 
 ### Changed
