@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-10-09
+
 ### Fixed
 - HTTP/2 (h2c and TLS): a streaming response (`Sse`, a large `ServeDir` file)
   counted as idle as soon as its handler returned, so after
