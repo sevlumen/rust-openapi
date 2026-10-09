@@ -19,6 +19,7 @@ const DEFAULT_MAX_MESSAGE: usize = 1024 * 1024;
 
 /// A WebSocket message.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Message {
     Text(String),
     Binary(Bytes),

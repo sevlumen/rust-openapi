@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the same gates as CI inside Docker (pinned to the CI toolchain).
+# Run the local gates inside Docker (pinned toolchain). There is no hosted CI.
 # Usage: scripts/verify-docker.sh   (from the repo root, before committing)
 set -euo pipefail
 

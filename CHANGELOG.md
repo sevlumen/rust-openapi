@@ -5,6 +5,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-09
+
+### Changed
+- **Breaking:** `Message` (WebSocket) is `#[non_exhaustive]`: a `match` on it
+  needs a wildcard arm. Constructing variants is unchanged. Every other public
+  enum already was non-exhaustive.
+- `Compress` decides from the length alone, so `HEAD` and `GET` always agree
+  (before, `GET` dropped the encoding when the compressed bytes were not
+  smaller while `HEAD` could not know). A body of at least 32 bytes (and
+  `min_size`) that does not shrink is therefore sent gzip/brotli-encoded a few
+  bytes larger. This removes the last known `HEAD`/`GET` difference.
+- The repository no longer has hosted CI (`.github/` is gone). The gates are
+  the local commands in `CLAUDE.md` / `CONTRIBUTING.md`, including the Miri run
+  and the package-contents check.
+
+### Added
+- `tests/soak.rs`, an opt-in (`--ignored`) mixed-load soak: HTTP/1.1 churn,
+  persistent h2c, SSE and WebSocket sessions against a small
+  `max_connections`, asserting every answer, every returned slot and a prompt
+  shutdown. `OAS_SOAK_SECS` sets the duration.
+
 ## [0.8.6] - 2026-10-09
 
 ### Added

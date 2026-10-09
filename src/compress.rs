@@ -46,12 +46,11 @@ impl Compress {
     }
 
     /// Bodies smaller than this are sent as they are. Whatever is set here,
-    /// bodies under 32 bytes are never compressed (a gzip stream has more
-    /// overhead than that, so they cannot shrink); this keeps `HEAD`, whose
-    /// body is gone before this layer runs and which therefore decides from
-    /// the length alone, in agreement with `GET`. A larger body that does not
-    /// shrink (already-compressed or random-looking text) is still sent as
-    /// it is by `GET`, and a `HEAD` for it announces the encoding anyway.
+    /// bodies under 32 bytes are never compressed. The choice depends on the
+    /// length alone, never on how well the bytes compress, so a `HEAD` (whose
+    /// body is gone before this layer runs) always agrees with the `GET` it
+    /// stands for; the price is that a body that does not shrink (random-looking
+    /// text) is sent a few bytes larger.
     pub fn min_size(mut self, bytes: usize) -> Self {
         self.min_size = bytes;
         self
@@ -190,7 +189,7 @@ fn brotli_compress(bytes: &[u8], quality: u32) -> Vec<u8> {
     writer.into_inner()
 }
 
-/// Below this a gzip stream is never smaller than its input.
+/// Below this a gzip stream is practically never smaller than its input.
 const MIN_COMPRESSIBLE: usize = 32;
 
 fn gzip(bytes: &[u8], level: u32) -> Vec<u8> {
@@ -309,7 +308,7 @@ impl Middleware for Compress {
             } else {
                 compress(&original)
             };
-            if compressed.is_empty() || compressed.len() >= original.len() {
+            if compressed.is_empty() {
                 return response;
             }
             let length = compressed.len();

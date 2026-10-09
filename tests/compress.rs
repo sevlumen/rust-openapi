@@ -12,6 +12,11 @@ async fn big() -> String {
     big_text()
 }
 
+/// 40 high-entropy characters: gzip cannot make this smaller.
+async fn noisy() -> &'static str {
+    "q8Zr3KxP0vLmT7wYbN2cJdH5sGfA9eUi4oXkR1tV"
+}
+
 async fn small() -> &'static str {
     "tiny"
 }
@@ -27,6 +32,7 @@ fn runtime(compress: Compress) -> AppRuntime {
     app.get("/big", big);
     app.get("/json", big_json);
     app.get("/small", small);
+    app.get("/noisy", noisy);
     app.get("/none", nothing);
     app.layer(compress);
     app.layer(|request: Request<RequestBody>, next: Next| async move {
@@ -192,7 +198,7 @@ async fn min_size_and_level_are_configurable() {
     let response = get(&runtime, "/big", Some("gzip")).await;
     assert_eq!(response.header("content-encoding"), Some("gzip"));
     assert_eq!(gunzip(&response.body_bytes().await), big_text());
-    // Never larger than the original: a tiny body stays as it is.
+    // Under the 32-byte floor a body stays as it is.
     let tiny = get(&runtime, "/small", Some("gzip")).await;
     assert!(tiny.header("content-encoding").is_none());
     assert_eq!(tiny.body_string().await, "tiny");
@@ -264,5 +270,25 @@ async fn head_and_get_agree_for_a_body_too_small_to_shrink() {
     assert_eq!(
         head.header("content-encoding"),
         get_response.header("content-encoding")
+    );
+}
+
+#[tokio::test]
+async fn head_and_get_agree_even_when_the_body_does_not_shrink() {
+    let runtime = runtime(Compress::new().min_size(1));
+    let get_response = get(&runtime, "/noisy", Some("gzip")).await;
+    let head = runtime
+        .oneshot(Method::HEAD, "/noisy", &[("accept-encoding", "gzip")], None)
+        .await;
+    // Whatever GET decides, HEAD decides the same: the choice depends on the
+    // length alone, never on how well the bytes happen to compress.
+    assert_eq!(
+        head.header("content-encoding"),
+        get_response.header("content-encoding")
+    );
+    assert_eq!(get_response.header("content-encoding"), Some("gzip"));
+    assert_eq!(
+        gunzip(&get_response.body_bytes().await),
+        "q8Zr3KxP0vLmT7wYbN2cJdH5sGfA9eUi4oXkR1tV"
     );
 }

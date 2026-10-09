@@ -4,8 +4,8 @@ Thanks for helping. Bug reports, docs fixes and focused pull requests are welcom
 
 ## Before you open a pull request
 
-Run the same gates as CI. Docker is the easiest way to match the pinned
-toolchain (Rust 1.88):
+There is no hosted CI, so the local gates are the check. Docker is the
+easiest way to match the pinned toolchain (Rust 1.88):
 
 ```bash
 bash scripts/verify-docker.sh
@@ -32,10 +32,10 @@ It removes `target/` and those two volumes (everything is rebuilt on demand).
 - Keep changes focused; add a test for every behavior change.
 - While the crate is `0.x`, a breaking change to the public API or to HTTP
   semantics needs a minor version bump and a `### Changed` entry in the
-  changelog; open an issue first. CI runs `cargo semver-checks` on pull
-  requests against the latest published release.
+  changelog; open an issue first. Run `cargo semver-checks` against the
+  latest published release when you can.
 - Every `unsafe` block needs a `// SAFETY:` comment, and changes to
-  `src/handler.rs` must keep the Miri job green.
+  `src/handler.rs` must keep `cargo +nightly miri test --lib inline_future` green.
 - Performance-sensitive changes should include `cargo bench --bench router`
   numbers before and after.
 - Update `CHANGELOG.md` for user-visible changes. The support policy (versions,

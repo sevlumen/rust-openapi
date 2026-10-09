@@ -660,9 +660,12 @@ Enable the `compression` feature and register `Compress::new()`: buffered
 text, JSON, XML, JavaScript and SVG responses of at least 1 KiB are gzipped
 for clients whose `Accept-Encoding` allows it (`min_size` and `level` are
 configurable), with `Content-Encoding`, a corrected `Content-Length` and a weak
-`ETag`. Streaming responses, `HEAD`, bodiless statuses, already-encoded
-responses and other media types pass through, and any response that could
-have been compressed carries `Vary: Accept-Encoding`. Gzip is built in; the
+`ETag`. The choice depends on the length alone (never below 32 bytes), so a
+`HEAD` gets the same `Content-Encoding` and weak `ETag` as its `GET` (without a
+length); a body that does not shrink is still encoded, a few bytes larger.
+Streaming responses, bodiless statuses, already-encoded responses and other
+media types pass through, and any response that could have been compressed
+carries `Vary: Accept-Encoding`. Gzip is built in; the
 `compression-brotli` feature (pure-Rust `brotli`) adds `br`, chosen when the
 client's quality for it is at least gzip's (`Compress::brotli_quality`, default
 4). There is no zstd. Do not use compression on endpoints that mix secrets with
@@ -744,7 +747,7 @@ app.get("/export", export).route_layer(audit);  // this route's path and method
 
 ```toml
 [dependencies]
-oas-rs = "0.8"
+oas-rs = "0.9"
 ```
 
 Enable optional features as needed: `swagger` (Swagger UI), `uuid` (UUID
@@ -757,8 +760,8 @@ The minimum supported Rust version is 1.88.
 - **Versioning.** Semantic versioning. While the crate is `0.x`, a breaking
   change to the public API or to documented HTTP/OpenAPI behaviour is a minor
   bump and is listed under `### Changed` in the changelog; patch releases only
-  fix bugs. From `1.0` breaking changes need a major version. CI checks the
-  public API against the latest release with `cargo semver-checks`.
+  fix bugs. From `1.0` breaking changes need a major version. Releases are
+  checked against the previous one with `cargo semver-checks`.
 - **What is public API.** Everything re-exported from the crate root, plus the
   `Cargo` features documented here. `#[doc(hidden)]` items (for example
   `__private`, used by the derive) are not. The shape of the generated
@@ -806,11 +809,12 @@ cargo test --doc --workspace
 cargo build --workspace --examples --features 'uuid swagger tls http2'
 ```
 
-The Miri inline-future safety job is a permanent CI gate.
+The Miri inline-future safety run (`cargo +nightly miri test --lib
+inline_future`) is a permanent gate before every release.
 
 Documentation is built with `RUSTDOCFLAGS="-D warnings" cargo doc --workspace
 --no-deps --all-features`. Run `bash scripts/verify-docker.sh` to execute all of
-the above in Docker with the CI toolchain (Rust 1.88, the minimum supported
+the above in Docker with the pinned toolchain (Rust 1.88, the minimum supported
 version) before committing.
 
 ## Roadmap
