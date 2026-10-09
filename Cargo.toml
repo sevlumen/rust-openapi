@@ -1,6 +1,6 @@
 [package]
 name = "oas-rs"
-version = "0.9.1"
+version = "0.9.2"
 edition = "2024"
 description = "A small, typed OpenAPI-first HTTP framework on Hyper and Tokio"
 license = "MIT"
@@ -47,7 +47,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_urlencoded = "0.7"
 tokio = { version = "1.45", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
-oas-rs-macros = { version = "=0.9.1", path = "oas-rs-macros" }
+oas-rs-macros = { version = "=0.9.2", path = "oas-rs-macros" }
 uuid = { version = "1.17", optional = true, features = ["serde", "v4"] }
 multer = { version = "3", optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }

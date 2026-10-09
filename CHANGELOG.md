@@ -5,6 +5,30 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-09
+
+### Fixed
+- HTTP/2: 0.9.1 counted every byte read from the socket as activity, so a
+  peer that connected and only sent `PING` frames kept its connection, and one
+  `max_connections` slot, forever. Reads no longer count, and neither do small
+  writes (a PING ack is 17 bytes): only a socket write of at least 64 bytes
+  (response headers or data, which the server sends only for a request and,
+  for DATA, only when the client's flow-control window opens) is progress. A
+  client reading a response slowly but steadily is still never idle.
+- A request's end is stamped before it stops counting as in flight, so the
+  idle watchdog can no longer see "nothing in flight" together with a stale
+  timestamp and start a GOAWAY right after a long request finished.
+
+### Added
+- Tests: a PING-only peer frees its slot; a connection is reusable after a slow
+  steady read; the slow-steady reader over TLS/ALPN.
+
+### Known limitation
+- A client that stops reading a streaming or very large response (while
+  answering PINGs) holds its connection until it closes: there is no send
+  timeout for those responses. Bound it with `max_connections` and a
+  reverse proxy's send timeout.
+
 ## [0.9.1] - 2026-10-09
 
 ### Fixed

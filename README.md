@@ -98,11 +98,14 @@ let runtime = app
   60 s) or the proxy may reuse a connection just closed and answer 502. It
   applies to HTTP/1.1, plain or over TLS; reading a request body is bounded by
   `body_read_timeout` below. For HTTP/2 it is the idle timeout instead: a
-  connection with no request in flight and no bytes moved on the socket for
-  that long is closed. A streaming (or large buffered) response counts as in
-  flight until it ends, and a client that reads a response slowly but steadily
-  is making progress; one that stops reading altogether for longer than this
-  (plus a 2 s grace) is dropped, like nginx's `send_timeout`.
+  connection with no request in flight and no response data written for that
+  long is closed. A streaming (or large buffered) response counts as in flight
+  until it ends, and a client that reads a response slowly but steadily is
+  making progress; one that stops reading altogether for longer than this
+  (plus a 2 s grace) is dropped, like nginx's `send_timeout`. Control frames
+  (a peer that only sends `PING`s) do not count as activity. A client that
+  stops reading a *streaming or very large* response is not cut off (there is
+  no send timeout for those), so size `max_connections` with that in mind.
 - `body_read_timeout` (default 60 s, `None` disables) bounds how long a
   *buffered* request body (`Json`, `Form`, `Multipart`) may take to arrive in
   full; a body still incomplete then gets `408` and the connection is closed,

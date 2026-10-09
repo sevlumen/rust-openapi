@@ -299,3 +299,85 @@ async fn a_slow_but_steady_reader_of_a_small_body_is_never_idle() {
     assert_eq!(received, 16 * 1024);
     let _ = server.shut_down().await;
 }
+
+/// A PING frame (length 8, type 6, stream 0) with a fixed payload.
+const PING: &[u8] = &[0, 0, 8, 6, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8];
+
+#[tokio::test]
+async fn a_peer_that_only_sends_pings_does_not_keep_its_slot() {
+    let mut server = start(|runtime| {
+        runtime
+            .h2c(true)
+            .max_connections(Some(1))
+            .header_read_timeout(Some(Duration::from_millis(300)))
+    })
+    .await;
+    let mut pinger = h2_peer(server.addr, true).await;
+    // Ping far more often than the idle timeout, for much longer than it and
+    // the shutdown grace together: no request is ever sent.
+    let keep_pinging = tokio::spawn(async move {
+        for _ in 0..60 {
+            if pinger.write_all(PING).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let _ = pinger.shutdown().await;
+    });
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    let mut second = TcpStream::connect(server.addr).await.unwrap();
+    second
+        .write_all(b"GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut out = String::new();
+    tokio::time::timeout(Duration::from_secs(3), second.read_to_string(&mut out))
+        .await
+        .expect("a PING-only peer kept the only connection slot")
+        .unwrap();
+    assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+    keep_pinging.abort();
+    let _ = server.shut_down().await;
+}
+
+/// With an idle timeout longer than the reader's pace the connection never
+/// starts closing, so it is still good for the next request afterwards (the
+/// handler returned ~5 s earlier, far beyond the 1 s idle timeout).
+#[tokio::test]
+async fn a_connection_is_reusable_after_a_slow_steady_read() {
+    let mut server = start(|runtime| {
+        runtime
+            .h2c(true)
+            .header_read_timeout(Some(Duration::from_secs(1)))
+    })
+    .await;
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .initial_stream_window_size(1024)
+        .initial_connection_window_size(1024)
+        .handshake(TokioIo::new(tcp))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = http::Request::builder()
+        .uri("http://localhost/medium")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let mut body = sender.send_request(request).await.unwrap().into_body();
+    let mut received = 0;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.expect("the response was cut while the client was still reading");
+        received += frame.data_ref().map_or(0, Bytes::len);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert_eq!(received, 16 * 1024);
+    let again = http::Request::builder()
+        .uri("http://localhost/")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = sender.send_request(again).await.unwrap();
+    assert_eq!(response.status(), 200);
+    let _ = server.shut_down().await;
+}

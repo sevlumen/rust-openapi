@@ -939,9 +939,8 @@ impl Activity {
         self.base.elapsed().as_millis() as u64
     }
 
-    /// Records progress: a request ended, or bytes moved on the socket. A
-    /// client that reads a response slowly but steadily keeps sending
-    /// window updates, so it never looks idle.
+    /// Records progress: a request ended, or response data moved out on the
+    /// socket (see [`Tracked`]).
     pub(crate) fn touch(&self) {
         self.last_ms
             .fetch_max(self.now_ms(), std::sync::atomic::Ordering::Relaxed);
@@ -957,7 +956,17 @@ impl Activity {
     }
 }
 
-/// An I/O object that reports every byte moved to an [`Activity`].
+/// Writes smaller than this are protocol chatter (PING acks are 17 bytes,
+/// SETTINGS acks 9, GOAWAY 17), not response data.
+const PROGRESS_WRITE: usize = 64;
+
+/// An I/O object that reports response progress to an [`Activity`]: a socket
+/// write of at least [`PROGRESS_WRITE`] bytes. The server writes that much only
+/// for a request (headers, data), and DATA only goes out when the client's
+/// flow-control window opens, so a client that reads a response slowly but
+/// steadily keeps the connection alive. Reads never count, and neither do
+/// small writes: a peer that only sends PINGs (or other control frames) gets
+/// nothing but tiny acknowledgements back and still looks idle.
 #[cfg_attr(not(any(feature = "http2", feature = "tls")), allow(dead_code))]
 pub(crate) struct Tracked<T> {
     pub(crate) inner: T,
@@ -979,12 +988,7 @@ impl<T: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Tracked<T> {
         context: &mut Context<'_>,
         buffer: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        let before = buffer.filled().len();
-        let result = Pin::new(&mut self.inner).poll_read(context, buffer);
-        if matches!(result, Poll::Ready(Ok(()))) && buffer.filled().len() > before {
-            self.touch();
-        }
-        result
+        Pin::new(&mut self.inner).poll_read(context, buffer)
     }
 }
 
@@ -995,7 +999,7 @@ impl<T: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Tracked<T> {
         data: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         let result = Pin::new(&mut self.inner).poll_write(context, data);
-        if matches!(result, Poll::Ready(Ok(written)) if written > 0) {
+        if matches!(result, Poll::Ready(Ok(written)) if written >= PROGRESS_WRITE) {
             self.touch();
         }
         result
@@ -1007,7 +1011,7 @@ impl<T: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Tracked<T> {
         buffers: &[std::io::IoSlice<'_>],
     ) -> Poll<std::io::Result<usize>> {
         let result = Pin::new(&mut self.inner).poll_write_vectored(context, buffers);
-        if matches!(result, Poll::Ready(Ok(written)) if written > 0) {
+        if matches!(result, Poll::Ready(Ok(written)) if written >= PROGRESS_WRITE) {
             self.touch();
         }
         result
@@ -1117,14 +1121,12 @@ impl futures_core::Stream for Guarded {
 
 impl Drop for ActivityGuard {
     fn drop(&mut self) {
-        if self
-            .0
+        // Stamp before decrementing: a watchdog that sees nothing in flight
+        // must also see this request's end, never an older timestamp.
+        self.0.touch();
+        self.0
             .in_flight
-            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
-            == 1
-        {
-            self.0.touch();
-        }
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
