@@ -182,6 +182,8 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         let handshake_timeout = self.handshake_timeout;
         let nodelay = self.tcp_nodelay;
         let header_read_timeout = self.header_read_timeout;
+        #[cfg(feature = "http2")]
+        let send_timeout = self.send_timeout;
         let limit = connection_limit(self.max_connections);
         let connect_info = self.connect_info;
         let observer = self.connection_error_observer;
@@ -241,10 +243,7 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
                 let activity = negotiated_h2.then(Activity::new);
                 #[cfg(not(feature = "http2"))]
                 let activity: Option<Arc<Activity>> = None;
-                let io = hyper_util::rt::TokioIo::new(Tracked {
-                    inner: tls_stream,
-                    activity: activity.clone(),
-                });
+                let io = hyper_util::rt::TokioIo::new(Tracked::new(tls_stream, activity.clone()));
                 let service = {
                     let activity = activity.clone();
                     hyper::service::service_fn(move |request: Request<Incoming>| {
@@ -265,6 +264,7 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
                         &mut stop,
                         &activity,
                         header_read_timeout,
+                        send_timeout,
                         |conn| conn.graceful_shutdown(),
                     )
                     .await;

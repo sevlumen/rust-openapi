@@ -21,6 +21,10 @@ async fn hello() -> &'static str {
     "hello"
 }
 
+async fn tiny() -> String {
+    "y".repeat(256)
+}
+
 async fn medium() -> String {
     "x".repeat(16 * 1024)
 }
@@ -61,6 +65,16 @@ async fn events() -> Sse<Events> {
     Sse::new(Events(rx))
 }
 
+/// One event after 1.5 s of silence: a quiet stream, not a stalled reader.
+async fn quiet_events() -> Sse<Events> {
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let _ = tx.send(Event::data("late")).await;
+    });
+    Sse::new(Events(rx))
+}
+
 struct Server {
     addr: std::net::SocketAddr,
     stop: Option<oneshot::Sender<()>>,
@@ -73,7 +87,9 @@ async fn start(configure: impl FnOnce(AppRuntime) -> AppRuntime) -> Server {
     app.get("/slow", slow);
     app.get("/big", big);
     app.get("/medium", medium);
+    app.get("/tiny", tiny);
     app.get("/events", events);
+    app.get("/quiet", quiet_events);
     let runtime = configure(app.build().unwrap());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -379,5 +395,176 @@ async fn a_connection_is_reusable_after_a_slow_steady_read() {
         .unwrap();
     let response = sender.send_request(again).await.unwrap();
     assert_eq!(response.status(), 200);
+    let _ = server.shut_down().await;
+}
+
+/// A client that never reads a large response but keeps answering PINGs must
+/// not hold its connection slot for ever: `send_timeout` frees it.
+#[tokio::test]
+async fn a_client_that_stops_reading_a_big_response_loses_its_slot() {
+    let mut server = start(|runtime| {
+        runtime
+            .h2c(true)
+            .max_connections(Some(1))
+            .header_read_timeout(Some(Duration::from_millis(200)))
+            .send_timeout(Some(Duration::from_millis(500)))
+    })
+    .await;
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .timer(hyper_util::rt::TokioTimer::new())
+        .keep_alive_interval(Duration::from_millis(100))
+        .keep_alive_timeout(Duration::from_secs(30))
+        .keep_alive_while_idle(true)
+        .initial_stream_window_size(1024)
+        .initial_connection_window_size(1024)
+        .handshake(TokioIo::new(tcp))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = http::Request::builder()
+        .uri("http://localhost/big")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    // Keep the response, never read it; the client still answers PINGs.
+    let _stalled = sender.send_request(request).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(3000)).await;
+    let mut second = TcpStream::connect(server.addr).await.unwrap();
+    second
+        .write_all(
+            b"GET / HTTP/1.1
+Host: t
+Connection: close
+
+",
+        )
+        .await
+        .unwrap();
+    let mut out = String::new();
+    tokio::time::timeout(Duration::from_secs(3), second.read_to_string(&mut out))
+        .await
+        .expect("a stalled reader kept the only connection slot")
+        .unwrap();
+    assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+    let _ = server.shut_down().await;
+}
+
+/// Even with 16-byte windows (25-byte DATA frames) a steady reader is never
+/// idle: progress is judged by HTTP/2 frame type, not by write size.
+#[tokio::test]
+async fn a_steady_reader_with_16_byte_windows_is_never_idle() {
+    let mut server = start(|runtime| {
+        runtime
+            .h2c(true)
+            .header_read_timeout(Some(Duration::from_millis(100)))
+    })
+    .await;
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .initial_stream_window_size(16)
+        .initial_connection_window_size(16)
+        .handshake(TokioIo::new(tcp))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = http::Request::builder()
+        .uri("http://localhost/tiny")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let mut body = sender.send_request(request).await.unwrap().into_body();
+    let mut received = 0;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.expect("the response was cut while the client was still reading");
+        received += frame.data_ref().map_or(0, Bytes::len);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(received, 256);
+    let _ = server.shut_down().await;
+}
+
+/// Several PINGs in one write are answered with several 17-byte acks that
+/// may leave in one socket write (over any size threshold): still no progress.
+#[tokio::test]
+async fn a_burst_of_pings_does_not_keep_a_slot_either() {
+    let mut server = start(|runtime| {
+        runtime
+            .h2c(true)
+            .max_connections(Some(1))
+            .header_read_timeout(Some(Duration::from_millis(300)))
+    })
+    .await;
+    let mut pinger = h2_peer(server.addr, true).await;
+    let burst: Vec<u8> = PING.repeat(8);
+    let keep_pinging = tokio::spawn(async move {
+        for _ in 0..60 {
+            if pinger.write_all(&burst).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let _ = pinger.shutdown().await;
+    });
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    let mut second = TcpStream::connect(server.addr).await.unwrap();
+    second
+        .write_all(
+            b"GET / HTTP/1.1
+Host: t
+Connection: close
+
+",
+        )
+        .await
+        .unwrap();
+    let mut out = String::new();
+    tokio::time::timeout(Duration::from_secs(3), second.read_to_string(&mut out))
+        .await
+        .expect("a PING-burst peer kept the only connection slot")
+        .unwrap();
+    assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+    keep_pinging.abort();
+    let _ = server.shut_down().await;
+}
+
+/// `send_timeout` (400 ms here) measures a body waiting for the client, not a
+/// stream with nothing to send: an SSE connection quiet for longer than that
+/// is left alone.
+#[tokio::test]
+async fn a_quiet_stream_is_not_a_stalled_reader() {
+    let mut server = start(|runtime| {
+        runtime
+            .h2c(true)
+            .header_read_timeout(Some(Duration::from_millis(200)))
+            .send_timeout(Some(Duration::from_millis(400)))
+    })
+    .await;
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    let (mut sender, connection) =
+        hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tcp))
+            .await
+            .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = http::Request::builder()
+        .uri("http://localhost/quiet")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("quiet stream was cut");
+    assert_eq!(
+        &body.to_bytes()[..],
+        b"data: late
+
+"
+    );
     let _ = server.shut_down().await;
 }

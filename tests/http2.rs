@@ -459,3 +459,43 @@ async fn a_slow_steady_reader_is_never_idle_over_tls() {
         let _ = stop.send(());
     }
 }
+
+async fn tiny() -> String {
+    "y".repeat(256)
+}
+
+/// 16-byte windows over TLS/ALPN: 25-byte DATA frames, still progress.
+#[tokio::test]
+async fn a_steady_reader_with_16_byte_windows_is_never_idle_over_tls() {
+    let mut app = App::new();
+    app.get("/tiny", tiny);
+    let mut server = start_with(app, true, |runtime| {
+        runtime.header_read_timeout(Some(Duration::from_millis(100)))
+    })
+    .await;
+    let tls = handshake(&server, &[b"h2"]).await.unwrap();
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .initial_stream_window_size(16)
+        .initial_connection_window_size(16)
+        .handshake(TokioIo::new(tls))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = http::Request::builder()
+        .uri("https://localhost/tiny")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let mut body = sender.send_request(request).await.unwrap().into_body();
+    let mut received = 0;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.expect("the response was cut while the client was still reading");
+        received += frame.data_ref().map_or(0, Bytes::len);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(received, 256);
+    if let Some(stop) = server.stop.take() {
+        let _ = stop.send(());
+    }
+}

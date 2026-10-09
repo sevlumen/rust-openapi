@@ -236,6 +236,7 @@ impl<S: Send + Sync + 'static> App<S> {
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             tcp_nodelay: true,
             header_read_timeout: Some(DEFAULT_HEADER_READ_TIMEOUT),
+            send_timeout: Some(DEFAULT_SEND_TIMEOUT),
             max_connections: None,
             connect_info: false,
             connection_error_observer: None,

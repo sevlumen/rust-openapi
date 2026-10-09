@@ -5,6 +5,30 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-10-09
+
+### Added
+- `AppRuntime::send_timeout` (default `DEFAULT_SEND_TIMEOUT`, 60 s; `None`
+  disables): an HTTP/2 client that stops reading a streaming or large buffered
+  response, while still answering `PING`s, no longer holds its connection (and
+  a `max_connections` slot) for ever. The clock runs only while a response body
+  is waiting for the client's flow-control window and no response data has been
+  sent for the whole limit, so a quiet SSE stream and a slow but steady reader
+  are never affected. HTTP/1.1 is not covered.
+
+### Fixed
+- HTTP/2 progress is judged by frame type instead of a 64-byte write threshold.
+  The server's output is scanned for `HEADERS` and `DATA` frames, however the
+  bytes are cut into socket writes. A steady reader with 16-byte flow-control
+  windows (25-byte DATA frames) was dropped as idle; and eight `PING` acks
+  leaving in one write (136 bytes) were counted as progress, so a PING-burst
+  peer still pinned a slot. Both now behave correctly. Found by review of
+  0.9.2.
+
+### Changed
+- The "known limitation" of 0.9.2 (a stalled reader of a streaming response
+  holds its connection) is closed for HTTP/2 by `send_timeout`.
+
 ## [0.9.2] - 2026-10-09
 
 ### Fixed

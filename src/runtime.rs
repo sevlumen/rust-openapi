@@ -6,6 +6,7 @@ pub struct AppRuntime<S = ()> {
     pub(crate) shutdown_timeout: Duration,
     pub(crate) tcp_nodelay: bool,
     pub(crate) header_read_timeout: Option<Duration>,
+    pub(crate) send_timeout: Option<Duration>,
     pub(crate) max_connections: Option<usize>,
     pub(crate) connect_info: bool,
     pub(crate) connection_error_observer: Option<ErrorObserver>,
@@ -97,6 +98,9 @@ pub(crate) struct ConnectionRuntime<S> {
 #[derive(Clone)]
 #[allow(dead_code)] // held only to keep the slot alive
 pub(crate) struct ConnectionPermit(pub(crate) Arc<ConnectionSlot>);
+
+/// The default for [`AppRuntime::send_timeout`].
+pub const DEFAULT_SEND_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The remote address of the connection a request arrived on, stored in the
 /// request extensions when [`AppRuntime::connect_info`] is on.
@@ -365,6 +369,20 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
     /// just closed and report a 502.
     pub fn header_read_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.header_read_timeout = timeout;
+        self
+    }
+
+    /// How long an HTTP/2 client may leave a *streaming or large buffered*
+    /// response unread before the connection is dropped (default
+    /// [`DEFAULT_SEND_TIMEOUT`], 60 s); `None` disables the limit. The clock
+    /// runs only while a response body is blocked waiting for the client's
+    /// flow-control window and no response data has left the server for that
+    /// long, so a quiet stream (an SSE connection between events) and a slow but
+    /// steady reader are never affected, while a client that stops reading (and
+    /// only answers `PING`s) can no longer hold a connection slot forever.
+    /// HTTP/1.1 connections are not covered.
+    pub fn send_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.send_timeout = timeout;
         self
     }
 
@@ -785,6 +803,8 @@ where
     let shutdown_timeout = runtime.shutdown_timeout;
     let nodelay = runtime.tcp_nodelay;
     let header_read_timeout = runtime.header_read_timeout;
+    #[cfg(feature = "http2")]
+    let send_timeout = runtime.send_timeout;
     let limit = connection_limit(runtime.max_connections);
     let connect_info = runtime.connect_info;
     let observer = runtime.connection_error_observer;
@@ -858,13 +878,14 @@ where
                         }
                     },
                 };
-                let io = hyper_util::rt::TokioIo::new(Tracked {
-                    inner: Rewind {
+                let io = hyper_util::rt::TokioIo::new(Tracked::new(
+                    Rewind {
                         prefix: Bytes::from(seen),
                         inner: stream,
                     },
-                    activity: activity.clone(),
-                });
+                    // Only HTTP/2 connections are watched (and scanned).
+                    activity.clone().filter(|_| is_h2),
+                ));
                 let outcome = if is_h2 {
                     let builder = http2_builder(max_streams);
                     let activity = activity.unwrap_or_else(Activity::new);
@@ -873,6 +894,7 @@ where
                         &mut stop,
                         &activity,
                         header_read_timeout,
+                        send_timeout,
                         |connection| connection.graceful_shutdown(),
                     )
                     .await
@@ -921,8 +943,13 @@ pub(crate) struct Activity {
     in_flight: std::sync::atomic::AtomicUsize,
     /// When the connection was created; `last_ms` counts from here.
     base: std::time::Instant,
-    /// Milliseconds since `base` of the last request end or socket I/O.
+    /// Milliseconds since `base` of the last request end or response data
+    /// written.
     last_ms: std::sync::atomic::AtomicU64,
+    /// Response streams that handed a chunk to HTTP/2 and have not been asked
+    /// for the next one yet: HTTP/2 asks only when it has sent the chunk, so a
+    /// stream stays counted while the client's window is closed.
+    blocked: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg_attr(not(feature = "http2"), allow(dead_code))]
@@ -932,6 +959,7 @@ impl Activity {
             in_flight: std::sync::atomic::AtomicUsize::new(0),
             base: std::time::Instant::now(),
             last_ms: std::sync::atomic::AtomicU64::new(0),
+            blocked: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -946,6 +974,15 @@ impl Activity {
             .fetch_max(self.now_ms(), std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// How long no response data has left the server while at least one
+    /// response body is waiting for the client, or `None` when none is.
+    fn stalled_for(&self) -> Option<Duration> {
+        (self.blocked.load(std::sync::atomic::Ordering::Acquire) > 0).then(|| {
+            let last = self.last_ms.load(std::sync::atomic::Ordering::Relaxed);
+            Duration::from_millis(self.now_ms().saturating_sub(last))
+        })
+    }
+
     /// How long nothing has happened with no request in flight, or `None`
     /// while one is.
     fn idle_for(&self) -> Option<Duration> {
@@ -956,27 +993,84 @@ impl Activity {
     }
 }
 
-/// Writes smaller than this are protocol chatter (PING acks are 17 bytes,
-/// SETTINGS acks 9, GOAWAY 17), not response data.
-const PROGRESS_WRITE: usize = 64;
+/// Follows the HTTP/2 frames a connection writes, however the bytes are cut
+/// into socket writes, and reports whether any of them carried response data:
+/// a `HEADERS` or `CONTINUATION` frame, or a `DATA` frame with a payload. Every
+/// other frame (SETTINGS, PING acks, WINDOW_UPDATE, GOAWAY, RST_STREAM) is
+/// protocol chatter, however many of them leave in one write.
+#[derive(Default)]
+pub(crate) struct FrameScanner {
+    header: [u8; 9],
+    filled: usize,
+    payload_left: u32,
+    /// The frame being skipped is `DATA`, `HEADERS` or `CONTINUATION`.
+    carries_response: bool,
+}
 
-/// An I/O object that reports response progress to an [`Activity`]: a socket
-/// write of at least [`PROGRESS_WRITE`] bytes. The server writes that much only
-/// for a request (headers, data), and DATA only goes out when the client's
+#[cfg_attr(not(any(feature = "http2", feature = "tls")), allow(dead_code))]
+impl FrameScanner {
+    /// Feeds the next bytes written; `true` if response data was among them.
+    pub(crate) fn feed(&mut self, mut data: &[u8]) -> bool {
+        let mut progress = false;
+        while !data.is_empty() {
+            if self.payload_left > 0 {
+                let take = (self.payload_left as usize).min(data.len());
+                if self.carries_response {
+                    progress = true;
+                }
+                self.payload_left -= take as u32;
+                data = &data[take..];
+                continue;
+            }
+            let take = (9 - self.filled).min(data.len());
+            self.header[self.filled..self.filled + take].copy_from_slice(&data[..take]);
+            self.filled += take;
+            data = &data[take..];
+            if self.filled == 9 {
+                self.filled = 0;
+                let [a, b, c, kind, ..] = self.header;
+                self.payload_left = u32::from_be_bytes([0, a, b, c]);
+                // DATA = 0, HEADERS = 1, CONTINUATION = 9.
+                self.carries_response = matches!(kind, 0 | 1 | 9);
+                if kind == 1 {
+                    // Headers are progress even when their payload is empty.
+                    progress = true;
+                }
+            }
+        }
+        progress
+    }
+}
+
+/// An I/O object that reports response progress to an [`Activity`]: a write
+/// that carries HTTP/2 response data (see [`FrameScanner`]). The server writes
+/// that only for a request, and `DATA` only goes out when the client's
 /// flow-control window opens, so a client that reads a response slowly but
-/// steadily keeps the connection alive. Reads never count, and neither do
-/// small writes: a peer that only sends PINGs (or other control frames) gets
-/// nothing but tiny acknowledgements back and still looks idle.
+/// steadily (even with 16-byte windows) keeps the connection alive. Reads never
+/// count, and neither do control frames: a peer that only sends PINGs, singly
+/// or in bursts, gets nothing but acknowledgements back and still looks idle.
 #[cfg_attr(not(any(feature = "http2", feature = "tls")), allow(dead_code))]
 pub(crate) struct Tracked<T> {
     pub(crate) inner: T,
     pub(crate) activity: Option<Arc<Activity>>,
+    scanner: FrameScanner,
 }
 
 #[cfg_attr(not(any(feature = "http2", feature = "tls")), allow(dead_code))]
 impl<T> Tracked<T> {
-    fn touch(&self) {
-        if let Some(activity) = &self.activity {
+    /// `activity` is `Some` only for HTTP/2 connections; others pass through.
+    pub(crate) fn new(inner: T, activity: Option<Arc<Activity>>) -> Self {
+        Self {
+            inner,
+            activity,
+            scanner: FrameScanner::default(),
+        }
+    }
+
+    fn observe(&mut self, written: &[u8]) {
+        if let Some(activity) = &self.activity
+            && self.scanner.feed(written)
+        {
             activity.touch();
         }
     }
@@ -999,8 +1093,8 @@ impl<T: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Tracked<T> {
         data: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         let result = Pin::new(&mut self.inner).poll_write(context, data);
-        if matches!(result, Poll::Ready(Ok(written)) if written >= PROGRESS_WRITE) {
-            self.touch();
+        if let Poll::Ready(Ok(written)) = result {
+            self.observe(&data[..written]);
         }
         result
     }
@@ -1011,8 +1105,15 @@ impl<T: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Tracked<T> {
         buffers: &[std::io::IoSlice<'_>],
     ) -> Poll<std::io::Result<usize>> {
         let result = Pin::new(&mut self.inner).poll_write_vectored(context, buffers);
-        if matches!(result, Poll::Ready(Ok(written)) if written >= PROGRESS_WRITE) {
-            self.touch();
+        if let Poll::Ready(Ok(mut left)) = result {
+            for buffer in buffers {
+                if left == 0 {
+                    break;
+                }
+                let take = left.min(buffer.len());
+                self.observe(&buffer[..take]);
+                left -= take;
+            }
         }
         result
     }
@@ -1060,20 +1161,14 @@ impl ActivityGuard {
         };
         let (mut parts, body) = response.into_parts();
         let body = match body {
-            ResponseBody::Stream(stream) => ResponseBody::stream(Guarded {
-                stream,
-                _guard: guard,
-            }),
+            ResponseBody::Stream(stream) => ResponseBody::stream(Guarded::new(stream, guard)),
             ResponseBody::Full(Some(bytes)) if bytes.len() > LARGE_BUFFERED_BODY => {
                 // The stream has no exact size, so state the length.
                 parts
                     .headers
                     .entry(header::CONTENT_LENGTH)
                     .or_insert_with(|| HeaderValue::from(bytes.len()));
-                ResponseBody::stream(Guarded {
-                    stream: Box::pin(Chunked(bytes)),
-                    _guard: guard,
-                })
+                ResponseBody::stream(Guarded::new(Box::pin(Chunked(bytes)), guard))
             }
             other => other,
         };
@@ -1109,13 +1204,55 @@ impl futures_core::Stream for Chunked {
 struct Guarded {
     stream: Pin<Box<dyn futures_core::Stream<Item = Bytes> + Send + 'static>>,
     _guard: ActivityGuard,
+    /// A chunk was handed out and HTTP/2 has not asked for the next one: it
+    /// asks only after it has sent the chunk, so this stays true while the
+    /// client's flow-control window is closed (see [`Activity::blocked`]).
+    holding: bool,
+}
+
+impl Guarded {
+    fn new(
+        stream: Pin<Box<dyn futures_core::Stream<Item = Bytes> + Send + 'static>>,
+        guard: ActivityGuard,
+    ) -> Self {
+        Self {
+            stream,
+            _guard: guard,
+            holding: false,
+        }
+    }
+
+    fn release(&mut self) {
+        if std::mem::take(&mut self.holding) {
+            self._guard
+                .0
+                .blocked
+                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
 }
 
 impl futures_core::Stream for Guarded {
     type Item = Bytes;
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Bytes>> {
-        self.stream.as_mut().poll_next(context)
+        // HTTP/2 is asking for more, so it has taken the previous chunk.
+        self.release();
+        let result = self.stream.as_mut().poll_next(context);
+        if matches!(result, Poll::Ready(Some(_))) {
+            self._guard
+                .0
+                .blocked
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.holding = true;
+        }
+        result
+    }
+}
+
+impl Drop for Guarded {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -1170,6 +1307,7 @@ pub(crate) async fn drive_h2<C, E>(
     stop: &mut tokio::sync::watch::Receiver<()>,
     activity: &Activity,
     idle: Option<Duration>,
+    stall: Option<Duration>,
     graceful: impl Fn(Pin<&mut C>),
 ) -> Result<(), E>
 where
@@ -1187,6 +1325,13 @@ where
                 closing = Some(std::time::Instant::now());
             }
             _ = ticker.tick() => {
+                if let (Some(limit), Some(stalled)) = (stall, activity.stalled_for())
+                    && stalled >= limit
+                {
+                    // A response body has been waiting for the client's window
+                    // and nothing has been sent for the whole limit.
+                    return Ok(());
+                }
                 let idle_for = activity.idle_for();
                 match (closing, idle_for) {
                     // Closing, and nothing has moved on the socket for the
@@ -1434,5 +1579,82 @@ mod accept_tests {
             classify_accept_error(&Error::from(ErrorKind::InvalidInput)),
             AcceptAction::Fatal
         );
+    }
+}
+
+#[cfg(test)]
+mod frame_scanner_tests {
+    use super::FrameScanner;
+
+    fn frame(kind: u8, payload: usize) -> Vec<u8> {
+        let mut out = vec![
+            (payload >> 16) as u8,
+            (payload >> 8) as u8,
+            payload as u8,
+            kind,
+            0,
+            0,
+            0,
+            0,
+            1,
+        ];
+        out.extend(vec![7u8; payload]);
+        out
+    }
+
+    /// Feeds `bytes` cut into chunks of `size` and reports whether any chunk
+    /// carried response data.
+    fn progress(bytes: &[u8], size: usize) -> bool {
+        let mut scanner = FrameScanner::default();
+        bytes
+            .chunks(size)
+            .map(|chunk| scanner.feed(chunk))
+            .fold(false, |any, one| any | one)
+    }
+
+    #[test]
+    fn control_frames_never_count_however_many_leave_together() {
+        // PING ack (17 bytes) x 8, SETTINGS ack, WINDOW_UPDATE, GOAWAY, RST_STREAM.
+        let mut burst = Vec::new();
+        for _ in 0..8 {
+            burst.extend(frame(6, 8));
+        }
+        burst.extend(frame(4, 0));
+        burst.extend(frame(8, 4));
+        burst.extend(frame(7, 8));
+        burst.extend(frame(3, 4));
+        assert!(burst.len() > 64);
+        for size in [1, 2, 7, 9, 10, 16, burst.len()] {
+            assert!(!progress(&burst, size), "chunks of {size}");
+        }
+    }
+
+    #[test]
+    fn data_and_headers_count_whatever_the_chunking() {
+        for kind in [0u8, 1, 9] {
+            let bytes = frame(kind, 16);
+            assert_eq!(bytes.len(), 25);
+            for size in 1..=bytes.len() {
+                assert!(progress(&bytes, size), "kind {kind}, chunks of {size}");
+            }
+        }
+        // An empty DATA frame (END_STREAM) is not response data; empty HEADERS is.
+        assert!(!progress(&frame(0, 0), 3));
+        assert!(progress(&frame(1, 0), 3));
+    }
+
+    #[test]
+    fn control_frames_between_data_do_not_hide_it_and_data_does_not_leak() {
+        let mut bytes = frame(6, 8);
+        bytes.extend(frame(0, 5));
+        bytes.extend(frame(6, 8));
+        for size in [1, 4, 9, 11, 30] {
+            assert!(progress(&bytes, size), "chunks of {size}");
+        }
+        // After a large DATA frame has been fully skipped, a PING ack is
+        // classified correctly again (no leftover payload state).
+        let mut scanner = FrameScanner::default();
+        assert!(scanner.feed(&frame(0, 40_000)));
+        assert!(!scanner.feed(&frame(6, 8)));
     }
 }
