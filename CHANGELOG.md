@@ -5,6 +5,31 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-10-09
+
+### Security
+- `Headers`'s `{:?}` is now default-deny: only the values of a short list of
+  harmless headers (`Host`, `User-Agent`, `Content-Type`, `Accept*`,
+  `X-Request-Id`, `X-Forwarded-*`, `Traceparent`, `Sec-Fetch-*`, ...) are
+  printed and every other value is `<redacted>`. 0.9.5 hid values by name
+  (`Authorization`, anything containing `token`, `key`, ...), so a credential in
+  a header with an innocent name (`X-Credential`, `X-Access-Code`) was still
+  printed. Names are always shown. The map itself (`.0`) is unchanged.
+
+### Documentation
+- `AppRuntime::send_timeout` under HTTP/2 measures how long one chunk of up to
+  16 KiB waits for the client's window, because hyper does not say which stream
+  a socket write belongs to, so progress inside a chunk cannot be seen. A client
+  must take about 16 KiB per `send_timeout` (273 bytes/s at the default 60 s);
+  a very short limit would drop slow but steady readers, so keep it at several
+  seconds or more. Found by review of 0.9.6, with a regression test of the
+  reader that is fast enough.
+
+### Changed
+- The multi-stream `send_timeout` test now also checks that the active stream
+  delivered data before the cut and that the cut came from the stalled stream's
+  timeout, well before the active stream's own end.
+
 ## [0.9.6] - 2026-10-09
 
 ### Fixed

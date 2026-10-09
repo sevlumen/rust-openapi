@@ -110,8 +110,10 @@ let runtime = app
   the client is not reading) and, under HTTP/2, while a response body waits for
   a window the client never opens even though it keeps answering `PING`s or
   reading another stream: the clock is per stream, and one stalled stream
-  drops the connection. A quiet SSE stream and a slow but steady reader are
-  left alone.
+  drops the connection. A quiet SSE stream is left alone. The HTTP/2 unit is one
+  chunk of up to 16 KiB, so the client must take about 16 KiB per
+  `send_timeout` (273 bytes/s at the default): keep the limit at several
+  seconds or more.
 - `body_read_timeout` (default 60 s, `None` disables) bounds how long a
   *buffered* request body (`Json`, `Form`, `Multipart`) may take to arrive in
   full; a body still incomplete then gets `408` and the connection is closed,

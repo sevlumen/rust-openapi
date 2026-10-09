@@ -61,16 +61,31 @@ mod secrets {
                 ("cookie", "sid=s3cr3t-session"),
                 ("proxy-authorization", "Basic s3cr3t-proxy"),
                 ("x-api-key", "s3cr3t-key"),
+                // Names that do not look secret are hidden all the same.
+                ("x-credential", "s3cr3t-credential"),
+                ("x-access-code", "s3cr3t-code"),
                 ("x-request-id", "request-42"),
+                ("user-agent", "curl/8.0"),
             ],
         )
         .await;
         assert!(!shown.contains("s3cr3t"), "{shown}");
         // The names stay, so the output is still useful for debugging.
-        for name in ["authorization", "cookie", "x-api-key", "x-request-id"] {
+        for name in [
+            "authorization",
+            "cookie",
+            "x-api-key",
+            "x-credential",
+            "x-access-code",
+            "x-request-id",
+        ] {
             assert!(shown.contains(name), "{name} missing from {shown}");
         }
-        assert!(shown.contains("request-42"), "{shown}");
+        // Known harmless headers keep their values.
+        assert!(
+            shown.contains("request-42") && shown.contains("curl/8.0"),
+            "{shown}"
+        );
     }
 
     #[tokio::test]

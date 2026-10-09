@@ -295,10 +295,12 @@ impl<S: Send + Sync + 'static> FromRequest<S> for ConnectInfo {
 /// [`Header`] for one or two known headers. It documents no OpenAPI
 /// parameters.
 ///
-/// `{:?}` shows every header name but hides the value of credentials
-/// (`Authorization`, `Cookie`, `X-Api-Key`, and any name containing `token`,
-/// `secret`, `key`, `auth`, `password`, `session` or `signature`), so logging it
-/// does not leak them. The map itself (`.0`) is unchanged.
+/// `{:?}` shows every header name but only the values of a short list of
+/// harmless headers (`Host`, `User-Agent`, `Content-Type`, `Accept*`,
+/// `X-Request-Id`, `X-Forwarded-*`, ...); every other value, `Authorization`,
+/// `Cookie` and custom credential headers included, prints as `<redacted>`
+/// (default deny), so logging it does not leak them. The map itself (`.0`) is
+/// unchanged.
 #[derive(Clone)]
 pub struct Headers(pub http::HeaderMap);
 
@@ -306,7 +308,7 @@ impl std::fmt::Debug for Headers {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut map = f.debug_map();
         for (name, value) in &self.0 {
-            if crate::debug_impls::is_sensitive_header(name.as_str()) {
+            if !crate::debug_impls::is_safe_header(name.as_str()) {
                 map.entry(&name.as_str(), &crate::debug_impls::Redacted);
             } else {
                 map.entry(&name.as_str(), value);

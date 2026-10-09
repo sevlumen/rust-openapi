@@ -385,8 +385,14 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
     /// connection dropped, even if other streams on it are still moving, so a
     /// client that keeps answering `PING`s (or reading another stream) but never
     /// opens that window cannot hold a connection slot. A quiet stream (an SSE
-    /// connection between events) and a slow but steady reader are never
-    /// affected.
+    /// connection between events) is never affected.
+    ///
+    /// The unit under HTTP/2 is one chunk of at most 16 KiB: hyper does not say
+    /// which stream a write belongs to, so progress inside a chunk is not
+    /// visible. A client therefore has to take about 16 KiB per `send_timeout`
+    /// (273 bytes/s at the default 60 s); a shorter limit, such as 500 ms, drops
+    /// readers that are steady but slower than 32 KiB/s. Keep it at several
+    /// seconds or more.
     pub fn send_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.send_timeout = timeout;
         self

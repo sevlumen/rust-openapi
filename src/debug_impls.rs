@@ -15,26 +15,58 @@ impl fmt::Debug for Redacted {
     }
 }
 
-/// Whether a header's value is a credential that `{:?}` must not print: the
-/// standard ones, and any name that says what it is (`x-api-key`,
-/// `x-auth-token`, `x-csrf-token`, `x-session-id`...).
-pub(crate) fn is_sensitive_header(name: &str) -> bool {
-    const EXACT: [&str; 4] = [
-        "authorization",
-        "proxy-authorization",
-        "cookie",
-        "set-cookie",
+/// Whether a header's value may appear in `{:?}` output. Everything not known to
+/// be harmless is hidden (default deny), so a custom credential header
+/// (`X-Credential`, `X-Access-Code`...) cannot leak just because its name does
+/// not look secret.
+pub(crate) fn is_safe_header(name: &str) -> bool {
+    const SAFE: [&str; 40] = [
+        "accept",
+        "accept-charset",
+        "accept-encoding",
+        "accept-language",
+        "access-control-request-headers",
+        "access-control-request-method",
+        "cache-control",
+        "connection",
+        "content-encoding",
+        "content-language",
+        "content-length",
+        "content-type",
+        "date",
+        "dnt",
+        "expect",
+        "forwarded",
+        "host",
+        "if-match",
+        "if-modified-since",
+        "if-none-match",
+        "if-range",
+        "if-unmodified-since",
+        "max-forwards",
+        "origin",
+        "pragma",
+        "range",
+        "referer",
+        "sec-websocket-protocol",
+        "sec-websocket-version",
+        "te",
+        "traceparent",
+        "tracestate",
+        "transfer-encoding",
+        "upgrade",
+        "upgrade-insecure-requests",
+        "user-agent",
+        "via",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
     ];
-    const HINTS: [&str; 7] = [
-        "token",
-        "secret",
-        "key",
-        "auth",
-        "password",
-        "session",
-        "signature",
-    ];
-    EXACT.contains(&name) || HINTS.iter().any(|hint| name.contains(hint))
+    const SAFE_MORE: [&str; 3] = ["x-real-ip", "x-request-id", "x-correlation-id"];
+    SAFE.contains(&name)
+        || SAFE_MORE.contains(&name)
+        || name.starts_with("sec-fetch-")
+        || name.starts_with("sec-ch-")
 }
 
 macro_rules! opaque {

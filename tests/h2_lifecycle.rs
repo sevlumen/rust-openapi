@@ -590,13 +590,75 @@ async fn an_active_stream_does_not_hide_a_stalled_one_on_the_same_connection() {
         .uri("http://localhost/events")
         .body(Full::new(Bytes::new()))
         .unwrap();
-    let response = sender.send_request(active).await.unwrap();
-    let outcome = tokio::time::timeout(Duration::from_secs(10), response.into_body().collect())
-        .await
-        .expect("the active stream hung");
+    let mut response = sender.send_request(active).await.unwrap().into_body();
+    let started = std::time::Instant::now();
+    let mut events = 0usize;
+    let ended = loop {
+        match tokio::time::timeout(Duration::from_secs(10), response.frame()).await {
+            Err(_) => panic!("the active stream hung"),
+            Ok(None) => break Ok(()),
+            Ok(Some(Ok(frame))) => events += usize::from(frame.is_data()),
+            Ok(Some(Err(error))) => break Err(error),
+        }
+    };
     assert!(
-        outcome.is_err(),
+        ended.is_err(),
         "the stalled stream was kept alive by the active one: the connection survived"
     );
+    // The active stream really was delivering data, and was cut by the stalled
+    // stream's timeout well before its own ~4 s end.
+    assert!(
+        events >= 1,
+        "the active stream received nothing before the cut"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(3500),
+        "cut only after {:?}",
+        started.elapsed()
+    );
+    let _ = server.shut_down().await;
+}
+
+/// `send_timeout` bounds how long one 16 KiB chunk may wait for the client's
+/// window, so a client must read at least about 16 KiB per `send_timeout`.
+/// Here the window holds a whole chunk and the client takes one every 300 ms
+/// against a 1 s limit: steady and fast enough, never cut off.
+#[tokio::test]
+async fn a_steady_reader_of_a_huge_body_is_not_cut_by_send_timeout() {
+    let mut server = start(|runtime| {
+        runtime
+            .h2c(true)
+            .header_read_timeout(Some(Duration::from_millis(200)))
+            .send_timeout(Some(Duration::from_secs(1)))
+    })
+    .await;
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .initial_stream_window_size(16 * 1024)
+        .initial_connection_window_size(16 * 1024)
+        .handshake(TokioIo::new(tcp))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = http::Request::builder()
+        .uri("http://localhost/big")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let mut body = sender.send_request(request).await.unwrap().into_body();
+    let started = std::time::Instant::now();
+    let mut received = 0usize;
+    // ~4 s of steady reading, several times the send timeout.
+    while started.elapsed() < Duration::from_secs(4) {
+        let frame = body
+            .frame()
+            .await
+            .expect("the body ended early")
+            .expect("cut off while the client was reading steadily");
+        received += frame.data_ref().map_or(0, Bytes::len);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(received > 0);
     let _ = server.shut_down().await;
 }
