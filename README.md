@@ -832,9 +832,12 @@ version) before committing.
 ## Roadmap
 
 Not provided, and not planned for now: HTTP/3 (a QUIC stack) and zstd
-compression (a C dependency). The paired HTTP acceptance benchmark against a raw
-Hyper server is designed (see `docs/benchmark-design.md`) to live in a separate
-`oas-rs-perf` project and has not been run for this release line.
+compression (a C dependency). The HTTP comparison laboratory lives in a separate
+project, `oas-rs-perf` (design: `docs/benchmark-lab-design.md`): one contract run
+against raw Hyper, `oas-rs`, axum, actix-web, Go `net/http`, Fastify and
+FastAPI. Only diagnostic runs on a developer machine exist so far; on those, the
+five Rust and Go servers (`oas-rs` among them) are not separable from run-to-run
+noise, and an official run on a dedicated Linux host has not been made.
 
 ## Contributing and license
 
