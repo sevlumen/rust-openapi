@@ -21,6 +21,10 @@ async fn hello() -> &'static str {
     "hello"
 }
 
+async fn big() -> String {
+    "x".repeat(2 * 1024 * 1024)
+}
+
 async fn slow() -> &'static str {
     tokio::time::sleep(Duration::from_millis(800)).await;
     "done"
@@ -63,6 +67,7 @@ async fn start(configure: impl FnOnce(AppRuntime) -> AppRuntime) -> Server {
     let mut app = App::new();
     app.get("/", hello);
     app.get("/slow", slow);
+    app.get("/big", big);
     app.get("/events", events);
     let runtime = configure(app.build().unwrap());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -208,5 +213,39 @@ async fn a_streaming_response_is_not_idle_while_its_body_is_still_flowing() {
         .expect("stream was cut");
     let text = String::from_utf8(body.to_bytes().to_vec()).unwrap();
     assert!(text.contains("data: 15"), "stream cut short: {text:?}");
+    let _ = server.shut_down().await;
+}
+
+#[tokio::test]
+async fn a_large_buffered_response_is_not_idle_while_the_client_reads_slowly() {
+    let mut server = start(|runtime| {
+        runtime
+            .h2c(true)
+            .header_read_timeout(Some(Duration::from_millis(200)))
+    })
+    .await;
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    let (mut sender, connection) =
+        hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tcp))
+            .await
+            .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = http::Request::builder()
+        .uri("http://localhost/big")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    // The flow-control window (64 KiB) fills, then the client stops reading for
+    // longer than the idle timeout plus the shutdown grace.
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("the response was cut while the client was slow")
+        .to_bytes();
+    assert_eq!(body.len(), 2 * 1024 * 1024);
     let _ = server.shut_down().await;
 }

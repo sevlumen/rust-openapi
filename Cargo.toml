@@ -9,7 +9,7 @@ repository = "https://github.com/sevlumen/rust-openapi"
 readme = "README.md"
 keywords = ["openapi", "http", "hyper", "tokio", "web"]
 categories = ["web-programming::http-server"]
-exclude = ["/.github", "/.gitattributes", "/CLAUDE.md", "/deny.toml", "/docs", "/scripts", "/dist", "/wip"]
+exclude = ["/.github", "/.gitattributes", "/CLAUDE.md", "/deny.toml", "/docs", "/scripts", "/dist", "/wip", "/wip_*"]
 
 [package.metadata.docs.rs]
 all-features = true

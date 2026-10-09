@@ -404,3 +404,53 @@ async fn part_headers_that_never_end_after_a_skipped_part_are_still_cut_off() {
         "junk headers after a skipped part were buffered: {response}"
     );
 }
+
+#[tokio::test]
+async fn a_delimiter_split_across_writes_still_ends_a_skipped_part() {
+    let mut app = App::new();
+    app.raw(
+        Method::POST,
+        "/up",
+        |request: Request<Incoming>| async move {
+            let mut form = Multipart::from_stream(request, 64 * 1024 * 1024)?;
+            let mut seen = Vec::new();
+            while let Some(field) = form.next_field().await? {
+                if field.name() == Some("big") {
+                    continue;
+                }
+                seen.push(field.text().await?);
+            }
+            Ok::<_, ApiError>(seen.join(","))
+        },
+    );
+    let (addr, stop) = serve(app).await;
+    let mut body = format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"big\"\r\n\r\n")
+        .into_bytes();
+    body.extend(vec![b'x'; 600_000]);
+    body.extend_from_slice(
+        format!(
+            "\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"s\"\r\n\r\nlast\r\n--{BOUNDARY}--\r\n"
+        )
+        .as_bytes(),
+    );
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(request_head(Some(body.len())).as_bytes())
+        .await
+        .unwrap();
+    // Cut right inside the delimiter that ends the skipped part.
+    let delimiter_at = body.len()
+        - format!(
+            "\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"s\"\r\n\r\nlast\r\n--{BOUNDARY}--\r\n"
+        )
+        .len();
+    let (first, rest) = body.split_at(delimiter_at + 5);
+    stream.write_all(first).await.unwrap();
+    stream.flush().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    stream.write_all(rest).await.unwrap();
+    let response = read_response(&mut stream).await;
+    let _ = stop.send(());
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.ends_with("last"), "{response}");
+}

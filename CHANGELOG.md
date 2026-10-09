@@ -5,6 +5,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- `wip_p.py`, a scratch script that was committed by mistake, was packaged
+  into 0.8.3; it is removed and `wip*` files are now ignored and excluded from
+  the package.
+
+### Added
+- Regression tests for HTTP/2: a 2 MiB buffered response that the client stops
+  reading for longer than the idle timeout and shutdown grace is delivered
+  whole, and a multipart delimiter split across TCP writes still ends a
+  skipped part.
+
 ## [0.8.3] - 2026-10-09
 
 ### Fixed
