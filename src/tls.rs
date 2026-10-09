@@ -249,8 +249,7 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
                         let prepared = connection.prepare(request);
                         async move {
                             let response = prepared.await;
-                            drop(guard);
-                            Ok::<_, Infallible>(response)
+                            Ok::<_, Infallible>(ActivityGuard::finish_with(guard, response))
                         }
                     })
                 };

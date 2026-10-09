@@ -818,8 +818,7 @@ where
                 let prepared = connection.prepare(request);
                 async move {
                     let response = prepared.await;
-                    drop(guard);
-                    Ok::<_, Infallible>(response)
+                    Ok::<_, Infallible>(ActivityGuard::finish_with(guard, response))
                 }
             })
         };
@@ -949,6 +948,40 @@ impl ActivityGuard {
             .in_flight
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Self(Arc::clone(activity))
+    }
+}
+
+impl ActivityGuard {
+    /// A streaming body keeps the request in flight until the stream ends or
+    /// is dropped (an SSE or download outlives its handler); a buffered body
+    /// is already complete, so the guard ends here.
+    pub(crate) fn finish_with(guard: Option<Self>, response: HttpResponse) -> HttpResponse {
+        let Some(guard) = guard else {
+            return response;
+        };
+        let (parts, body) = response.into_parts();
+        let body = match body {
+            ResponseBody::Stream(stream) => ResponseBody::stream(Guarded {
+                stream,
+                _guard: guard,
+            }),
+            other => other,
+        };
+        Response::from_parts(parts, body)
+    }
+}
+
+/// A response stream that holds its request's [`ActivityGuard`].
+struct Guarded {
+    stream: Pin<Box<dyn futures_core::Stream<Item = Bytes> + Send + 'static>>,
+    _guard: ActivityGuard,
+}
+
+impl futures_core::Stream for Guarded {
+    type Item = Bytes;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Bytes>> {
+        self.stream.as_mut().poll_next(context)
     }
 }
 

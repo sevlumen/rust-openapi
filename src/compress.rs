@@ -44,7 +44,13 @@ impl Compress {
         }
     }
 
-    /// Bodies smaller than this are sent as they are.
+    /// Bodies smaller than this are sent as they are. Whatever is set here,
+    /// bodies under 32 bytes are never compressed (a gzip stream has more
+    /// overhead than that, so they cannot shrink); this keeps `HEAD`, whose
+    /// body is gone before this layer runs and which therefore decides from
+    /// the length alone, in agreement with `GET`. A larger body that does not
+    /// shrink (already-compressed or random-looking text) is still sent as
+    /// it is by `GET`, and a `HEAD` for it announces the encoding anyway.
     pub fn min_size(mut self, bytes: usize) -> Self {
         self.min_size = bytes;
         self
@@ -183,6 +189,9 @@ fn brotli_compress(bytes: &[u8], quality: u32) -> Vec<u8> {
     writer.into_inner()
 }
 
+/// Below this a gzip stream is never smaller than its input.
+const MIN_COMPRESSIBLE: usize = 32;
+
 fn gzip(bytes: &[u8], level: u32) -> Vec<u8> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::new(level));
     // Writing to a Vec cannot fail.
@@ -263,7 +272,7 @@ impl Middleware for Compress {
                     .get(header::CONTENT_LENGTH)
                     .and_then(|value| value.to_str().ok())
                     .and_then(|value| value.parse::<usize>().ok())
-                    .is_some_and(|length| length >= min_size.max(1));
+                    .is_some_and(|length| length >= min_size.max(MIN_COMPRESSIBLE));
                 if large_enough {
                     let headers = response.headers_mut();
                     headers.remove(header::CONTENT_LENGTH);
@@ -278,7 +287,10 @@ impl Middleware for Compress {
             let ResponseBody::Full(slot) = response.body_mut() else {
                 return response;
             };
-            let Some(body) = slot.as_ref().filter(|body| body.len() >= min_size.max(1)) else {
+            let Some(body) = slot
+                .as_ref()
+                .filter(|body| body.len() >= min_size.max(MIN_COMPRESSIBLE))
+            else {
                 return response;
             };
             let original = body.clone();

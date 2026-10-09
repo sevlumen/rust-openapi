@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use oas_rs::{App, AppRuntime};
+use oas_rs::{App, AppRuntime, Event, Sse};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -26,6 +26,33 @@ async fn slow() -> &'static str {
     "done"
 }
 
+struct Events(tokio::sync::mpsc::Receiver<Event>);
+
+impl futures_core::Stream for Events {
+    type Item = Event;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Event>> {
+        self.0.poll_recv(context)
+    }
+}
+
+/// Sixteen events, 250 ms apart: the response outlives the handler by ~4 s.
+async fn events() -> Sse<Events> {
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        for n in 0..16 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            if tx.send(Event::data(n.to_string())).await.is_err() {
+                return;
+            }
+        }
+    });
+    Sse::new(Events(rx))
+}
+
 struct Server {
     addr: std::net::SocketAddr,
     stop: Option<oneshot::Sender<()>>,
@@ -36,6 +63,7 @@ async fn start(configure: impl FnOnce(AppRuntime) -> AppRuntime) -> Server {
     let mut app = App::new();
     app.get("/", hello);
     app.get("/slow", slow);
+    app.get("/events", events);
     let runtime = configure(app.build().unwrap());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -149,4 +177,36 @@ async fn a_busy_h2_stream_still_finishes_during_shutdown() {
         took >= Duration::from_millis(400),
         "shutdown did not wait for the request: {took:?}"
     );
+}
+
+#[tokio::test]
+async fn a_streaming_response_is_not_idle_while_its_body_is_still_flowing() {
+    // Idle timeout 300 ms, the stream lasts ~4 s: the connection must stay up.
+    let mut server = start(|runtime| {
+        runtime
+            .h2c(true)
+            .header_read_timeout(Some(Duration::from_millis(300)))
+    })
+    .await;
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    let (mut sender, connection) =
+        hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tcp))
+            .await
+            .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = http::Request::builder()
+        .uri("http://localhost/events")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("stream was cut");
+    let text = String::from_utf8(body.to_bytes().to_vec()).unwrap();
+    assert!(text.contains("data: 15"), "stream cut short: {text:?}");
+    let _ = server.shut_down().await;
 }
