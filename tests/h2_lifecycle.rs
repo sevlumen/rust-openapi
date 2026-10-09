@@ -433,13 +433,7 @@ async fn a_client_that_stops_reading_a_big_response_loses_its_slot() {
     tokio::time::sleep(Duration::from_millis(3000)).await;
     let mut second = TcpStream::connect(server.addr).await.unwrap();
     second
-        .write_all(
-            b"GET / HTTP/1.1
-Host: t
-Connection: close
-
-",
-        )
+        .write_all(b"GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
         .await
         .unwrap();
     let mut out = String::new();
@@ -511,13 +505,7 @@ async fn a_burst_of_pings_does_not_keep_a_slot_either() {
     tokio::time::sleep(Duration::from_millis(3500)).await;
     let mut second = TcpStream::connect(server.addr).await.unwrap();
     second
-        .write_all(
-            b"GET / HTTP/1.1
-Host: t
-Connection: close
-
-",
-        )
+        .write_all(b"GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
         .await
         .unwrap();
     let mut out = String::new();
@@ -565,6 +553,50 @@ async fn a_quiet_stream_is_not_a_stalled_reader() {
         b"data: late
 
 "
+    );
+    let _ = server.shut_down().await;
+}
+
+/// One stream that nobody reads must not be kept alive by another stream on
+/// the same connection that keeps moving: `send_timeout` is per stream.
+#[tokio::test]
+async fn an_active_stream_does_not_hide_a_stalled_one_on_the_same_connection() {
+    let mut server = start(|runtime| {
+        runtime
+            .h2c(true)
+            .header_read_timeout(Some(Duration::from_millis(200)))
+            .send_timeout(Some(Duration::from_millis(500)))
+    })
+    .await;
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    // Small per-stream windows only: the 8 MiB response stalls after 1 KiB,
+    // the connection-level window stays wide for the other stream.
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .initial_stream_window_size(1024)
+        .handshake(TokioIo::new(tcp))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let stalled = http::Request::builder()
+        .uri("http://localhost/big")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    // Held, never read.
+    let _stalled = sender.send_request(stalled).await.unwrap();
+    // A second stream that delivers an event every 250 ms for ~4 s.
+    let active = http::Request::builder()
+        .uri("http://localhost/events")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = sender.send_request(active).await.unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(10), response.into_body().collect())
+        .await
+        .expect("the active stream hung");
+    assert!(
+        outcome.is_err(),
+        "the stalled stream was kept alive by the active one: the connection survived"
     );
     let _ = server.shut_down().await;
 }

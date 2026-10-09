@@ -108,8 +108,10 @@ let runtime = app
   reading a streaming or large response, on HTTP/1.1 and HTTP/2 alike: the
   clock runs while the socket refuses a write (its buffers are full because
   the client is not reading) and, under HTTP/2, while a response body waits for
-  a window the client never opens even though it keeps answering `PING`s. A
-  quiet SSE stream and a slow but steady reader are left alone.
+  a window the client never opens even though it keeps answering `PING`s or
+  reading another stream: the clock is per stream, and one stalled stream
+  drops the connection. A quiet SSE stream and a slow but steady reader are
+  left alone.
 - `body_read_timeout` (default 60 s, `None` disables) bounds how long a
   *buffered* request body (`Json`, `Form`, `Multipart`) may take to arrive in
   full; a body still incomplete then gets `408` and the connection is closed,

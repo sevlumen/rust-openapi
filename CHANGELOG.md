@@ -5,6 +5,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-10-09
+
+### Fixed
+- HTTP/2 `send_timeout` is now per response stream. It used one connection-wide
+  "last response data sent" timestamp, so a second stream on the same
+  connection that kept moving (an SSE feed, a download the client was reading)
+  renewed it for ever and a stream nobody was reading never timed out. Each
+  response stream now records when it handed a chunk to HTTP/2 and the
+  connection is dropped when any one has waited `send_timeout` for the client
+  to take it. Dropping the whole connection is the only lever hyper offers, so
+  the active stream is cut too: that is the price of a client that abuses one
+  stream. Found by review of 0.9.4.
+
+### Changed
+- The HTTP/1.1 test requests that were written with bare LF line endings now
+  use CRLF, so they no longer depend on the parser being lenient.
+
 ## [0.9.5] - 2026-10-09
 
 ### Security

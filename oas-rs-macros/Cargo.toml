@@ -1,6 +1,6 @@
 [package]
 name = "oas-rs-macros"
-version = "0.9.5"
+version = "0.9.6"
 edition = "2024"
 description = "Derive macros for oas-rs"
 license = "MIT"

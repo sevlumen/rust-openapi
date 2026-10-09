@@ -379,12 +379,14 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
     ///
     /// On HTTP/1.1 (and under HTTP/2 at the socket level) the clock runs while
     /// the socket refuses a write, which is a client whose receive window and
-    /// our send buffer are both full. Under HTTP/2 it also runs while a response
-    /// body is blocked waiting for the client's flow-control window and no
-    /// response data has left the server for that long, so a client that keeps
-    /// answering `PING`s but never opens its window is dropped too. A quiet
-    /// stream (an SSE connection between events) and a slow but steady reader are
-    /// never affected.
+    /// our send buffer are both full. Under HTTP/2 it also runs *per response
+    /// stream*: a body that has handed a chunk to HTTP/2 and waited this long
+    /// for the client's flow-control window to take it gets the whole
+    /// connection dropped, even if other streams on it are still moving, so a
+    /// client that keeps answering `PING`s (or reading another stream) but never
+    /// opens that window cannot hold a connection slot. A quiet stream (an SSE
+    /// connection between events) and a slow but steady reader are never
+    /// affected.
     pub fn send_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.send_timeout = timeout;
         self
@@ -950,10 +952,12 @@ pub(crate) struct Activity {
     /// Milliseconds since `base` of the last request end or response data
     /// written.
     last_ms: std::sync::atomic::AtomicU64,
-    /// Response streams that handed a chunk to HTTP/2 and have not been asked
-    /// for the next one yet: HTTP/2 asks only when it has sent the chunk, so a
-    /// stream stays counted while the client's window is closed.
-    blocked: std::sync::atomic::AtomicUsize,
+    /// One slot per response stream: `0` while it is not waiting, otherwise
+    /// `1 + the millisecond (since base) at which it handed a chunk to HTTP/2`.
+    /// HTTP/2 asks for the next chunk only when it has sent the previous one, so
+    /// a stream stays "waiting" while the client's window is closed. Per stream
+    /// on purpose: another stream that keeps moving must not hide a stalled one.
+    streams: std::sync::Mutex<Vec<Arc<std::sync::atomic::AtomicU64>>>,
 }
 
 #[cfg_attr(not(feature = "http2"), allow(dead_code))]
@@ -963,7 +967,7 @@ impl Activity {
             in_flight: std::sync::atomic::AtomicUsize::new(0),
             base: std::time::Instant::now(),
             last_ms: std::sync::atomic::AtomicU64::new(0),
-            blocked: std::sync::atomic::AtomicUsize::new(0),
+            streams: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -978,13 +982,33 @@ impl Activity {
             .fetch_max(self.now_ms(), std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// How long no response data has left the server while at least one
-    /// response body is waiting for the client, or `None` when none is.
+    /// Starts tracking a response stream; the slot is dropped from the list
+    /// once the stream (its only other owner) is gone.
+    fn register_stream(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        let slot = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        self.streams
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(Arc::clone(&slot));
+        slot
+    }
+
+    /// How long the longest-waiting response stream has been waiting for the
+    /// client to take the chunk it was handed, or `None` when none is waiting.
     fn stalled_for(&self) -> Option<Duration> {
-        (self.blocked.load(std::sync::atomic::Ordering::Acquire) > 0).then(|| {
-            let last = self.last_ms.load(std::sync::atomic::Ordering::Relaxed);
-            Duration::from_millis(self.now_ms().saturating_sub(last))
-        })
+        let now = self.now_ms();
+        let mut streams = self
+            .streams
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        streams.retain(|slot| Arc::strong_count(slot) > 1);
+        streams
+            .iter()
+            .filter_map(|slot| {
+                let since = slot.load(std::sync::atomic::Ordering::Acquire);
+                (since != 0).then(|| Duration::from_millis(now.saturating_sub(since - 1)))
+            })
+            .max()
     }
 
     /// How long nothing has happened with no request in flight, or `None`
@@ -1265,10 +1289,8 @@ impl futures_core::Stream for Chunked {
 struct Guarded {
     stream: Pin<Box<dyn futures_core::Stream<Item = Bytes> + Send + 'static>>,
     _guard: ActivityGuard,
-    /// A chunk was handed out and HTTP/2 has not asked for the next one: it
-    /// asks only after it has sent the chunk, so this stays true while the
-    /// client's flow-control window is closed (see [`Activity::blocked`]).
-    holding: bool,
+    /// This stream's slot in [`Activity::streams`].
+    slot: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Guarded {
@@ -1276,20 +1298,16 @@ impl Guarded {
         stream: Pin<Box<dyn futures_core::Stream<Item = Bytes> + Send + 'static>>,
         guard: ActivityGuard,
     ) -> Self {
+        let slot = guard.0.register_stream();
         Self {
             stream,
             _guard: guard,
-            holding: false,
+            slot,
         }
     }
 
-    fn release(&mut self) {
-        if std::mem::take(&mut self.holding) {
-            self._guard
-                .0
-                .blocked
-                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-        }
+    fn release(&self) {
+        self.slot.store(0, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -1301,11 +1319,11 @@ impl futures_core::Stream for Guarded {
         self.release();
         let result = self.stream.as_mut().poll_next(context);
         if matches!(result, Poll::Ready(Some(_))) {
-            self._guard
-                .0
-                .blocked
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            self.holding = true;
+            // Waiting from now until HTTP/2 asks for the next chunk.
+            self.slot.store(
+                self._guard.0.now_ms() + 1,
+                std::sync::atomic::Ordering::Release,
+            );
         }
         result
     }
