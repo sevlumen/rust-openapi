@@ -51,9 +51,30 @@ fn request_head(length: Option<usize>) -> String {
 }
 
 async fn read_response(stream: &mut TcpStream) -> String {
-    let mut out = String::new();
-    let _ = tokio::time::timeout(Duration::from_secs(5), stream.read_to_string(&mut out)).await;
-    out
+    // Keep what arrived even if the server does not close the connection (it
+    // may still be waiting for a body the client stopped sending): a read
+    // that is cancelled by the timeout would drop the bytes already read.
+    let mut out = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut buffer = [0u8; 4096];
+    loop {
+        match tokio::time::timeout_at(deadline, stream.read(&mut buffer)).await {
+            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+            Ok(Ok(read)) => {
+                out.extend_from_slice(&buffer[..read]);
+                // The status line is all the callers look at; a response with
+                // a body is complete once the headers are in and the peer is
+                // done, which the loop discovers at EOF or the deadline.
+                if out.windows(4).any(|window| window == b"\r\n\r\n") && out.len() > 12 {
+                    let text = String::from_utf8_lossy(&out);
+                    if text.starts_with("HTTP/1.1 4") || text.starts_with("HTTP/1.1 5") {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Counts the bytes of each field as they arrive, reporting after the first chunk.
@@ -342,4 +363,44 @@ async fn skipping_a_large_part_without_reading_it_is_not_an_error() {
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     assert!(response.ends_with("small=first,small=last"), "{response}");
     let _ = stop.send(());
+}
+
+#[tokio::test]
+async fn part_headers_that_never_end_after_a_skipped_part_are_still_cut_off() {
+    let mut app = App::new();
+    app.raw(
+        Method::POST,
+        "/up",
+        |request: Request<Incoming>| async move {
+            let mut form = Multipart::from_stream(request, 10 * 1024 * 1024)?;
+            // Every field is dropped unread, so each is drained.
+            while let Some(_field) = form.next_field().await? {}
+            Ok::<_, ApiError>("done")
+        },
+    );
+    let (addr, stop) = serve(app).await;
+    let mut junk = format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"big\"\r\n\r\n")
+        .into_bytes();
+    junk.extend(vec![b'x'; 300_000]);
+    junk.extend(format!("\r\n--{BOUNDARY}\r\nX-Junk: ").into_bytes());
+    junk.extend(vec![b'a'; 2_000_000]);
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(request_head(Some(5_000_000)).as_bytes())
+        .await
+        .unwrap();
+    for piece in junk.chunks(8192) {
+        if stream.write_all(piece).await.is_err() {
+            break;
+        }
+    }
+    let started = std::time::Instant::now();
+    let response = read_response(&mut stream).await;
+    let _ = stop.send(());
+    let refused = response.starts_with("HTTP/1.1 400")
+        || (response.is_empty() && started.elapsed() < Duration::from_secs(3));
+    assert!(
+        refused,
+        "junk headers after a skipped part were buffered: {response}"
+    );
 }

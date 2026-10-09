@@ -253,3 +253,16 @@ async fn no_transform_is_respected() {
         .await;
     assert!(response.header("content-encoding").is_none());
 }
+
+#[tokio::test]
+async fn head_and_get_agree_for_a_body_too_small_to_shrink() {
+    let runtime = runtime(Compress::new().min_size(1));
+    let get_response = get(&runtime, "/small", Some("gzip")).await;
+    let head = runtime
+        .oneshot(Method::HEAD, "/small", &[("accept-encoding", "gzip")], None)
+        .await;
+    assert_eq!(
+        head.header("content-encoding"),
+        get_response.header("content-encoding")
+    );
+}

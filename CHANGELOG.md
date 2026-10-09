@@ -5,6 +5,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- HTTP/2 (h2c and TLS): a streaming response (`Sse`, a large `ServeDir` file)
+  counted as idle as soon as its handler returned, so after
+  `header_read_timeout` the connection was asked to go away and then dropped
+  about 2 seconds later, cutting the stream. The request now stays in flight
+  until its response stream ends or is dropped.
+- Multipart: the guard against endless part headers is no longer switched off
+  by a skipped part. While a dropped, unread `Field` is drained the guard
+  waits only for the delimiter that ends it; junk headers after it are cut off
+  early again.
+- `Compress`: bodies under 32 bytes are never compressed (they cannot shrink),
+  so `HEAD` and `GET` agree for tiny bodies even with `min_size(1)`. A larger
+  body that does not shrink is still sent as it is by `GET`; `HEAD` announces
+  the encoding for it anyway (its body is gone before the layer runs).
+
 ## [0.8.2] - 2026-10-09
 
 ### Fixed
