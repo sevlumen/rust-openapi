@@ -15,6 +15,7 @@ type Validator = dyn Fn(String) -> BoxFuture<Result<(), ApiError>> + Send + Sync
 /// validator: use [`constant_time_eq`], or [`BearerAuth::static_token`] for a
 /// single shared token.
 #[derive(Clone)]
+#[must_use = "middleware does nothing until it is registered with `App::layer`"]
 pub struct BearerAuth {
     validator: Arc<Validator>,
     exempt: Arc<[String]>,

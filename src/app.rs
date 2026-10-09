@@ -248,6 +248,14 @@ impl<S: Send + Sync + 'static> App<S> {
         })
     }
 
+    /// Registers a `GET` handler (also answers `HEAD` unless one is registered).
+    ///
+    /// # Panics
+    ///
+    /// At registration, on a mistake that would otherwise surface only in
+    /// production: a `path` that does not start with `/`, a malformed template
+    /// (`{id`, `{}`, `x{id}`), the same method and path registered twice, or a
+    /// handler with more than one `Path` extractor.
     pub fn get<H, A>(&mut self, path: &str, handler: H) -> &mut Self
     where
         H: Handler<S, A>,
@@ -275,6 +283,14 @@ impl<S: Send + Sync + 'static> App<S> {
         self
     }
 
+    /// Registers a `HEAD` handler.
+    ///
+    /// # Panics
+    ///
+    /// At registration, on a mistake that would otherwise surface only in
+    /// production: a `path` that does not start with `/`, a malformed template
+    /// (`{id`, `{}`, `x{id}`), the same method and path registered twice, or a
+    /// handler with more than one `Path` extractor.
     pub fn head<H, A>(&mut self, path: &str, handler: H) -> &mut Self
     where
         H: Handler<S, A>,
@@ -283,6 +299,14 @@ impl<S: Send + Sync + 'static> App<S> {
         self
     }
 
+    /// Registers a `POST` handler.
+    ///
+    /// # Panics
+    ///
+    /// At registration, on a mistake that would otherwise surface only in
+    /// production: a `path` that does not start with `/`, a malformed template
+    /// (`{id`, `{}`, `x{id}`), the same method and path registered twice, or a
+    /// handler with more than one `Path` extractor.
     pub fn post<H, A>(&mut self, path: &str, handler: H) -> &mut Self
     where
         H: Handler<S, A>,
@@ -291,6 +315,14 @@ impl<S: Send + Sync + 'static> App<S> {
         self
     }
 
+    /// Registers a `PUT` handler.
+    ///
+    /// # Panics
+    ///
+    /// At registration, on a mistake that would otherwise surface only in
+    /// production: a `path` that does not start with `/`, a malformed template
+    /// (`{id`, `{}`, `x{id}`), the same method and path registered twice, or a
+    /// handler with more than one `Path` extractor.
     pub fn put<H, A>(&mut self, path: &str, handler: H) -> &mut Self
     where
         H: Handler<S, A>,
@@ -299,6 +331,14 @@ impl<S: Send + Sync + 'static> App<S> {
         self
     }
 
+    /// Registers a `PATCH` handler.
+    ///
+    /// # Panics
+    ///
+    /// At registration, on a mistake that would otherwise surface only in
+    /// production: a `path` that does not start with `/`, a malformed template
+    /// (`{id`, `{}`, `x{id}`), the same method and path registered twice, or a
+    /// handler with more than one `Path` extractor.
     pub fn patch<H, A>(&mut self, path: &str, handler: H) -> &mut Self
     where
         H: Handler<S, A>,
@@ -307,6 +347,14 @@ impl<S: Send + Sync + 'static> App<S> {
         self
     }
 
+    /// Registers a `DELETE` handler.
+    ///
+    /// # Panics
+    ///
+    /// At registration, on a mistake that would otherwise surface only in
+    /// production: a `path` that does not start with `/`, a malformed template
+    /// (`{id`, `{}`, `x{id}`), the same method and path registered twice, or a
+    /// handler with more than one `Path` extractor.
     pub fn delete<H, A>(&mut self, path: &str, handler: H) -> &mut Self
     where
         H: Handler<S, A>,
@@ -315,6 +363,14 @@ impl<S: Send + Sync + 'static> App<S> {
         self
     }
 
+    /// Registers an `OPTIONS` handler (replaces the automatic `204` + `Allow`).
+    ///
+    /// # Panics
+    ///
+    /// At registration, on a mistake that would otherwise surface only in
+    /// production: a `path` that does not start with `/`, a malformed template
+    /// (`{id`, `{}`, `x{id}`), the same method and path registered twice, or a
+    /// handler with more than one `Path` extractor.
     pub fn options<H, A>(&mut self, path: &str, handler: H) -> &mut Self
     where
         H: Handler<S, A>,
@@ -326,6 +382,13 @@ impl<S: Send + Sync + 'static> App<S> {
     /// Register a handler that receives Hyper's streaming `Incoming` body
     /// directly. The framework does not collect or size-limit this body; the
     /// handler owns cancellation and any upload limits.
+    ///
+    /// # Panics
+    ///
+    /// At registration, on a mistake that would otherwise surface only in
+    /// production: a `path` that does not start with `/`, a malformed template
+    /// (`{id`, `{}`, `x{id}`), the same method and path registered twice, or a
+    /// handler with more than one `Path` extractor.
     pub fn raw<H>(&mut self, method: Method, path: &str, handler: H) -> &mut Self
     where
         H: RawHandler<S>,

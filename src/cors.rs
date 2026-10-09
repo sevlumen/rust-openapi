@@ -35,6 +35,7 @@ struct CorsConfig {
 /// By default nothing is allowed: add origins with
 /// [`allow_origin`](Self::allow_origin) or [`allow_any_origin`](Self::allow_any_origin).
 #[derive(Clone)]
+#[must_use = "middleware does nothing until it is registered with `App::layer`"]
 pub struct Cors {
     config: Arc<CorsConfig>,
 }

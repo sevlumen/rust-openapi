@@ -26,6 +26,7 @@ const BLOCKING_THRESHOLD: usize = 16 * 1024;
 /// it away from endpoints that carry secrets next to attacker-chosen input
 /// over TLS (BREACH).
 #[derive(Clone)]
+#[must_use = "middleware does nothing until it is registered with `App::layer`"]
 pub struct Compress {
     min_size: usize,
     level: u32,

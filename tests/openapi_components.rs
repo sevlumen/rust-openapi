@@ -168,7 +168,7 @@ fn two_different_types_with_one_name_fail_the_build() {
     let mut app = App::new();
     app.get("/first", first_thing);
     app.get("/second", second_thing);
-    let error = app.build().err().expect("conflicting schema names");
+    let error = app.build().expect_err("conflicting schema names");
     assert_eq!(
         error,
         BuildError::SchemaNameConflict {

@@ -20,6 +20,7 @@ type PanicHook = Arc<dyn Fn(&str) + Send + Sync>;
 /// profile the process still aborts. Register it first (`app.layer(...)`
 /// before other layers) to cover every layer.
 #[derive(Clone)]
+#[must_use = "middleware does nothing until it is registered with `App::layer`"]
 pub struct CatchPanic {
     hook: Option<PanicHook>,
 }

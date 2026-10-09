@@ -103,6 +103,7 @@ fn build_shards(max_keys: usize, burst: f64) -> Box<[Mutex<State>]> {
 /// proxy's address, so key on the header it sets instead, and only trust that
 /// header if the proxy overwrites what clients send.
 #[derive(Clone)]
+#[must_use = "middleware does nothing until it is registered with `App::layer`"]
 pub struct RateLimit {
     limiter: Arc<Limiter>,
 }

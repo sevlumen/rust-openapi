@@ -4,6 +4,8 @@
 //! document is assembled when routes are registered and is only serialized when
 //! the explicitly registered OpenAPI endpoint is requested.
 
+#![warn(missing_debug_implementations)]
+
 pub use bytes::Bytes;
 use http::{HeaderValue, Request, Response, StatusCode, header};
 use http_body_util::{BodyExt, LengthLimitError, Limited};
@@ -29,6 +31,7 @@ mod codec;
 #[cfg(feature = "compression")]
 mod compress;
 mod cors;
+mod debug_impls;
 mod error_format;
 mod extract;
 mod group;

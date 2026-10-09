@@ -14,6 +14,7 @@ pub struct TraceRecord {
 
 /// Middleware that reports every request after its response is produced.
 #[derive(Clone)]
+#[must_use = "middleware does nothing until it is registered with `App::layer`"]
 pub struct Trace {
     sink: Arc<dyn Fn(&TraceRecord) + Send + Sync>,
 }

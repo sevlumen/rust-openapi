@@ -13,6 +13,7 @@ const MAX_LEN: usize = 128;
 /// Generated ids are unique within the process and across restarts, but they
 /// are not random: do not use them as secrets.
 #[derive(Clone)]
+#[must_use = "middleware does nothing until it is registered with `App::layer`"]
 pub struct RequestId {
     name: http::HeaderName,
     prefix: u64,

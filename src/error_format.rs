@@ -47,6 +47,7 @@ type Hook = dyn Fn(&ErrorInfo) -> HttpResponse + Send + Sync;
 /// describes the default `Problem` schema: turn it off with
 /// `app.openapi().document_errors(false)` when you change the format.
 #[derive(Clone)]
+#[must_use = "middleware does nothing until it is registered with `App::layer`"]
 pub struct ErrorFormat {
     hook: Arc<Hook>,
 }

@@ -5,6 +5,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-10-09
+
+### Added
+- `Debug` for every public type that lacked it (`App`, `Group`, `AppRuntime`,
+  the middleware types, `Multipart`, `Field`, `ResponseBody`, `TestResponse`,
+  ...). They print the type name only, so a `BearerAuth` token or a closure
+  never shows up in `{:?}`. `#![warn(missing_debug_implementations)]` keeps it
+  that way. This also lets tests call `Result::expect_err` on `App::build()`.
+- `#[must_use]` on the middleware builders (`BearerAuth`, `Cors`, `Compress`,
+  `ServeDir`, `RateLimit`, `RequestId`, `Trace`, `ErrorFormat`, `CatchPanic`):
+  creating one and not registering it with `App::layer` now warns.
+- A `# Panics` section on the route registration methods (`get`, `post`, ...,
+  `raw`) naming the registration mistakes that panic.
+
 ## [0.8.5] - 2026-10-09
 
 ### Fixed

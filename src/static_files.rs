@@ -56,6 +56,7 @@ struct Config {
 /// rate limits, `Cors`) do not run for served files: register `Cors` first if
 /// fonts are fetched cross-origin.
 #[derive(Clone)]
+#[must_use = "middleware does nothing until it is registered with `App::layer`"]
 pub struct ServeDir {
     config: Arc<Config>,
 }
