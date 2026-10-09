@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-10-09
+
 ### Fixed
 - A query struct with a `#[serde(flatten)]` field no longer fails on a `String`
   that looks like a number or bool (`?q=123&size=10` with a flattened
