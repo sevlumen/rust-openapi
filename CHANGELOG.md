@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-10-09
+
 ### Fixed
 - HTTP/2: a large buffered response (over 32 KiB) was still cut off when a
   slow client let the flow-control window fill for longer than
