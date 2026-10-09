@@ -12,11 +12,31 @@ const MAX_UNPRODUCTIVE: u64 = 256 * 1024;
 
 /// Bytes pulled from the body since the parser last produced something.
 #[derive(Default)]
-struct Progress(AtomicU64);
+struct Progress {
+    unproductive: AtomicU64,
+    /// A `Field` was dropped before its data was read to the end, so the
+    /// parser is discarding it: those bytes are not a malformed preamble.
+    draining: std::sync::atomic::AtomicBool,
+}
 
 impl Progress {
     fn made(&self) {
-        self.0.store(0, Ordering::Relaxed);
+        self.unproductive.store(0, Ordering::Relaxed);
+        self.draining.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Marks the stream as draining when a [`Field`] is dropped unfinished.
+struct SkipGuard {
+    progress: Option<Arc<Progress>>,
+    finished: bool,
+}
+
+impl Drop for SkipGuard {
+    fn drop(&mut self) {
+        if let (Some(progress), false) = (&self.progress, self.finished) {
+            progress.draining.store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -36,9 +56,14 @@ impl Stream for GuardedBody {
                 // What was pulled before this chunk and produced nothing. A
                 // single large chunk from the connection is not a violation by
                 // itself, so the bound is `MAX_UNPRODUCTIVE` plus one chunk.
+                if self.progress.draining.load(Ordering::Relaxed) {
+                    // Skipping a part: the whole-stream limit bounds this.
+                    self.progress.unproductive.store(0, Ordering::Relaxed);
+                    return Poll::Ready(Some(Ok(bytes)));
+                }
                 let before = self
                     .progress
-                    .0
+                    .unproductive
                     .fetch_add(bytes.len() as u64, Ordering::Relaxed);
                 if before > MAX_UNPRODUCTIVE {
                     return Poll::Ready(Some(Err(std::io::Error::new(
@@ -178,6 +203,10 @@ impl Multipart {
         Ok(field.map(|inner| Field {
             inner,
             progress: self.progress.clone(),
+            skip: SkipGuard {
+                progress: self.progress.clone(),
+                finished: false,
+            },
         }))
     }
 }
@@ -186,6 +215,7 @@ impl Multipart {
 pub struct Field {
     inner: multer::Field<'static>,
     progress: Option<Arc<Progress>>,
+    skip: SkipGuard,
 }
 
 impl Field {
@@ -211,6 +241,9 @@ impl Field {
         let chunk = self.inner.chunk().await.map_err(map_error)?;
         if let Some(progress) = &self.progress {
             progress.made();
+        }
+        if chunk.is_none() {
+            self.skip.finished = true;
         }
         Ok(chunk)
     }

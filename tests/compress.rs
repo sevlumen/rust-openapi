@@ -162,7 +162,10 @@ async fn incompressible_types_empty_bodies_and_head_are_left_alone() {
     let head = runtime
         .oneshot(Method::HEAD, "/big", &[("accept-encoding", "gzip")], None)
         .await;
-    assert!(head.header("content-encoding").is_none());
+    // HEAD mirrors the GET it stands for, headers included.
+    assert_eq!(head.header("content-encoding"), Some("gzip"));
+    // The compressed size is unknown, so no (wrong) length is claimed.
+    assert_eq!(head.header("content-length"), None);
 }
 
 #[tokio::test]

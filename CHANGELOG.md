@@ -19,6 +19,23 @@ All notable changes to this project are documented here. The format follows
   add up to `max_keys` (the remainder is spread over the first shards) instead
   of each shard rounding up.
 - `RateLimit` docs no longer say there is no peer-address key.
+- HTTP/2 connections (h2c and TLS/ALPN) no longer hold up shutdown or a
+  `max_connections` slot when the peer goes silent: an idle connection is
+  closed after `header_read_timeout`, an idle one asked to go away at shutdown
+  gets 2 seconds, and keep-alive PINGs drop a half-open peer. Connections with
+  requests in flight are never cut.
+- Multipart: dropping a `Field` without reading it (skipping a large part) is
+  no longer rejected by the unproductive-bytes guard.
+- `ServeDir` describes the file it actually opened (`Content-Length`, `ETag`
+  from that handle and the bytes read), and its directory redirect is built
+  from the normalized path, so `//host/dir` can no longer produce the
+  protocol-relative `Location: //host/dir/`.
+- `Compress` on `HEAD` mirrors the GET (`Content-Encoding`, weak `ETag`, no
+  claimed length); `ErrorFormat` keeps the GET's `Content-Length` on `HEAD`.
+- Registering a route path that does not start with `/` panics instead of
+  being silently normalized.
+- `ApiError` implements `Display` and `std::error::Error`.
+- `hyper-util` requires `0.1.5`; a stray NUL byte in `bearer.rs` is gone.
 
 ### Added
 - Stress tests for an upload dropped halfway (the connection slot comes back),

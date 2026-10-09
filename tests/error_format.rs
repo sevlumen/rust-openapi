@@ -141,3 +141,13 @@ async fn without_the_layer_errors_keep_the_default_problem_format() {
     assert_eq!(body["title"], "Bad Request");
     assert_eq!(body["detail"], "it broke");
 }
+
+#[tokio::test]
+async fn a_head_error_keeps_the_content_length_of_the_get() {
+    let get = runtime().oneshot(Method::GET, "/fail", &[], None).await;
+    let length = get.body_string().await.len().to_string();
+    let head = runtime().oneshot(Method::HEAD, "/fail", &[], None).await;
+    assert_eq!(head.status(), 400);
+    assert_eq!(head.header("content-length"), Some(length.as_str()));
+    assert_eq!(head.body_string().await, "");
+}

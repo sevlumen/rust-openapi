@@ -100,7 +100,7 @@ fn nested_types_are_referenced_not_inlined() {
     );
     assert_eq!(
         order["properties"]["maybe"],
-        json!({ "oneOf": [item_ref(), { "type": "null" }] })
+        json!({ "anyOf": [item_ref(), { "type": "null" }] })
     );
     assert_eq!(
         order["properties"]["status"],
@@ -248,7 +248,7 @@ fn box_and_map_nesting_uses_references_and_recursion_terminates() {
     let tree = &doc["components"]["schemas"]["Tree"]["properties"];
     assert_eq!(
         tree["left"],
-        json!({ "oneOf": [{ "$ref": "#/components/schemas/Tree" }, { "type": "null" }] })
+        json!({ "anyOf": [{ "$ref": "#/components/schemas/Tree" }, { "type": "null" }] })
     );
     assert_eq!(tree["boxed"], item_ref());
     assert_eq!(

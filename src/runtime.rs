@@ -806,10 +806,23 @@ where
         let connection =
             ConnectionRuntime::new(Arc::clone(&runtime), peer.filter(|_| connect_info))
                 .with_permit(slot.clone());
-        let service = hyper::service::service_fn(move |request: Request<Incoming>| {
-            let prepared = connection.prepare(request);
-            async move { Ok::<_, Infallible>(prepared.await) }
-        });
+        // Only HTTP/2 connections track their activity (to reclaim idle ones).
+        #[cfg(feature = "http2")]
+        let activity = h2c.then(Activity::new);
+        #[cfg(not(feature = "http2"))]
+        let activity: Option<Arc<Activity>> = None;
+        let service = {
+            let activity = activity.clone();
+            hyper::service::service_fn(move |request: Request<Incoming>| {
+                let guard = activity.as_ref().map(ActivityGuard::start);
+                let prepared = connection.prepare(request);
+                async move {
+                    let response = prepared.await;
+                    drop(guard);
+                    Ok::<_, Infallible>(response)
+                }
+            })
+        };
         let observer = observer.clone();
         let mut stop = signal.subscribe();
         let done = done_tx.clone();
@@ -851,15 +864,13 @@ where
                     inner: stream,
                 });
                 let outcome = if is_h2 {
-                    let mut builder = hyper::server::conn::http2::Builder::new(
-                        hyper_util::rt::TokioExecutor::new(),
-                    );
-                    if let Some(limit) = max_streams {
-                        builder.max_concurrent_streams(limit);
-                    }
-                    drive(
+                    let builder = http2_builder(max_streams);
+                    let activity = activity.unwrap_or_else(Activity::new);
+                    drive_h2(
                         builder.serve_connection(io, service),
                         &mut stop,
+                        &activity,
+                        header_read_timeout,
                         |connection| connection.graceful_shutdown(),
                     )
                     .await
@@ -899,6 +910,136 @@ where
     drop(done_tx);
     let _ = tokio::time::timeout(shutdown_timeout, done_rx.recv()).await;
     Ok(())
+}
+
+/// What a connection is doing, shared with the service: how many requests are
+/// in flight and since when it has been idle. Only HTTP/2 connections use it.
+#[cfg_attr(not(feature = "http2"), allow(dead_code))]
+pub(crate) struct Activity {
+    in_flight: std::sync::atomic::AtomicUsize,
+    idle_since: std::sync::Mutex<std::time::Instant>,
+}
+
+#[cfg_attr(not(feature = "http2"), allow(dead_code))]
+impl Activity {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            idle_since: std::sync::Mutex::new(std::time::Instant::now()),
+        })
+    }
+
+    /// How long no request has been in flight, or `None` while one is.
+    fn idle_for(&self) -> Option<Duration> {
+        (self.in_flight.load(std::sync::atomic::Ordering::Acquire) == 0).then(|| {
+            self.idle_since
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .elapsed()
+        })
+    }
+}
+
+/// Counts a request as in flight until it is dropped (finished or reset).
+pub(crate) struct ActivityGuard(Arc<Activity>);
+
+impl ActivityGuard {
+    pub(crate) fn start(activity: &Arc<Activity>) -> Self {
+        activity
+            .in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self(Arc::clone(activity))
+    }
+}
+
+impl Drop for ActivityGuard {
+    fn drop(&mut self) {
+        if self
+            .0
+            .in_flight
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+            == 1
+        {
+            *self
+                .0
+                .idle_since
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = std::time::Instant::now();
+        }
+    }
+}
+
+/// How long an idle HTTP/2 connection, asked to go away at shutdown, gets to
+/// answer before it is dropped. hyper waits for the peer's PING reply (and,
+/// before the first SETTINGS, for the preface) with no limit of its own.
+#[cfg(feature = "http2")]
+const H2_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+/// Keep-alive PINGs for HTTP/2: a peer that stops answering is dropped.
+#[cfg(feature = "http2")]
+const H2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
+#[cfg(feature = "http2")]
+const H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// An HTTP/2 connection builder with keep-alive PINGs (a half-open peer is
+/// dropped) and the configured stream limit.
+#[cfg(feature = "http2")]
+pub(crate) fn http2_builder(
+    max_streams: Option<u32>,
+) -> hyper::server::conn::http2::Builder<hyper_util::rt::TokioExecutor> {
+    let mut builder =
+        hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new());
+    builder
+        .timer(hyper_util::rt::TokioTimer::new())
+        .keep_alive_interval(H2_KEEP_ALIVE_INTERVAL)
+        .keep_alive_timeout(H2_KEEP_ALIVE_TIMEOUT);
+    if let Some(limit) = max_streams {
+        builder.max_concurrent_streams(limit);
+    }
+    builder
+}
+
+/// Like [`drive`] for HTTP/2, which needs two more things from the server:
+/// an idle connection is closed after `idle` (`None` disables), and at
+/// shutdown an *idle* connection gets only [`H2_SHUTDOWN_GRACE`] to finish the
+/// GOAWAY exchange (a peer that never replies would otherwise hold shutdown
+/// until its timeout). Connections with requests in flight are never cut.
+#[cfg(feature = "http2")]
+pub(crate) async fn drive_h2<C, E>(
+    connection: C,
+    stop: &mut tokio::sync::watch::Receiver<()>,
+    activity: &Activity,
+    idle: Option<Duration>,
+    graceful: impl Fn(Pin<&mut C>),
+) -> Result<(), E>
+where
+    C: Future<Output = Result<(), E>>,
+{
+    let mut connection = std::pin::pin!(connection);
+    let mut closing: Option<std::time::Instant> = None;
+    let mut ticker = tokio::time::interval(Duration::from_millis(250));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            result = connection.as_mut() => return result,
+            _ = stop.changed(), if closing.is_none() => {
+                graceful(connection.as_mut());
+                closing = Some(std::time::Instant::now());
+            }
+            _ = ticker.tick() => {
+                let idle_for = activity.idle_for();
+                match (closing, idle_for) {
+                    (Some(since), Some(_)) if since.elapsed() >= H2_SHUTDOWN_GRACE => {
+                        return Ok(());
+                    }
+                    (None, Some(idle_for)) if idle.is_some_and(|limit| idle_for >= limit) => {
+                        graceful(connection.as_mut());
+                        closing = Some(std::time::Instant::now());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 /// Drives a connection until it ends, asking it to finish gracefully (idle

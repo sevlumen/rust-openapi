@@ -772,6 +772,10 @@ impl<S: Send + Sync + 'static> App<S> {
     where
         H: Handler<S, A>,
     {
+        assert!(
+            path.starts_with('/'),
+            "route path {path:?} must start with '/'"
+        );
         let template = normalize_path(path);
         assert!(
             self.metadata
@@ -855,7 +859,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 response_schema: <H::Response as ResponseMetadata>::response_schema_with(
                     &mut self.schemas,
                 ),
-                request: H::openapi_request_with(&mut self.schemas),
+                request: single_path_extractor(H::openapi_request_with(&mut self.schemas)),
             },
         });
         self.openapi_bytes = None;
@@ -1156,4 +1160,16 @@ fn problem_schema() -> Value {
             "detail": { "type": "string" }
         }
     })
+}
+
+/// Every `Path<T>` extractor reads the first path capture, so a handler with
+/// two of them would hand both the same value. Use one `Path<T>` for a single
+/// capture, or `Params` for several.
+fn single_path_extractor(request: OpenApiRequest) -> OpenApiRequest {
+    assert!(
+        request.path_schemas.len() <= 1,
+        "a handler cannot take more than one Path<T> extractor (each reads the first \
+         capture); use `Params` to read several path captures"
+    );
+    request
 }

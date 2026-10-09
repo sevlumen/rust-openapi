@@ -19,6 +19,8 @@ pub(crate) struct SerdeAttrs {
     pub(crate) transparent: bool,
     pub(crate) deny_unknown_fields: bool,
     pub(crate) rename_all_fields: Option<String>,
+    /// `alias`, `with` or `deserialize_with`: serde must do the decoding.
+    pub(crate) custom_decode: bool,
 }
 
 impl SerdeAttrs {
@@ -99,6 +101,12 @@ pub(crate) fn parse(attrs: &[Attribute]) -> syn::Result<SerdeAttrs> {
             } else if meta.path.is_ident("default") {
                 found.default = true;
                 skip_meta(&meta)?;
+            } else if meta.path.is_ident("alias")
+                || meta.path.is_ident("with")
+                || meta.path.is_ident("deserialize_with")
+            {
+                found.custom_decode = true;
+                skip_meta(&meta)?;
             } else if meta.path.is_ident("skip_serializing_if") {
                 found.skip_serializing_if = true;
                 skip_meta(&meta)?;
@@ -145,56 +153,72 @@ pub(crate) fn wire_name(
     }
 }
 
+/// Serde's own casing rules, ported rule for rule (including how they treat
+/// underscores, existing capitals and the base identifier convention: field
+/// names are `snake_case`, variant names `PascalCase`), so the schema names are
+/// exactly what serde writes.
 fn apply_rename_all(rule: &str, original: &str, base: NameBase) -> Option<String> {
-    let words = split_words(original, base);
-    let capitalize = |word: &String| {
-        let mut chars = word.chars();
-        chars
-            .next()
-            .map(|first| first.to_uppercase().chain(chars).collect::<String>())
-            .unwrap_or_default()
-    };
-    Some(match rule {
-        "lowercase" => original.to_ascii_lowercase(),
-        "UPPERCASE" => original.to_ascii_uppercase(),
-        "PascalCase" => words.iter().map(capitalize).collect(),
-        "camelCase" => words
-            .iter()
-            .enumerate()
-            .map(|(index, word)| {
-                if index == 0 {
-                    word.clone()
-                } else {
-                    capitalize(word)
+    Some(match base {
+        NameBase::Snake => match rule {
+            "lowercase" | "snake_case" => original.to_owned(),
+            "UPPERCASE" | "SCREAMING_SNAKE_CASE" => original.to_ascii_uppercase(),
+            "PascalCase" => pascal_from_snake(original),
+            "camelCase" => {
+                let pascal = pascal_from_snake(original);
+                match pascal.chars().next() {
+                    Some(first) => {
+                        first.to_ascii_lowercase().to_string() + &pascal[first.len_utf8()..]
+                    }
+                    None => pascal,
                 }
-            })
-            .collect(),
-        "snake_case" => words.join("_"),
-        "SCREAMING_SNAKE_CASE" => words.join("_").to_ascii_uppercase(),
-        "kebab-case" => words.join("-"),
-        "SCREAMING-KEBAB-CASE" => words.join("-").to_ascii_uppercase(),
-        _ => return None,
+            }
+            "kebab-case" => original.replace('_', "-"),
+            "SCREAMING-KEBAB-CASE" => original.to_ascii_uppercase().replace('_', "-"),
+            _ => return None,
+        },
+        NameBase::Pascal => {
+            let snake = || {
+                let mut snake = String::new();
+                for (index, character) in original.char_indices() {
+                    if index > 0 && character.is_uppercase() {
+                        snake.push('_');
+                    }
+                    snake.push(character.to_ascii_lowercase());
+                }
+                snake
+            };
+            match rule {
+                "PascalCase" => original.to_owned(),
+                "lowercase" => original.to_ascii_lowercase(),
+                "UPPERCASE" => original.to_ascii_uppercase(),
+                "camelCase" => match original.chars().next() {
+                    Some(first) => {
+                        first.to_ascii_lowercase().to_string() + &original[first.len_utf8()..]
+                    }
+                    None => String::new(),
+                },
+                "snake_case" => snake(),
+                "SCREAMING_SNAKE_CASE" => snake().to_ascii_uppercase(),
+                "kebab-case" => snake().replace('_', "-"),
+                "SCREAMING-KEBAB-CASE" => snake().to_ascii_uppercase().replace('_', "-"),
+                _ => return None,
+            }
+        }
     })
 }
 
-/// Splits an identifier into lowercase words.
-fn split_words(original: &str, base: NameBase) -> Vec<String> {
-    match base {
-        NameBase::Snake => original
-            .split('_')
-            .filter(|word| !word.is_empty())
-            .map(str::to_ascii_lowercase)
-            .collect(),
-        NameBase::Pascal => {
-            let mut words: Vec<String> = Vec::new();
-            for character in original.chars() {
-                if character.is_uppercase() || words.is_empty() {
-                    words.push(character.to_lowercase().collect());
-                } else if let Some(last) = words.last_mut() {
-                    last.push(character);
-                }
-            }
-            words
+fn pascal_from_snake(original: &str) -> String {
+    let mut pascal = String::new();
+    let mut capitalize = true;
+    for character in original.chars() {
+        if character == '_' {
+            capitalize = true;
+        } else if capitalize {
+            pascal.push(character.to_ascii_uppercase());
+            capitalize = false;
+        } else {
+            pascal.push(character);
         }
     }
+    pascal
 }
