@@ -5,6 +5,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-10-09
+
+### Fixed
+- HTTP/1.1: a client that stops reading a large or streaming response (its
+  receive window and the server's send buffer both full) held its connection,
+  and a `max_connections` slot, for as long as it kept the socket open: hyper
+  has no write timeout. `send_timeout` (added for HTTP/2 in 0.9.3, default
+  60 s) now applies to HTTP/1.1 and to every TLS connection too: a write the
+  socket has refused for that long fails with `TimedOut` and the connection is
+  dropped. The timer exists only while a write is blocked, so writes that
+  complete at once pay nothing.
+
+### Added
+- Miri now also runs the pin projection of `PreparedDispatch` in `runtime.rs`,
+  the one `unsafe` block outside `handler.rs` (three tests named
+  `inline_future_prepared_dispatch_*`, so the existing
+  `cargo +nightly miri test --lib inline_future` command covers them).
+- Deterministic unit tests for the write-stall timer (stuck write fails with
+  `TimedOut`; a write that unblocks in time succeeds; `None` just waits), and
+  Linux integration tests with a client that never reads a 96 MiB response
+  (skipped on Windows, whose loopback absorbs it).
+
 ## [0.9.3] - 2026-10-09
 
 ### Added

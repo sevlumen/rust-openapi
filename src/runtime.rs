@@ -372,15 +372,19 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         self
     }
 
-    /// How long an HTTP/2 client may leave a *streaming or large buffered*
-    /// response unread before the connection is dropped (default
-    /// [`DEFAULT_SEND_TIMEOUT`], 60 s); `None` disables the limit. The clock
-    /// runs only while a response body is blocked waiting for the client's
-    /// flow-control window and no response data has left the server for that
-    /// long, so a quiet stream (an SSE connection between events) and a slow but
-    /// steady reader are never affected, while a client that stops reading (and
-    /// only answers `PING`s) can no longer hold a connection slot forever.
-    /// HTTP/1.1 connections are not covered.
+    /// How long a client may leave a *streaming or large* response unread
+    /// before the connection is dropped (default [`DEFAULT_SEND_TIMEOUT`],
+    /// 60 s); `None` disables the limit, so such a client can hold a
+    /// connection slot for as long as it likes.
+    ///
+    /// On HTTP/1.1 (and under HTTP/2 at the socket level) the clock runs while
+    /// the socket refuses a write, which is a client whose receive window and
+    /// our send buffer are both full. Under HTTP/2 it also runs while a response
+    /// body is blocked waiting for the client's flow-control window and no
+    /// response data has left the server for that long, so a client that keeps
+    /// answering `PING`s but never opens its window is dropped too. A quiet
+    /// stream (an SSE connection between events) and a slow but steady reader are
+    /// never affected.
     pub fn send_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.send_timeout = timeout;
         self
@@ -803,7 +807,6 @@ where
     let shutdown_timeout = runtime.shutdown_timeout;
     let nodelay = runtime.tcp_nodelay;
     let header_read_timeout = runtime.header_read_timeout;
-    #[cfg(feature = "http2")]
     let send_timeout = runtime.send_timeout;
     let limit = connection_limit(runtime.max_connections);
     let connect_info = runtime.connect_info;
@@ -885,6 +888,7 @@ where
                     },
                     // Only HTTP/2 connections are watched (and scanned).
                     activity.clone().filter(|_| is_h2),
+                    send_timeout,
                 ));
                 let outcome = if is_h2 {
                     let builder = http2_builder(max_streams);
@@ -914,7 +918,7 @@ where
             });
             continue;
         }
-        let io = hyper_util::rt::TokioIo::new(stream);
+        let io = hyper_util::rt::TokioIo::new(Tracked::new(stream, None, send_timeout));
         let connection = http1_builder(header_read_timeout).serve_connection(io, service);
         #[cfg(feature = "websocket")]
         let connection = connection.with_upgrades();
@@ -1054,16 +1058,46 @@ pub(crate) struct Tracked<T> {
     pub(crate) inner: T,
     pub(crate) activity: Option<Arc<Activity>>,
     scanner: FrameScanner,
+    /// Fails a write (or flush) the socket has not accepted for this long.
+    send_timeout: Option<Duration>,
+    /// Armed while the socket refuses a write; cleared when it accepts one.
+    stall: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 
 #[cfg_attr(not(any(feature = "http2", feature = "tls")), allow(dead_code))]
 impl<T> Tracked<T> {
-    /// `activity` is `Some` only for HTTP/2 connections; others pass through.
-    pub(crate) fn new(inner: T, activity: Option<Arc<Activity>>) -> Self {
+    /// `activity` is `Some` only for HTTP/2 connections. `send_timeout` bounds
+    /// how long the socket may refuse a write: that is a client not reading
+    /// (its receive window and our send buffer are full), on any protocol.
+    pub(crate) fn new(
+        inner: T,
+        activity: Option<Arc<Activity>>,
+        send_timeout: Option<Duration>,
+    ) -> Self {
         Self {
             inner,
             activity,
             scanner: FrameScanner::default(),
+            send_timeout,
+            stall: None,
+        }
+    }
+
+    /// The socket refused a write: run the stall clock. `Ready` once it has
+    /// run out, `Pending` while the write may still go through.
+    fn stalled(&mut self, context: &mut Context<'_>) -> Poll<std::io::Error> {
+        let Some(limit) = self.send_timeout else {
+            return Poll::Pending;
+        };
+        let sleep = self
+            .stall
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep(limit)));
+        match sleep.as_mut().poll(context) {
+            Poll::Ready(()) => Poll::Ready(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the client did not read the response (send_timeout)",
+            )),
+            Poll::Pending => Poll::Pending,
         }
     }
 
@@ -1093,8 +1127,17 @@ impl<T: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Tracked<T> {
         data: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         let result = Pin::new(&mut self.inner).poll_write(context, data);
-        if let Poll::Ready(Ok(written)) = result {
-            self.observe(&data[..written]);
+        match result {
+            Poll::Ready(Ok(written)) => {
+                self.stall = None;
+                self.observe(&data[..written]);
+            }
+            Poll::Ready(Err(_)) => self.stall = None,
+            Poll::Pending => {
+                if let Poll::Ready(error) = self.stalled(context) {
+                    return Poll::Ready(Err(error));
+                }
+            }
         }
         result
     }
@@ -1105,14 +1148,23 @@ impl<T: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Tracked<T> {
         buffers: &[std::io::IoSlice<'_>],
     ) -> Poll<std::io::Result<usize>> {
         let result = Pin::new(&mut self.inner).poll_write_vectored(context, buffers);
-        if let Poll::Ready(Ok(mut left)) = result {
-            for buffer in buffers {
-                if left == 0 {
-                    break;
+        match result {
+            Poll::Ready(Ok(mut left)) => {
+                self.stall = None;
+                for buffer in buffers {
+                    if left == 0 {
+                        break;
+                    }
+                    let take = left.min(buffer.len());
+                    self.observe(&buffer[..take]);
+                    left -= take;
                 }
-                let take = left.min(buffer.len());
-                self.observe(&buffer[..take]);
-                left -= take;
+            }
+            Poll::Ready(Err(_)) => self.stall = None,
+            Poll::Pending => {
+                if let Poll::Ready(error) = self.stalled(context) {
+                    return Poll::Ready(Err(error));
+                }
             }
         }
         result
@@ -1126,7 +1178,16 @@ impl<T: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Tracked<T> {
         mut self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(context)
+        let result = Pin::new(&mut self.inner).poll_flush(context);
+        match result {
+            Poll::Ready(_) => self.stall = None,
+            Poll::Pending => {
+                if let Poll::Ready(error) = self.stalled(context) {
+                    return Poll::Ready(Err(error));
+                }
+            }
+        }
+        result
     }
 
     fn poll_shutdown(
@@ -1656,5 +1717,184 @@ mod frame_scanner_tests {
         let mut scanner = FrameScanner::default();
         assert!(scanner.feed(&frame(0, 40_000)));
         assert!(!scanner.feed(&frame(6, 8)));
+    }
+}
+
+/// Exercises the pin projection in `PreparedDispatch::poll` (the one `unsafe`
+/// block outside `handler.rs`). The names contain `inline_future` so the
+/// existing Miri command (`cargo +nightly miri test --lib inline_future`) runs
+/// them.
+#[cfg(test)]
+mod prepared_dispatch_tests {
+    use std::{marker::PhantomPinned, task::Waker};
+
+    use super::*;
+
+    /// Polls to completion with a no-op waker, counting the polls.
+    fn run<F: Future>(future: F) -> (F::Output, usize) {
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        let mut polls = 0;
+        loop {
+            polls += 1;
+            if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+                return (output, polls);
+            }
+            assert!(polls < 10, "never finished");
+        }
+    }
+
+    /// A `!Unpin` future that records where it lives and checks it never moves
+    /// between polls.
+    struct Anchored {
+        address: Option<usize>,
+        polls: u8,
+        _pin: PhantomPinned,
+    }
+
+    impl Future for Anchored {
+        type Output = &'static str;
+
+        fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+            // SAFETY: the future is only inspected, never moved out of.
+            let this = unsafe { self.get_unchecked_mut() };
+            let here = this as *mut Self as usize;
+            match this.address {
+                None => this.address = Some(here),
+                Some(first) => assert_eq!(first, here, "the pinned future moved"),
+            }
+            this.polls += 1;
+            if this.polls < 3 {
+                context.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready("anchored")
+            }
+        }
+    }
+
+    fn anchored() -> Anchored {
+        Anchored {
+            address: None,
+            polls: 0,
+            _pin: PhantomPinned,
+        }
+    }
+
+    #[test]
+    fn inline_future_prepared_dispatch_polls_a_handler_in_place() {
+        let dispatch = PreparedDispatch::Handler {
+            is_head: false,
+            future: HandlerFuture::from_response_future(anchored()),
+        };
+        let (response, polls) = run(dispatch);
+        assert_eq!(polls, 3);
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn inline_future_prepared_dispatch_strips_a_head_body_but_keeps_its_length() {
+        let dispatch = PreparedDispatch::Handler {
+            is_head: true,
+            future: HandlerFuture::from_response_future(anchored()),
+        };
+        let (response, _) = run(dispatch);
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "8");
+        assert_eq!(http_body::Body::size_hint(response.body()).exact(), Some(0));
+    }
+
+    #[test]
+    fn inline_future_prepared_dispatch_returns_a_ready_or_buffered_response() {
+        let ready = PreparedDispatch::Ready(Some("ready".into_response()));
+        let (response, polls) = run(ready);
+        assert_eq!((response.status(), polls), (StatusCode::OK, 1));
+
+        let boxed = PreparedDispatch::Buffered(Box::pin(async { "boxed".into_response() }));
+        let (response, polls) = run(boxed);
+        assert_eq!((response.status(), polls), (StatusCode::OK, 1));
+    }
+}
+
+#[cfg(test)]
+mod send_timeout_tests {
+    use std::time::Instant;
+
+    use tokio::io::AsyncWriteExt;
+
+    use super::*;
+
+    /// A writer that accepts nothing until `delay` has passed (a client that
+    /// is not reading: the socket buffer is full).
+    struct Delayed {
+        sleep: Pin<Box<tokio::time::Sleep>>,
+    }
+
+    impl Delayed {
+        fn new(delay: Duration) -> Self {
+            Self {
+                sleep: Box::pin(tokio::time::sleep(delay)),
+            }
+        }
+    }
+
+    impl tokio::io::AsyncWrite for Delayed {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+            data: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            match self.sleep.as_mut().poll(context) {
+                Poll::Ready(()) => Poll::Ready(Ok(data.len())),
+                Poll::Pending => Poll::Pending,
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_stuck_for_longer_than_the_send_timeout_fails_with_timed_out() {
+        let mut io = Tracked::new(
+            Delayed::new(Duration::from_secs(30)),
+            None,
+            Some(Duration::from_millis(100)),
+        );
+        let started = Instant::now();
+        let error = tokio::time::timeout(Duration::from_secs(5), io.write_all(b"hello"))
+            .await
+            .expect("the stuck write was never failed")
+            .expect_err("should time out");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(90) && waited < Duration::from_secs(5),
+            "{waited:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_write_that_unblocks_in_time_succeeds_and_the_clock_restarts() {
+        let mut io = Tracked::new(
+            Delayed::new(Duration::from_millis(50)),
+            None,
+            Some(Duration::from_millis(500)),
+        );
+        io.write_all(b"hello").await.unwrap();
+        // Immediately writable now: many more writes, none of them stuck.
+        for _ in 0..100 {
+            io.write_all(b"again").await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn without_a_send_timeout_a_stuck_write_just_waits() {
+        let mut io = Tracked::new(Delayed::new(Duration::from_millis(300)), None, None);
+        io.write_all(b"hello").await.unwrap();
     }
 }

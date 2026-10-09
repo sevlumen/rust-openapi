@@ -105,10 +105,11 @@ let runtime = app
   steadily, even with 16-byte windows, never does. A streaming (or large
   buffered) response counts as in flight until it ends. `send_timeout`
   (default 60 s, `None` disables) frees the connection of a client that stops
-  reading such a response (it keeps answering `PING`s but never opens its
-  window): the clock runs only while a response body is waiting for the client
-  and nothing has been sent, so a quiet SSE stream is left alone. HTTP/1.1
-  has no send timeout; put a reverse proxy in front of public servers.
+  reading a streaming or large response, on HTTP/1.1 and HTTP/2 alike: the
+  clock runs while the socket refuses a write (its buffers are full because
+  the client is not reading) and, under HTTP/2, while a response body waits for
+  a window the client never opens even though it keeps answering `PING`s. A
+  quiet SSE stream and a slow but steady reader are left alone.
 - `body_read_timeout` (default 60 s, `None` disables) bounds how long a
   *buffered* request body (`Json`, `Form`, `Multipart`) may take to arrive in
   full; a body still incomplete then gets `408` and the connection is closed,
