@@ -264,17 +264,19 @@ async fn shape() -> Json<Shape> {
 }
 
 #[test]
-fn in_a_document_nested_types_are_referenced() {
+fn in_a_document_nested_types_are_referenced_but_flattened_ones_are_merged() {
     let mut app = App::new();
     app.get("/account", account);
     app.get("/shape", shape);
     let doc = app.openapi_document();
     let account = &doc["components"]["schemas"]["Account"];
+    // A flattened struct is merged into the object, so it is inlined (a
+    // `$ref` to a component that also forbids unknown properties could never
+    // validate the outer struct's own fields).
     assert_eq!(
-        account["allOf"][0],
-        json!({ "$ref": "#/components/schemas/Meta" })
+        account["allOf"][0]["properties"]["created_by"]["type"],
+        "string"
     );
-    assert!(doc["components"]["schemas"]["Meta"].is_object());
     assert!(doc["components"]["schemas"]["Shape"]["oneOf"].is_array());
 }
 
@@ -344,7 +346,7 @@ fn an_option_field_is_nullable_but_not_required() {
     let schema = OptField::schema_for_document();
     assert_eq!(
         schema["properties"]["q"],
-        json!({ "oneOf": [{ "type": "string" }, { "type": "null" }] })
+        json!({ "anyOf": [{ "type": "string" }, { "type": "null" }] })
     );
     assert!(schema.get("required").is_none());
 }
@@ -501,4 +503,169 @@ struct SameRename {
 #[test]
 fn a_rename_with_equal_directions_is_honored() {
     assert!(SameRename::schema()["properties"].get("fullName").is_some());
+}
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+#[serde(deny_unknown_fields)]
+struct Strict2 {
+    a: u32,
+}
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+struct FlatStrict {
+    id: u32,
+    #[serde(flatten)]
+    inner: Strict2,
+}
+
+#[test]
+fn flattening_a_deny_unknown_fields_struct_does_not_forbid_the_outer_fields() {
+    let schema = FlatStrict::schema();
+    assert!(
+        schema["allOf"][0].get("additionalProperties").is_none(),
+        "{schema}"
+    );
+    // On its own the strict struct still forbids unknown properties.
+    assert_eq!(Strict2::schema()["additionalProperties"], false);
+}
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+#[serde(untagged)]
+enum MaybeNull {
+    Number(u32),
+    Nothing,
+}
+
+#[test]
+fn an_option_of_something_that_admits_null_still_accepts_null() {
+    // `null` matches both `MaybeNull::Nothing` and the `null` alternative, so
+    // the combinator must be `anyOf`.
+    let schema =
+        <Option<MaybeNull> as ApiSchema>::schema_with(&mut oas_rs::SchemaRegistry::inline());
+    assert!(
+        schema.get("anyOf").is_some() && schema.get("oneOf").is_none(),
+        "{schema}"
+    );
+}
+
+macro_rules! rename_probe {
+    ($module:ident, $rule:literal) => {
+        mod $module {
+            use super::*;
+
+            #[derive(Serialize, Deserialize, ApiSchema, Default)]
+            #[serde(rename_all = $rule)]
+            #[allow(non_snake_case)]
+            pub struct Fields {
+                pub a__b: u8,
+                pub _lead: u8,
+                pub plain_word: u8,
+                pub x: u8,
+                pub HTTP_server: u8,
+            }
+
+            #[derive(Serialize, Deserialize, ApiSchema)]
+            #[allow(non_camel_case_types, dead_code)]
+            #[serde(rename_all = $rule)]
+            pub enum Variants {
+                Foo_Bar,
+                lower_snake,
+                HTTPServer,
+                Plain,
+                X,
+            }
+
+            pub fn serde_field_names() -> Vec<String> {
+                let value = serde_json::to_value(Fields::default()).unwrap();
+                let mut names: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+                names.sort();
+                names
+            }
+
+            pub fn schema_field_names() -> Vec<String> {
+                let schema = Fields::schema();
+                let mut names: Vec<String> = schema["properties"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .cloned()
+                    .collect();
+                names.sort();
+                names
+            }
+
+            pub fn serde_variant_names() -> Vec<String> {
+                let all = [
+                    Variants::Foo_Bar,
+                    Variants::lower_snake,
+                    Variants::HTTPServer,
+                    Variants::Plain,
+                    Variants::X,
+                ];
+                let mut names: Vec<String> = all
+                    .iter()
+                    .map(|variant| {
+                        serde_json::to_value(variant)
+                            .unwrap()
+                            .as_str()
+                            .unwrap()
+                            .to_owned()
+                    })
+                    .collect();
+                names.sort();
+                names
+            }
+
+            pub fn schema_variant_names() -> Vec<String> {
+                let schema = Variants::schema();
+                let mut names: Vec<String> = schema["enum"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.as_str().unwrap().to_owned())
+                    .collect();
+                names.sort();
+                names
+            }
+        }
+    };
+}
+
+rename_probe!(r_lower, "lowercase");
+rename_probe!(r_upper, "UPPERCASE");
+rename_probe!(r_pascal, "PascalCase");
+rename_probe!(r_camel, "camelCase");
+rename_probe!(r_snake, "snake_case");
+rename_probe!(r_screaming, "SCREAMING_SNAKE_CASE");
+rename_probe!(r_kebab, "kebab-case");
+rename_probe!(r_screaming_kebab, "SCREAMING-KEBAB-CASE");
+
+#[test]
+fn rename_all_produces_exactly_the_names_serde_writes() {
+    macro_rules! check {
+        ($($module:ident),*) => {$(
+            assert_eq!(
+                $module::schema_field_names(),
+                $module::serde_field_names(),
+                "fields under {}",
+                stringify!($module)
+            );
+            assert_eq!(
+                $module::schema_variant_names(),
+                $module::serde_variant_names(),
+                "variants under {}",
+                stringify!($module)
+            );
+        )*};
+    }
+    check!(
+        r_lower,
+        r_upper,
+        r_pascal,
+        r_camel,
+        r_snake,
+        r_screaming,
+        r_kebab,
+        r_screaming_kebab
+    );
 }

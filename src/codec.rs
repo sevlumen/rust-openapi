@@ -42,6 +42,38 @@ pub fn parse_query_guided<T: DeserializeOwned>(
     parse_query_typed(query, parameters)
 }
 
+/// The `items` schema of an array parameter, looking through the
+/// `oneOf`/`anyOf` that a nullable (`Option`) field produces.
+fn array_items(schema: &Value) -> Option<&Value> {
+    if schema["type"] == "array" {
+        return Some(&schema["items"]);
+    }
+    ["oneOf", "anyOf"]
+        .iter()
+        .filter_map(|key| schema[*key].as_array())
+        .flatten()
+        .find_map(array_items)
+}
+
+/// A query value as JSON of the declared scalar type (integers, numbers and
+/// booleans when they parse; otherwise the text).
+fn scalar(kind: Option<&str>, value: String) -> Value {
+    match (kind, value.as_str()) {
+        (Some("boolean"), "true") => Value::Bool(true),
+        (Some("boolean"), "false") => Value::Bool(false),
+        (Some("integer"), text) => text
+            .parse::<i64>()
+            .map(|number| json!(number))
+            .or_else(|_| text.parse::<u64>().map(|number| json!(number)))
+            .unwrap_or(Value::String(value)),
+        (Some("number"), text) => match text.parse::<f64>() {
+            Ok(parsed) if parsed.is_finite() => json!(parsed),
+            _ => Value::String(value),
+        },
+        _ => Value::String(value),
+    }
+}
+
 /// The JSON type a parameter schema declares, looking through the
 /// `oneOf`/`anyOf` that a nullable (`Option`) field produces.
 fn declared_type(schema: &Value) -> Option<&str> {
@@ -70,11 +102,29 @@ fn parse_query_typed<T: DeserializeOwned>(
             .find(|parameter| parameter["name"] == name)
             .and_then(|parameter| declared_type(&parameter["schema"]))
     };
+    let array_items = |name: &str| {
+        parameters
+            .iter()
+            .find(|parameter| parameter["name"] == name)
+            .and_then(|parameter| array_items(&parameter["schema"]))
+    };
     let mut object = Map::new();
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let key = percent_decode(key)?;
         let value = percent_decode(value)?;
+        // A repeated key is an array when the parameter is declared as one.
+        if let Some(items) = array_items(&key) {
+            let item = scalar(declared_type(items), value);
+            match object
+                .entry(key)
+                .or_insert_with(|| Value::Array(Vec::new()))
+            {
+                Value::Array(values) => values.push(item),
+                other => *other = Value::Array(vec![item]),
+            }
+            continue;
+        }
         let kind = if parameters.is_empty() {
             Some("any")
         } else {

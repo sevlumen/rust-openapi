@@ -11,6 +11,10 @@ keywords = ["openapi", "http", "hyper", "tokio", "web"]
 categories = ["web-programming::http-server"]
 exclude = ["/.github", "/.gitattributes", "/CLAUDE.md", "/deny.toml", "/docs", "/scripts", "/dist", "/wip"]
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [workspace]
 members = [".", "oas-rs-macros"]
 
@@ -38,7 +42,7 @@ http = "1.3"
 http-body = "1.0"
 http-body-util = "0.1"
 hyper = { version = "1.6", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["http1", "tokio", "server-graceful"] }
+hyper-util = { version = "0.1.5", features = ["http1", "tokio", "server-graceful"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_urlencoded = "0.7"
@@ -208,3 +212,11 @@ required-features = ["test-util"]
 [[test]]
 name = "stress"
 required-features = ["http2", "websocket", "multipart"]
+
+[[test]]
+name = "decode_regressions"
+required-features = ["test-util"]
+
+[[test]]
+name = "h2_lifecycle"
+required-features = ["http2"]

@@ -136,7 +136,10 @@ fn object_schema<'a>(
                 ::oas_rs::__private::flatten_schema(
                     &mut __oas_schema,
                     &mut __oas_all_of,
-                    <#schema_type as ::oas_rs::ApiSchema>::schema_with(__oas_registry),
+                    // Inline (not a `$ref`): a flattened struct is merged into
+                    // this object, and its own `additionalProperties: false`
+                    // is dropped by `flatten_schema`.
+                    <#schema_type as ::oas_rs::ApiSchema>::schema(),
                     #is_optional,
                 );
             });
@@ -230,7 +233,9 @@ fn derive_struct<'a>(
     let mut query_arms = Vec::new();
     let mut raw_query_arms = Vec::new();
     let mut query_fields = Vec::new();
-    let mut direct_query_parser = true;
+    // `deny_unknown_fields` and field-level `alias`/`with`/`deserialize_with`
+    // need serde to do the decoding, not the generated `FromStr` parser.
+    let mut direct_query_parser = !container.deny_unknown_fields;
     let mut has_flatten = false;
     for (index, field) in fields.enumerate() {
         let serde = serde_attrs::parse(&field.attrs)?;
@@ -263,7 +268,7 @@ fn derive_struct<'a>(
             }));
         });
         // `default` fields are filled by serde, not by the direct parser.
-        if serde.default || container.default {
+        if serde.default || container.default || serde.custom_decode {
             direct_query_parser = false;
         }
         direct_query_parser &= supports_query_value(schema_type);
@@ -617,12 +622,8 @@ fn supports_query_value(ty: &Type) -> bool {
     let Some(segment) = path.path.segments.last() else {
         return false;
     };
-    if segment.ident == "Option"
-        && let PathArguments::AngleBracketed(arguments) = &segment.arguments
-        && let Some(GenericArgument::Type(inner)) = arguments.args.first()
-    {
-        return supports_query_value(inner);
-    }
+    // The caller has already removed one `Option`; a second one (or any
+    // other wrapper) is for serde to handle.
     matches!(
         segment.ident.to_string().as_str(),
         "String" | "bool" | "u32" | "u64" | "i32" | "i64" | "f32" | "f64" | "Uuid"

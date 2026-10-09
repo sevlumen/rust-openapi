@@ -329,27 +329,34 @@ async fn serve(
             .body(ResponseBody::full(Bytes::new()))
             .ok();
     }
-    let length = metadata.len();
+    // The file is opened once and described by that handle, so a file replaced
+    // while serving cannot give one file's length with another's contents.
+    let mut file = tokio::fs::File::open(&path).await.ok()?;
+    let metadata = match file.metadata().await {
+        Ok(opened) if opened.is_file() => opened,
+        _ => metadata,
+    };
+    let mut length = metadata.len();
     let modified = metadata.modified().ok();
     // Size and the modification time to the nanosecond the file system keeps,
     // so a same-size rewrite within one second still changes the validator.
     // (`Last-Modified` and `If-Modified-Since` stay at HTTP-date precision,
     // which is why `If-None-Match` takes precedence.)
-    let etag = modified.map(|modified| {
-        let nanos = modified
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_nanos());
-        format!("W/\"{length:x}-{nanos:x}\"")
-    });
+    let make_etag = |length: u64| {
+        modified.map(|modified| {
+            let nanos = modified
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos());
+            format!("W/\"{length:x}-{nanos:x}\"")
+        })
+    };
+    let mut etag = make_etag(length);
     let mut builder = Response::builder()
         .header(header::CONTENT_TYPE, content_type(&path))
         .header(header::ACCEPT_RANGES, "none")
         .header("x-content-type-options", "nosniff");
     if let Some(cache_control) = &config.cache_control {
         builder = builder.header(header::CACHE_CONTROL, cache_control.clone());
-    }
-    if let Some(etag) = &etag {
-        builder = builder.header(header::ETAG, etag.as_str());
     }
     if let Some(modified) = modified {
         builder = builder.header(header::LAST_MODIFIED, httpdate::fmt_http_date(modified));
@@ -362,24 +369,35 @@ async fn serve(
             .body(ResponseBody::full(Bytes::new()))
             .ok();
     }
-    builder = builder
-        .status(StatusCode::OK)
-        .header(header::CONTENT_LENGTH, length);
     let body = if head {
         ResponseBody::full(Bytes::new())
     } else if length <= SMALL_FILE {
-        // Never more than the declared length, even if the file grew since.
-        let mut bytes = tokio::fs::read(&path).await.ok()?;
-        bytes.truncate(length as usize);
+        // Length and validator describe the bytes actually read (never more
+        // than the size the handle reported, even if the file grew since).
+        let mut bytes = Vec::with_capacity(length as usize);
+        tokio::io::AsyncReadExt::read_to_end(
+            &mut tokio::io::AsyncReadExt::take(&mut file, length),
+            &mut bytes,
+        )
+        .await
+        .ok()?;
+        length = bytes.len() as u64;
+        etag = make_etag(length);
         ResponseBody::full(Bytes::from(bytes))
     } else {
-        let file = tokio::fs::File::open(&path).await.ok()?;
         ResponseBody::stream(FileChunks {
             file,
             remaining: length,
         })
     };
-    builder.body(body).ok()
+    if let Some(etag) = &etag {
+        builder = builder.header(header::ETAG, etag.as_str());
+    }
+    builder
+        .status(StatusCode::OK)
+        .header(header::CONTENT_LENGTH, length)
+        .body(body)
+        .ok()
 }
 
 impl Middleware for ServeDir {
@@ -403,10 +421,20 @@ impl Middleware for ServeDir {
             if_modified_since: text(header::IF_MODIFIED_SINCE),
         };
         // Where a directory request without a trailing slash is sent.
+        // Built from the normalized segments, never the raw path: `//host/dir`
+        // must not become the protocol-relative `//host/dir/`.
         let path = request.uri().path();
-        let redirect_to = (!path.ends_with('/')).then(|| match request.uri().query() {
-            Some(query) => format!("{path}/?{query}"),
-            None => format!("{path}/"),
+        let redirect_to = (!path.ends_with('/')).then(|| {
+            let mut location = String::from("/");
+            for part in PathParts::new(path) {
+                location.push_str(part.value);
+                location.push('/');
+            }
+            if let Some(query) = request.uri().query() {
+                location.push('?');
+                location.push_str(query);
+            }
+            location
         });
         let config = Arc::clone(&self.config);
         Box::pin(async move {

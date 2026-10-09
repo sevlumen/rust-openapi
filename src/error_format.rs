@@ -82,6 +82,14 @@ impl Middleware for ErrorFormat {
                 }
             }
             if is_head {
+                // Keep the length the GET would have had.
+                if !mapped.headers().contains_key(header::CONTENT_LENGTH)
+                    && let Some(length) = http_body::Body::size_hint(mapped.body()).exact()
+                {
+                    mapped
+                        .headers_mut()
+                        .insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+                }
                 *mapped.body_mut() = ResponseBody::full(Bytes::new());
             }
             mapped

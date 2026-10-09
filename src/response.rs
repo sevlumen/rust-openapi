@@ -107,7 +107,21 @@ impl ApiError {
     pub(crate) fn is_missing(&self) -> bool {
         self.missing
     }
+
+    /// Marks the error as "the input was absent" (see `Option<T>` extractors).
+    pub(crate) fn into_missing(mut self) -> Self {
+        self.missing = true;
+        self
+    }
 }
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.title, self.detail)
+    }
+}
+
+impl std::error::Error for ApiError {}
 
 impl IntoResponse for ApiError {
     #[cold]

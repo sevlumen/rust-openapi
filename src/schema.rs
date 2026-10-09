@@ -186,7 +186,10 @@ impl<T: ApiSchema> ApiSchema for Option<T> {
 
     /// Nullable: serde writes `None` as `null` (and reads `null` back).
     fn schema_with(registry: &mut SchemaRegistry) -> Value {
-        json!({ "oneOf": [T::schema_with(registry), { "type": "null" }] })
+        // `anyOf`, not `oneOf`: when `T` itself admits `null` (an untagged
+        // enum with a unit variant, `Value`, another `Option`) a `null` would
+        // match both alternatives and `oneOf` would reject it.
+        json!({ "anyOf": [T::schema_with(registry), { "type": "null" }] })
     }
 }
 
@@ -258,6 +261,14 @@ pub fn flatten_schema(
             schema.insert("additionalProperties".to_owned(), extra.clone());
         }
         return;
+    }
+    // `additionalProperties: false` from `deny_unknown_fields` on the
+    // flattened struct would forbid the outer struct's own fields.
+    let mut flattened = flattened;
+    if let Some(object) = flattened.as_object_mut()
+        && object.get("additionalProperties") == Some(&Value::Bool(false))
+    {
+        object.remove("additionalProperties");
     }
     if optional {
         all_of.push(json!({ "anyOf": [flattened, { "type": "object" }] }));

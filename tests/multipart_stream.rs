@@ -291,3 +291,55 @@ fn documenting_a_field_name_twice_is_rejected() {
     app.post("/x", buffered);
     app.multipart_fields([MultipartField::text("a"), MultipartField::file("a")]);
 }
+
+#[tokio::test]
+async fn skipping_a_large_part_without_reading_it_is_not_an_error() {
+    let mut app = App::new();
+    app.raw(
+        Method::POST,
+        "/skip",
+        |request: Request<Incoming>| async move {
+            let mut form = Multipart::from_stream(request, 64 * 1024 * 1024)?;
+            let mut seen = Vec::new();
+            while let Some(field) = form.next_field().await? {
+                let name = field.name().unwrap_or("-").to_owned();
+                if name == "big" {
+                    // Dropped unread: the parser drains it on the next call.
+                    continue;
+                }
+                let text = field.text().await?;
+                seen.push(format!("{name}={text}"));
+            }
+            Ok::<_, ApiError>(seen.join(","))
+        },
+    );
+    let (addr, stop) = serve(app).await;
+    let part = |name: &str, data: &[u8]| {
+        let mut out =
+            format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n")
+                .into_bytes();
+        out.extend_from_slice(data);
+        out.extend_from_slice(b"\r\n");
+        out
+    };
+    let mut body = part("small", b"first");
+    body.extend(part("big", &vec![b'x'; 1_000_000]));
+    body.extend(part("small", b"last"));
+    body.extend(format!("--{BOUNDARY}--\r\n").into_bytes());
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(
+            format!(
+                "POST /skip HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Type: multipart/form-data; boundary={BOUNDARY}\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    stream.write_all(&body).await.unwrap();
+    let response = read_response(&mut stream).await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.ends_with("small=first,small=last"), "{response}");
+    let _ = stop.send(());
+}

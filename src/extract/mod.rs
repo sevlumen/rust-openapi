@@ -86,7 +86,18 @@ where
         _params: &Params,
         _state: &Arc<S>,
     ) -> Result<Self, ApiError> {
-        T::parse(request.uri().query().unwrap_or_default()).map(Query)
+        let query = request.uri().query();
+        T::parse(query.unwrap_or_default())
+            .map(Query)
+            // Nothing was sent at all: report it as "missing" so an
+            // `Option<Query<T>>` handler gets `None` instead of a `400`.
+            .map_err(|error| {
+                if query.is_none_or(str::is_empty) {
+                    error.into_missing()
+                } else {
+                    error
+                }
+            })
     }
 }
 
@@ -155,7 +166,7 @@ fn is_json_media_type(media_type: &str) -> bool {
     };
     media_type.eq_ignore_ascii_case("application")
         && subtype.len() > b"+json".len()
-        && subtype.as_bytes().ends_with(b"+json")
+        && subtype.as_bytes()[subtype.len() - 5..].eq_ignore_ascii_case(b"+json")
 }
 
 impl<S: Send + Sync + 'static, T: HeaderSpec> FromRequest<S> for Header<T> {

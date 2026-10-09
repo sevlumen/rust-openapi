@@ -4,8 +4,11 @@ use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use tokio_rustls::{TlsAcceptor, rustls};
 
 use crate::runtime::{
-    Accepted, accept_next, connection_limit, drive, http1_builder, report_connection_error,
+    Accepted, Activity, ActivityGuard, accept_next, connection_limit, drive, http1_builder,
+    report_connection_error,
 };
+#[cfg(feature = "http2")]
+use crate::runtime::{drive_h2, http2_builder};
 use crate::*;
 
 /// An error building a [`TlsConfig`] (unreadable file, malformed PEM, missing
@@ -235,21 +238,33 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
                 #[cfg(feature = "http2")]
                 let negotiated_h2 = tls_stream.get_ref().1.alpn_protocol() == Some(b"h2");
                 let io = hyper_util::rt::TokioIo::new(tls_stream);
-                let service = hyper::service::service_fn(move |request: Request<Incoming>| {
-                    let prepared = connection.prepare(request);
-                    async move { Ok::<_, Infallible>(prepared.await) }
-                });
+                #[cfg(feature = "http2")]
+                let activity = negotiated_h2.then(Activity::new);
+                #[cfg(not(feature = "http2"))]
+                let activity: Option<Arc<Activity>> = None;
+                let service = {
+                    let activity = activity.clone();
+                    hyper::service::service_fn(move |request: Request<Incoming>| {
+                        let guard = activity.as_ref().map(ActivityGuard::start);
+                        let prepared = connection.prepare(request);
+                        async move {
+                            let response = prepared.await;
+                            drop(guard);
+                            Ok::<_, Infallible>(response)
+                        }
+                    })
+                };
                 #[cfg(feature = "http2")]
                 if negotiated_h2 {
-                    let mut builder = hyper::server::conn::http2::Builder::new(
-                        hyper_util::rt::TokioExecutor::new(),
-                    );
-                    if let Some(limit) = max_streams {
-                        builder.max_concurrent_streams(limit);
-                    }
-                    let result = drive(builder.serve_connection(io, service), &mut stop, |conn| {
-                        conn.graceful_shutdown()
-                    })
+                    let builder = http2_builder(max_streams);
+                    let activity = activity.unwrap_or_else(Activity::new);
+                    let result = drive_h2(
+                        builder.serve_connection(io, service),
+                        &mut stop,
+                        &activity,
+                        header_read_timeout,
+                        |conn| conn.graceful_shutdown(),
+                    )
                     .await;
                     if let Err(error) = result {
                         report_connection_error(&observer, &error);

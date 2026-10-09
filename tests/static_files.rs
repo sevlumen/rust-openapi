@@ -352,3 +352,17 @@ async fn a_rewrite_within_the_same_second_and_size_changes_the_etag() {
     assert_eq!(stale.status(), 200);
     assert_eq!(stale.body_string().await, "bbbb");
 }
+
+#[tokio::test]
+async fn a_directory_redirect_never_becomes_a_protocol_relative_url() {
+    let site = Site::new("redirect_open");
+    let runtime = site.runtime(ServeDir::new("/assets", site.public()));
+    for uri in ["//assets/sub", "///assets//sub", "//assets/sub?x=1"] {
+        let response = get(&runtime, uri).await;
+        if response.status() == 308 {
+            let location = response.header("location").unwrap().to_owned();
+            assert!(location.starts_with("/assets/sub/"), "{uri} -> {location}");
+            assert!(!location.starts_with("//"), "{uri} -> {location}");
+        }
+    }
+}

@@ -15,7 +15,8 @@ const BLOCKING_THRESHOLD: usize = 16 * 1024;
 /// SVG) of at least [`min_size`](Self::min_size) bytes for clients whose
 /// `Accept-Encoding` allows an encoding (the highest quality wins, brotli on
 /// a tie), and sets `Content-Encoding`, an adjusted
-/// `Content-Length` and a weak `ETag`. Streaming responses, `HEAD` and bodiless
+/// `Content-Length` and a weak `ETag` (a `HEAD` mirrors this, minus the
+/// length). Streaming responses and bodiless
 /// statuses, responses that already have a `Content-Encoding`, and other
 /// media types (images, archives) pass through unchanged. A response whose
 /// type could have been compressed always carries `Vary: Accept-Encoding`, so
@@ -189,6 +190,20 @@ fn gzip(bytes: &[u8], level: u32) -> Vec<u8> {
     encoder.finish().unwrap_or_default()
 }
 
+/// A compressed representation is not byte-identical to the original, so a
+/// strong validator becomes weak.
+fn weaken_etag(headers: &mut http::HeaderMap) {
+    if let Some(etag) = headers.get(header::ETAG).cloned()
+        && !etag.as_bytes().starts_with(b"W/")
+    {
+        let mut weak = b"W/".to_vec();
+        weak.extend_from_slice(etag.as_bytes());
+        if let Ok(weak) = HeaderValue::from_bytes(&weak) {
+            headers.insert(header::ETAG, weak);
+        }
+    }
+}
+
 impl Middleware for Compress {
     fn handle(&self, request: Request<RequestBody>, next: Next) -> BoxFuture<HttpResponse> {
         // Several header lines mean one comma-separated list.
@@ -231,13 +246,33 @@ impl Middleware for Compress {
                 return response;
             };
             if no_transform
-                || is_head
                 || status.is_informational()
                 || status == StatusCode::NO_CONTENT
                 || status == StatusCode::NOT_MODIFIED
                 || status == StatusCode::PARTIAL_CONTENT
                 || response.headers().contains_key(header::CONTENT_RANGE)
             {
+                return response;
+            }
+            if is_head {
+                // The router already dropped the body, so the compressed size
+                // is unknown: describe the GET (encoding, weak validator) and
+                // omit the length, which a HEAD response may do.
+                let large_enough = response
+                    .headers()
+                    .get(header::CONTENT_LENGTH)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .is_some_and(|length| length >= min_size.max(1));
+                if large_enough {
+                    let headers = response.headers_mut();
+                    headers.remove(header::CONTENT_LENGTH);
+                    headers.insert(
+                        header::CONTENT_ENCODING,
+                        HeaderValue::from_static(encoding.token()),
+                    );
+                    weaken_etag(headers);
+                }
                 return response;
             }
             let ResponseBody::Full(slot) = response.body_mut() else {
@@ -274,15 +309,7 @@ impl Middleware for Compress {
             if headers.contains_key(header::CONTENT_LENGTH) {
                 headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
             }
-            if let Some(etag) = headers.get(header::ETAG).cloned()
-                && !etag.as_bytes().starts_with(b"W/")
-            {
-                let mut weak = b"W/".to_vec();
-                weak.extend_from_slice(etag.as_bytes());
-                if let Ok(weak) = HeaderValue::from_bytes(&weak) {
-                    headers.insert(header::ETAG, weak);
-                }
-            }
+            weaken_etag(headers);
             response
         })
     }

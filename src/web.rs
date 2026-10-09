@@ -449,6 +449,10 @@ where
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
+        if content_type.is_empty() && request.body().is_empty() {
+            // Nothing sent: `Option<Form<T>>` is `None`, like `Json`.
+            return Err(ApiError::missing("missing form body"));
+        }
         if !is_form_media_type(content_type) {
             return Err(ApiError::new(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -456,10 +460,13 @@ where
                 "expected application/x-www-form-urlencoded",
             ));
         }
-        // `serde_urlencoded` decodes `+` as a space and parses each value into
-        // the field's own type, so a `String` field keeps `123456` as text.
-        serde_urlencoded::from_bytes::<T>(request.body())
-            .map(Form)
-            .map_err(|error| ApiError::bad_request(format!("invalid form: {error}")))
+        let body = std::str::from_utf8(request.body())
+            .map_err(|_| ApiError::bad_request("form body is not valid UTF-8"))?;
+        // A form body is a query string whose `+` means a space; decoding it
+        // through the same `parse` as `Query<T>` types every value from the
+        // field it fills (a `String` keeps `123456`), runs `deserialize_with`
+        // and `alias`, handles a flattened struct, and keeps the last of a
+        // repeated key.
+        T::parse(&body.replace('+', "%20")).map(Form)
     }
 }
