@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-10-09
+
 ### Fixed
 - `wip_p.py`, a scratch script that was committed by mistake, was packaged
   into 0.8.3; it is removed and `wip*` files are now ignored and excluded from
