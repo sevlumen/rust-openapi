@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use oas_rs::{App, AppRuntime, Event, Sse};
+use oas_rs::{App, AppRuntime, Event, Sse, StreamResponse};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -35,6 +35,25 @@ fn patterned() -> String {
 
 async fn patterned_route() -> String {
     patterned()
+}
+
+/// One application chunk of 1 MiB: what a handler that streams a big file read
+/// in a single piece produces.
+struct OneBigChunk(Option<Bytes>);
+
+impl futures_core::Stream for OneBigChunk {
+    type Item = Bytes;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Bytes>> {
+        std::task::Poll::Ready(self.0.take())
+    }
+}
+
+async fn one_big_chunk() -> StreamResponse<OneBigChunk> {
+    StreamResponse(OneBigChunk(Some(Bytes::from(vec![b'z'; 1024 * 1024]))))
 }
 
 async fn medium() -> String {
@@ -99,6 +118,7 @@ async fn start(configure: impl FnOnce(AppRuntime) -> AppRuntime) -> Server {
     app.get("/slow", slow);
     app.get("/big", big);
     app.get("/medium", medium);
+    app.get("/one-big-chunk", one_big_chunk);
     app.get("/patterned", patterned_route);
     app.get("/tiny", tiny);
     app.get("/events", events);
@@ -699,5 +719,97 @@ async fn a_response_through_tiny_windows_arrives_byte_for_byte() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(body.len(), 128 * 1024);
     assert!(body == patterned().as_bytes(), "the body arrived altered");
+    let _ = server.shut_down().await;
+}
+
+/// A handler's own stream may hand hyper one huge chunk. The stall clock must
+/// still see the client's progress, so the chunk is split into HTTP/2-sized
+/// pieces: a steady reader taking 16 KiB per 300 ms (a 1 MiB chunk takes ~20 s
+/// to drain, 20 times the 1 s limit) is never cut.
+#[tokio::test]
+async fn a_huge_chunk_from_a_custom_stream_does_not_defeat_send_timeout() {
+    let mut server = start(|runtime| {
+        runtime
+            .h2c(true)
+            .header_read_timeout(Some(Duration::from_millis(200)))
+            .send_timeout(Some(Duration::from_secs(1)))
+    })
+    .await;
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .initial_stream_window_size(16 * 1024)
+        .initial_connection_window_size(16 * 1024)
+        .handshake(TokioIo::new(tcp))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = http::Request::builder()
+        .uri("http://localhost/one-big-chunk")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let mut body = sender.send_request(request).await.unwrap().into_body();
+    let started = std::time::Instant::now();
+    let mut received = 0usize;
+    while started.elapsed() < Duration::from_secs(4) {
+        let frame = body
+            .frame()
+            .await
+            .expect("the body ended early")
+            .expect("cut off while the client was reading steadily");
+        received += frame.data_ref().map_or(0, Bytes::len);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(received > 0);
+    let _ = server.shut_down().await;
+}
+
+/// A response under 32 KiB is not tracked per stream (the whole body fits in
+/// HTTP/2's buffer at once), so a client that never reads it, while answering
+/// PINGs, is freed by the idle timeout instead of `send_timeout`.
+#[tokio::test]
+async fn a_client_that_never_reads_a_small_response_is_dropped_as_idle() {
+    let mut server = start(|runtime| {
+        runtime
+            .h2c(true)
+            .max_connections(Some(1))
+            .header_read_timeout(Some(Duration::from_millis(300)))
+            // Long, so only the idle timeout can be what frees the slot.
+            .send_timeout(Some(Duration::from_secs(60)))
+    })
+    .await;
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .timer(hyper_util::rt::TokioTimer::new())
+        .keep_alive_interval(Duration::from_millis(100))
+        .keep_alive_timeout(Duration::from_secs(30))
+        .keep_alive_while_idle(true)
+        .initial_stream_window_size(1024)
+        .initial_connection_window_size(1024)
+        .handshake(TokioIo::new(tcp))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = http::Request::builder()
+        .uri("http://localhost/medium")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    // Held, never read; the client still answers PINGs.
+    let _stalled = sender.send_request(request).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    let mut second = TcpStream::connect(server.addr).await.unwrap();
+    second
+        .write_all(b"GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut out = String::new();
+    tokio::time::timeout(Duration::from_secs(3), second.read_to_string(&mut out))
+        .await
+        .expect("a client that never read a small response kept the only slot")
+        .unwrap();
+    assert!(out.starts_with("HTTP/1.1 200"), "{out}");
     let _ = server.shut_down().await;
 }

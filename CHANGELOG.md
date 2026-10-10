@@ -5,6 +5,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Tests
+- Two HTTP/2 tests that document behaviour without changing it: a handler's own
+  stream that hands hyper one 1 MiB chunk does not defeat `send_timeout` for a
+  steady reader (hyper takes the whole chunk into its send buffer and asks for
+  the next one at once, so the wait is governed by buffer pressure, not chunk
+  size), and a client that never reads a response under 32 KiB (which is not
+  tracked per stream) is freed by the idle timeout.
+
 ## [0.9.8] - 2026-10-10
 
 ### Security
