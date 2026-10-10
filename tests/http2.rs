@@ -499,3 +499,61 @@ async fn a_steady_reader_with_16_byte_windows_is_never_idle_over_tls() {
         let _ = stop.send(());
     }
 }
+
+/// The same rule as over h2c: a client that never reads a big response but keeps
+/// answering PINGs loses its connection slot to `send_timeout`, over TLS/ALPN.
+#[tokio::test]
+async fn a_client_that_stops_reading_a_big_response_loses_its_slot_over_tls() {
+    let mut app = App::new();
+    app.get("/big", big);
+    app.get("/", hello);
+    let mut server = start_with(app, true, |runtime| {
+        runtime
+            .max_connections(Some(1))
+            .header_read_timeout(Some(Duration::from_millis(200)))
+            .send_timeout(Some(Duration::from_millis(500)))
+    })
+    .await;
+    let tls = handshake(&server, &[b"h2"]).await.unwrap();
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .timer(hyper_util::rt::TokioTimer::new())
+        .keep_alive_interval(Duration::from_millis(100))
+        .keep_alive_timeout(Duration::from_secs(30))
+        .keep_alive_while_idle(true)
+        .initial_stream_window_size(1024)
+        .initial_connection_window_size(1024)
+        .handshake(TokioIo::new(tls))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = http::Request::builder()
+        .uri("https://localhost/big")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    // Held, never read; the client still answers PINGs.
+    let _stalled = sender.send_request(request).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(3000)).await;
+    // The only slot must be free again: a new TLS client is served.
+    let tls = tokio::time::timeout(Duration::from_secs(3), handshake(&server, &[b"h2"]))
+        .await
+        .expect("a stalled reader kept the only connection slot")
+        .unwrap();
+    let (mut second, connection) =
+        hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tls))
+            .await
+            .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = http::Request::builder()
+        .uri("https://localhost/")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = second.send_request(request).await.unwrap();
+    assert_eq!(response.status(), 200);
+    if let Some(stop) = server.stop.take() {
+        let _ = stop.send(());
+    }
+}
