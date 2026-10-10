@@ -5,6 +5,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Tests
+
+- `tests/serde_schema_agreement.rs`: values Serde serializes (structs, every enum tagging form, a mixed
+  tagged/untagged enum) are checked against the schema the derive generates, with a small built-in validator.
+
 ## [0.9.11] - 2026-10-11
 
 ### Fixed
