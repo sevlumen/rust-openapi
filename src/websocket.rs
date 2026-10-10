@@ -134,6 +134,16 @@ impl WebSocket {
                 Ok(next) => next,
                 Err(_) => {
                     self.timed_out = true;
+                    // Tell the peer the session is over (best effort, bounded):
+                    // the handler may keep this value alive for a long time.
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(1),
+                        self.inner.close(Some(WireCloseFrame {
+                            code: 1001.into(),
+                            reason: "idle timeout".into(),
+                        })),
+                    )
+                    .await;
                     return Some(Err(WebSocketError(tungstenite::Error::Io(
                         std::io::Error::new(std::io::ErrorKind::TimedOut, "websocket idle timeout"),
                     ))));
@@ -144,7 +154,12 @@ impl WebSocket {
         next.map(|result| result.map(Message::from).map_err(WebSocketError))
     }
 
+    /// Sends a message. After the idle timeout the session is closed and this
+    /// fails with an error for which [`WebSocketError::is_closed`] is true.
     pub async fn send(&mut self, message: Message) -> Result<(), WebSocketError> {
+        if self.timed_out {
+            return Err(WebSocketError(tungstenite::Error::AlreadyClosed));
+        }
         self.inner
             .send(message.into())
             .await

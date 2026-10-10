@@ -802,16 +802,26 @@ where
 
 /// Waits for the connection tasks for at most `timeout`, then cancels what is
 /// left: a connection (and the handler running on it) does not outlive the
-/// serve call. An upgraded WebSocket session belongs to its own task and is
-/// not tracked here.
+/// serve call (a handler that never yields to the runtime cannot be
+/// cancelled; it is given [`ABORT_GRACE`] and then left behind). An upgraded
+/// WebSocket session belongs to its own task and is not tracked here.
 pub(crate) async fn drain_connections(mut tasks: tokio::task::JoinSet<()>, timeout: Duration) {
     let _ = tokio::time::timeout(timeout, async {
         while tasks.join_next().await.is_some() {}
     })
     .await;
     tasks.abort_all();
-    while tasks.join_next().await.is_some() {}
+    // Cancellation is cooperative, so the wait for it is bounded too; whatever
+    // is left is detached when `tasks` is dropped.
+    let _ = tokio::time::timeout(ABORT_GRACE, async {
+        while tasks.join_next().await.is_some() {}
+    })
+    .await;
 }
+
+/// How long `serve_*` waits, after the shutdown deadline, for aborted
+/// connection tasks to finish dropping.
+const ABORT_GRACE: Duration = Duration::from_secs(1);
 
 async fn serve_runtime<S, L, F>(
     runtime: AppRuntime<S>,

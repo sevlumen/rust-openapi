@@ -73,8 +73,10 @@ closes idle keep-alive connections, and waits for in-flight requests to finish
 before `serve_listener` returns. The wait is bounded by
 `AppRuntime::shutdown_timeout` (default 30 seconds); connections still busy
 after that are cancelled (the handler is dropped and the socket closed) before
-`serve_listener` returns. A WebSocket session already upgraded belongs to your
-own task and is not cancelled. Transient `accept` errors (aborted connections,
+`serve_listener` returns (one more second is allowed for the cancellation to
+land; a handler stuck in synchronous code that never yields cannot be
+interrupted and is left behind). A WebSocket session already upgraded belongs
+to your own task and is not cancelled. Transient `accept` errors (aborted connections,
 out of file descriptors) no longer stop the server.
 
 ```rust

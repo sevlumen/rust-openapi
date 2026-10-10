@@ -179,3 +179,45 @@ async fn connections_still_busy_at_the_deadline_are_cut() {
         "the connection outlived serve_listener (handler still running)"
     );
 }
+
+async fn blocks_a_worker() -> &'static str {
+    // Synchronous and never yields: `abort` cannot interrupt it.
+    std::thread::sleep(Duration::from_secs(4));
+    "late"
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_handler_that_never_yields_cannot_hold_the_return_past_a_bounded_grace() {
+    let mut app = App::new();
+    app.get("/block", blocks_a_worker);
+    let runtime = app
+        .build()
+        .unwrap()
+        .shutdown_timeout(Duration::from_millis(100));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        runtime
+            .serve_listener(listener, async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+        Instant::now()
+    });
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(b"GET /block HTTP/1.1\r\nHost: t\r\n\r\n")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let shutdown_at = Instant::now();
+    shutdown_tx.send(()).unwrap();
+    let returned = server.await.unwrap();
+    let waited = returned.duration_since(shutdown_at);
+    assert!(
+        waited < Duration::from_secs(3),
+        "serve_listener waited {waited:?} for a handler that cannot be cancelled"
+    );
+}

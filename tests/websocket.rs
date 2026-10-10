@@ -450,3 +450,45 @@ async fn after_an_idle_timeout_the_session_is_over() {
     assert!(ended, "recv after an idle timeout must return None");
     let _ = stop.send(());
 }
+
+#[tokio::test]
+async fn an_idle_timeout_closes_the_session_even_if_the_handler_keeps_the_socket() {
+    let (sent_tx, sent_rx) = oneshot::channel::<bool>();
+    let sent_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(sent_tx)));
+    let mut app = App::new();
+    app.raw(Method::GET, "/ws", move |request: Request<Incoming>| {
+        let sent_tx = sent_tx.clone();
+        async move {
+            WebSocketUpgrade::new(request)
+                .idle_timeout(Duration::from_millis(150))
+                .on_upgrade(move |mut socket| async move {
+                    let _ = socket.recv().await; // the timeout
+                    let sent = socket.send(Message::Text("late".into())).await;
+                    if let Some(tx) = sent_tx.lock().unwrap().take() {
+                        let _ = tx.send(sent.is_err());
+                    }
+                    // Keeps the socket alive long after the timeout.
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    drop(socket);
+                })
+        }
+    });
+    let (addr, stop, _server) = serve(app).await;
+    let (mut client, _) = connect(addr, &[]).await.unwrap();
+    let ended = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(message) = client.next().await {
+            match message {
+                Ok(ClientMessage::Text(text)) => panic!("data after the timeout: {text}"),
+                Ok(ClientMessage::Close(_)) | Err(_) => return,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await;
+    assert!(ended.is_ok(), "the peer was never told the session is over");
+    assert!(
+        sent_rx.await.unwrap(),
+        "send after the idle timeout must fail"
+    );
+    let _ = stop.send(());
+}

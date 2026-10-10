@@ -5,6 +5,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.11] - 2026-10-11
+
+### Fixed
+
+- `WebSocket`: the idle timeout now closes the session on the wire (a close frame, code 1001, bounded to one
+  second) instead of only ending `recv`; `send` after the timeout fails with an `is_closed` error, so a handler
+  that keeps the value cannot keep talking to the peer.
+- Shutdown: the wait for aborted connection tasks is bounded (one extra second). A handler stuck in synchronous
+  code cannot be cancelled; it is left behind instead of holding `serve_listener` / `serve_tls` open.
+
+### Tooling
+
+- `scripts/release-gate.sh`: the package check was fail-open (a `!` pipeline never stops a `set -e` script, so a
+  stray file in the package was never caught, and a failing `cargo package` passed); it now fails on both.
+  `cargo-deny` is required, and the `send_timeout` socket tests (ignored on Windows) are run on Linux, in Docker
+  when the host is not Linux.
+
 ## [0.9.10] - 2026-10-10
 
 ### Fixed
