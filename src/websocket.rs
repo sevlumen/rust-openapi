@@ -116,17 +116,24 @@ impl From<Message> for WireMessage {
 pub struct WebSocket {
     inner: WebSocketStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>,
     idle: Option<Duration>,
+    /// Set once the idle timeout fired: the session is over.
+    timed_out: bool,
 }
 
 impl WebSocket {
     /// The next message, or `None` once the session is over. Pings are
     /// answered automatically (they are still returned); an error ends the
-    /// session.
+    /// session, and so does the idle timeout: after it reports
+    /// [`WebSocketError::is_timeout`] every further `recv` returns `None`.
     pub async fn recv(&mut self) -> Option<Result<Message, WebSocketError>> {
+        if self.timed_out {
+            return None;
+        }
         let next = match self.idle {
             Some(idle) => match tokio::time::timeout(idle, self.inner.next()).await {
                 Ok(next) => next,
                 Err(_) => {
+                    self.timed_out = true;
                     return Some(Err(WebSocketError(tungstenite::Error::Io(
                         std::io::Error::new(std::io::ErrorKind::TimedOut, "websocket idle timeout"),
                     ))));
@@ -401,6 +408,7 @@ impl WebSocketUpgrade {
             handler(WebSocket {
                 inner,
                 idle: idle_timeout,
+                timed_out: false,
             })
             .await;
         });

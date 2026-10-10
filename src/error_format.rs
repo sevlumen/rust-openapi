@@ -40,8 +40,9 @@ type Hook = dyn Fn(&ErrorInfo) -> HttpResponse + Send + Sync;
 ///
 /// Responses your own handlers build (a custom `418`, say) are left alone;
 /// only errors the framework produces are passed to the hook. `Allow`,
-/// `WWW-Authenticate` and `Retry-After` headers are carried over unless the
-/// hook sets them.
+/// `WWW-Authenticate`, `Retry-After` and `Connection` headers are carried over
+/// unless the hook sets them (a `408` for an unfinished upload ends the
+/// connection).
 /// Register it **first** (outermost) so it also covers errors from the
 /// layers after it, such as [`BearerAuth`]. The OpenAPI document still
 /// describes the default `Problem` schema: turn it off with
@@ -74,6 +75,8 @@ impl Middleware for ErrorFormat {
                 header::ALLOW,
                 header::WWW_AUTHENTICATE,
                 header::RETRY_AFTER,
+                // A `408` for an unfinished upload ends the connection.
+                header::CONNECTION,
                 header::HeaderName::from_static("sec-websocket-version"),
             ] {
                 if let Some(value) = response.headers().get(&name)

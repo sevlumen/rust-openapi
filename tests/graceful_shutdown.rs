@@ -142,3 +142,40 @@ async fn idle_keep_alive_connections_do_not_block_shutdown() {
         .unwrap();
     assert!(server_returned_at.duration_since(shutdown_at) < Duration::from_secs(2));
 }
+
+#[tokio::test]
+async fn connections_still_busy_at_the_deadline_are_cut() {
+    let mut app = App::new();
+    app.get("/stuck", very_slow);
+    let runtime = app
+        .build()
+        .unwrap()
+        .shutdown_timeout(Duration::from_millis(100));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        runtime
+            .serve_listener(listener, async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(b"GET /stuck HTTP/1.1\r\nHost: t\r\n\r\n")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    shutdown_tx.send(()).unwrap();
+    server.await.unwrap();
+    // `serve_listener` has returned: the stuck handler's connection must be
+    // gone, not left running in the background.
+    let mut rest = Vec::new();
+    let closed = tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut rest)).await;
+    assert!(
+        closed.is_ok(),
+        "the connection outlived serve_listener (handler still running)"
+    );
+}

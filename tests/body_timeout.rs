@@ -148,3 +148,46 @@ async fn a_stalled_upload_through_a_layer_is_cut_off_too() {
     assert!(response.starts_with("HTTP/1.1 408"), "{response}");
     let _ = stop.send(());
 }
+
+#[tokio::test]
+async fn a_408_keeps_connection_close_through_error_format() {
+    let mut app = App::new();
+    app.layer(oas_rs::ErrorFormat::new(|info: &oas_rs::ErrorInfo| {
+        info.respond(serde_json::json!({ "code": info.status.as_u16() }))
+    }));
+    app.post("/items", create);
+    let runtime = app
+        .build()
+        .unwrap()
+        .body_read_timeout(Some(Duration::from_millis(300)));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let _ = runtime
+            .serve_listener(listener, async {
+                let _ = stopped.await;
+            })
+            .await;
+    });
+    // Keep-alive request (no `Connection: close`): only the server's own
+    // header can end the connection after the unread body.
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(
+            b"POST /items HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"na",
+        )
+        .await
+        .unwrap();
+    let mut out = String::new();
+    tokio::time::timeout(Duration::from_secs(5), stream.read_to_string(&mut out))
+        .await
+        .expect("the connection stayed open after the 408")
+        .unwrap();
+    assert!(out.starts_with("HTTP/1.1 408"), "{out}");
+    assert!(
+        out.to_ascii_lowercase().contains("connection: close"),
+        "{out}"
+    );
+    let _ = stop.send(());
+}

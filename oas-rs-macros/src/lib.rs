@@ -569,8 +569,11 @@ fn derive_enum(
     }
     // Untagged payloads can overlap (a `u32` also validates as a number), and
     // `oneOf` demands exactly one match, so they are `anyOf`; the tagged forms
-    // are disjoint by construction.
-    let combinator = if matches!(tagging, Tagging::Untagged) {
+    // are disjoint by construction, unless a variant opts out of the tag with
+    // `#[serde(untagged)]`: its payload can then also match a tagged one.
+    let combinator = if matches!(tagging, Tagging::Untagged)
+        || variants.iter().any(|(_, serde)| serde.untagged)
+    {
         "anyOf"
     } else {
         "oneOf"

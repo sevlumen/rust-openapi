@@ -14,6 +14,8 @@ There is no hosted CI: these local checks are the only gate, so run all of them 
 bash scripts/verify-docker.sh    # fmt, clippy (default + all features), tests, doctests, examples, rustdoc -D warnings
 ```
 
+`bash scripts/release-gate.sh` runs the whole release gate (including Miri, a short soak and the package checks) on a clean tree and prints the SHA it validated.
+
 Without Docker, the same steps (feature flags matter — many tests/benches/examples declare `required-features`):
 
 ```bash

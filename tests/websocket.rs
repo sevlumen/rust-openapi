@@ -418,3 +418,35 @@ fn the_handshake_route_is_documented_as_101() {
         "Switching Protocols"
     );
 }
+
+#[tokio::test]
+async fn after_an_idle_timeout_the_session_is_over() {
+    let (seen_tx, seen_rx) = oneshot::channel::<(bool, bool)>();
+    let seen_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(seen_tx)));
+    let mut app = App::new();
+    app.raw(Method::GET, "/ws", move |request: Request<Incoming>| {
+        let seen_tx = seen_tx.clone();
+        async move {
+            WebSocketUpgrade::new(request)
+                .idle_timeout(Duration::from_millis(150))
+                .on_upgrade(move |mut socket| async move {
+                    let first = socket.recv().await;
+                    let timed_out = matches!(&first, Some(Err(error)) if error.is_timeout());
+                    // The contract: a timeout ends the session.
+                    let second = socket.recv().await;
+                    if let Some(tx) = seen_tx.lock().unwrap().take() {
+                        let _ = tx.send((timed_out, second.is_none()));
+                    }
+                })
+        }
+    });
+    let (addr, stop, _server) = serve(app).await;
+    let (_client, _) = connect(addr, &[]).await.unwrap();
+    let (timed_out, ended) = tokio::time::timeout(Duration::from_secs(3), seen_rx)
+        .await
+        .expect("the handler never finished")
+        .unwrap();
+    assert!(timed_out, "the first recv should report the idle timeout");
+    assert!(ended, "recv after an idle timeout must return None");
+    let _ = stop.send(());
+}

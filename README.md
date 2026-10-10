@@ -72,7 +72,9 @@ When the shutdown future completes, the server stops accepting connections,
 closes idle keep-alive connections, and waits for in-flight requests to finish
 before `serve_listener` returns. The wait is bounded by
 `AppRuntime::shutdown_timeout` (default 30 seconds); connections still busy
-after that are abandoned. Transient `accept` errors (aborted connections,
+after that are cancelled (the handler is dropped and the socket closed) before
+`serve_listener` returns. A WebSocket session already upgraded belongs to your
+own task and is not cancelled. Transient `accept` errors (aborted connections,
 out of file descriptors) no longer stop the server.
 
 ```rust

@@ -448,9 +448,9 @@ fn strictness_field_renames_and_untagged_variants_are_honored() {
     let fields = Fields::schema();
     assert!(fields["oneOf"][0]["properties"]["V"]["properties"]["longName"].is_object());
     let mixed = Mixed::schema();
-    assert!(mixed["oneOf"][0]["properties"]["A"].is_object());
-    assert!(mixed["oneOf"][1]["properties"]["w"].is_object());
-    assert!(mixed["oneOf"][1]["properties"].get("B").is_none());
+    assert!(mixed["anyOf"][0]["properties"]["A"].is_object());
+    assert!(mixed["anyOf"][1]["properties"]["w"].is_object());
+    assert!(mixed["anyOf"][1]["properties"].get("B").is_none());
 }
 
 #[allow(non_upper_case_globals)]
@@ -667,5 +667,30 @@ fn rename_all_produces_exactly_the_names_serde_writes() {
         r_screaming,
         r_kebab,
         r_screaming_kebab
+    );
+}
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+#[serde(tag = "kind")]
+enum MixedTagging {
+    Circle {
+        radius: u32,
+    },
+    // Accepts `{"kind":"Circle","radius":1}` too, so the tagged alternative
+    // and this one can both match one value.
+    #[serde(untagged)]
+    Anything(serde_json::Value),
+}
+
+#[test]
+fn a_mixed_tagged_and_untagged_enum_uses_any_of() {
+    let schema = MixedTagging::schema();
+    // `oneOf` demands exactly one match; a tagged value that the untagged
+    // variant also accepts would match two alternatives and be rejected.
+    assert!(schema.get("oneOf").is_none(), "{schema}");
+    assert_eq!(
+        schema["anyOf"].as_array().map(Vec::len),
+        Some(2),
+        "{schema}"
     );
 }

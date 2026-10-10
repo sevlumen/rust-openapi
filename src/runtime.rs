@@ -800,6 +800,19 @@ where
     }
 }
 
+/// Waits for the connection tasks for at most `timeout`, then cancels what is
+/// left: a connection (and the handler running on it) does not outlive the
+/// serve call. An upgraded WebSocket session belongs to its own task and is
+/// not tracked here.
+pub(crate) async fn drain_connections(mut tasks: tokio::task::JoinSet<()>, timeout: Duration) {
+    let _ = tokio::time::timeout(timeout, async {
+        while tasks.join_next().await.is_some() {}
+    })
+    .await;
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+}
+
 async fn serve_runtime<S, L, F>(
     runtime: AppRuntime<S>,
     listener: L,
@@ -820,12 +833,13 @@ where
     let connect_info = runtime.connect_info;
     let observer = runtime.connection_error_observer;
     let runtime = runtime.inner;
-    // Every connection task holds a `done` sender and watches `signal`;
-    // shutdown fires the signal, then waits for the senders to be dropped.
+    // Every connection task lives in `tasks` and watches `signal`; shutdown
+    // fires the signal, waits for the tasks up to `shutdown_timeout`, then
+    // cancels the ones still running (dropping a connection closes it).
     // (`GracefulShutdown::watch` cannot wrap an upgradeable connection, and
     // this form also covers the connections that are still sniffing for h2.)
     let (signal, _) = tokio::sync::watch::channel(());
-    let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let mut tasks = tokio::task::JoinSet::new();
     tokio::pin!(shutdown);
     while let Some(Accepted {
         io: stream,
@@ -833,6 +847,8 @@ where
         slot,
     }) = accept_next(&listener, &mut shutdown, nodelay, limit.as_ref()).await?
     {
+        // Reap the finished connections so the set does not grow.
+        while tasks.try_join_next().is_some() {}
         let slot = slot.map(Arc::new);
         let connection =
             ConnectionRuntime::new(Arc::clone(&runtime), peer.filter(|_| connect_info))
@@ -855,11 +871,9 @@ where
         };
         let observer = observer.clone();
         let mut stop = signal.subscribe();
-        let done = done_tx.clone();
         #[cfg(feature = "http2")]
         if h2c {
-            tokio::spawn(async move {
-                let _done = done;
+            tasks.spawn(async move {
                 let _slot = slot;
                 let mut stream = stream;
                 let mut seen = Vec::new();
@@ -930,8 +944,7 @@ where
         let connection = http1_builder(header_read_timeout).serve_connection(io, service);
         #[cfg(feature = "websocket")]
         let connection = connection.with_upgrades();
-        tokio::spawn(async move {
-            let _done = done;
+        tasks.spawn(async move {
             let _slot = slot;
             if let Err(error) = drive(connection, &mut stop, |connection| {
                 connection.graceful_shutdown()
@@ -943,8 +956,7 @@ where
         });
     }
     let _ = signal.send(());
-    drop(done_tx);
-    let _ = tokio::time::timeout(shutdown_timeout, done_rx.recv()).await;
+    drain_connections(tasks, shutdown_timeout).await;
     Ok(())
 }
 

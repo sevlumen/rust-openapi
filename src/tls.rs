@@ -194,7 +194,7 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
         // does not exist yet during the handshake, so connections are tracked
         // with a shutdown signal plus a completion channel instead.
         let (signal, _) = tokio::sync::watch::channel(());
-        let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let mut tasks = tokio::task::JoinSet::new();
         tokio::pin!(shutdown);
         while let Some(Accepted {
             io: stream,
@@ -202,6 +202,7 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
             slot,
         }) = accept_next(&listener, &mut shutdown, nodelay, limit.as_ref()).await?
         {
+            while tasks.try_join_next().is_some() {}
             let observer = observer.clone();
             let acceptor = acceptor.clone();
             let slot = slot.map(Arc::new);
@@ -209,10 +210,7 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
                 ConnectionRuntime::new(Arc::clone(&runtime), peer.filter(|_| connect_info))
                     .with_permit(slot.clone());
             let mut stop = signal.subscribe();
-            let done = done_tx.clone();
-            tokio::spawn(async move {
-                // Dropped when the task ends; shutdown waits for every sender.
-                let _done = done;
+            tasks.spawn(async move {
                 let _slot = slot;
                 let handshake = tokio::time::timeout(handshake_timeout, acceptor.accept(stream));
                 let tls_stream = tokio::select! {
@@ -286,8 +284,7 @@ impl<S: Send + Sync + 'static> AppRuntime<S> {
             });
         }
         let _ = signal.send(());
-        drop(done_tx);
-        let _ = tokio::time::timeout(shutdown_timeout, done_rx.recv()).await;
+        crate::runtime::drain_connections(tasks, shutdown_timeout).await;
         Ok(())
     }
 }

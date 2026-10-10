@@ -5,6 +5,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.10] - 2026-10-10
+
+### Fixed
+
+- `#[derive(ApiSchema)]`: an enum with a `#[serde(untagged)]` variant among tagged ones now produces `anyOf`
+  instead of `oneOf`; its payload can also match a tagged alternative, and `oneOf` would reject that value.
+- `WebSocket::recv`: after the idle timeout reports an error the session is over; every later `recv` returns
+  `None` (it used to keep waiting for messages).
+- `ErrorFormat` now carries the `Connection` header over, so the `408` for an unfinished upload still says
+  `Connection: close` when the hook builds the response.
+- Shutdown is a hard deadline: connections still running when `shutdown_timeout` expires are cancelled (the
+  handler future is dropped and the socket closed) before `serve_listener` / `serve_tls` return, instead of being
+  left running in the background. An upgraded WebSocket session belongs to your handler task and is unaffected.
+
 ## [0.9.9] - 2026-10-10
 
 ### Fixed
