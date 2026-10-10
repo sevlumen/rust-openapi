@@ -501,6 +501,10 @@ impl<S: Send + Sync + 'static> App<S> {
     /// Requires every listed security scheme for the last registered route.
     /// Calling it again adds an alternative requirement. The schemes must be
     /// declared through [`OpenApiOptions`] or `build()` fails.
+    ///
+    /// This only documents the requirement in the OpenAPI document: it enforces
+    /// nothing. Authenticate requests with a middleware such as [`BearerAuth`]
+    /// (`app.layer(..)` or `app.layer_for(..)`).
     pub fn security<I, T>(&mut self, schemes: I) -> &mut Self
     where
         I: IntoIterator<Item = T>,
@@ -518,7 +522,10 @@ impl<S: Send + Sync + 'static> App<S> {
     }
 
     /// Marks the last registered route as requiring no authentication,
-    /// overriding any document-wide default security.
+    /// overriding any document-wide default security. Like
+    /// [`security`](Self::security), this is documentation only: exempt the route
+    /// from your authentication middleware too (for example
+    /// `BearerAuth::exempt_paths`).
     pub fn public(&mut self) -> &mut Self {
         if let Some(index) = self.last_route {
             self.metadata[index].operation.security = Some(Vec::new());

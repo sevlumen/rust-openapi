@@ -49,6 +49,12 @@ struct Config {
 /// system's own rules (`/assets/APP.CSS` works on Windows), and a file swapped
 /// between the check and the read is a limitation shared by every file server.
 ///
+/// **Deployment model.** The checks run on the resolved path before the file is
+/// opened, so a symlink or file that someone replaces in between is not caught
+/// (a race, not a flaw in the checks). Serve a directory that only trusted
+/// processes can write, as a read-only deployment artifact; do not point
+/// `ServeDir` at a directory that untrusted users can upload to or link into.
+///
 /// **Order matters.** The layer runs before routing, so a file under the
 /// prefix wins over an application route with the same path (mount it under
 /// a prefix of its own, ideally scoped with `app.layer_for("/assets", ..)` so
@@ -365,7 +371,9 @@ async fn serve(
     if let (Some(etag), Some(modified)) = (&etag, modified)
         && not_modified(&validators, etag, modified)
     {
+        // A 304 repeats the validators (and cache headers) the 200 would carry.
         return builder
+            .header(header::ETAG, etag.as_str())
             .status(StatusCode::NOT_MODIFIED)
             .body(ResponseBody::full(Bytes::new()))
             .ok();

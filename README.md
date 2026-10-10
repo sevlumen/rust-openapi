@@ -513,7 +513,8 @@ weak `ETag` and `Last-Modified` (`304` on conditional requests), streams large
 files, serves `index.html` for directories (a directory without a trailing
 slash is redirected with `308` so relative links work) and refuses `..`, hidden
 files (also through symlinks and Windows 8.3 short names) and symlinks that
-leave the directory. No `Range` requests (it answers `Accept-Ranges: none`),
+leave the directory (the directory must not be writable by untrusted users: a
+file or symlink swapped between the check and the read is not caught). No `Range` requests (it answers `Accept-Ranges: none`),
 directory listings or precompressed variants. `.cache_control("public,
 max-age=3600")`, `.index_file("start.html")` and `.allow_dotfiles(true)`
 configure it. The layer runs before routing: a file under the prefix wins over

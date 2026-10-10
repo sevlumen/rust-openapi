@@ -114,6 +114,10 @@ async fn conditional_requests_get_304() {
         )
         .await;
     assert_eq!(by_etag.status(), 304);
+    // RFC 9110: a 304 carries the validators the 200 would have (ETag,
+    // Last-Modified) and the cache headers.
+    assert_eq!(by_etag.header("etag"), Some(etag.as_str()));
+    assert_eq!(by_etag.header("last-modified"), Some(modified.as_str()));
     assert_eq!(by_etag.body_string().await, "");
 
     let by_date = runtime
@@ -125,6 +129,7 @@ async fn conditional_requests_get_304() {
         )
         .await;
     assert_eq!(by_date.status(), 304);
+    assert_eq!(by_date.header("etag"), Some(etag.as_str()));
 
     let stale = runtime
         .oneshot(

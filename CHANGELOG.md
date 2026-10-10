@@ -5,6 +5,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-10-10
+
+### Fixed
+- `ServeDir`: a `304 Not Modified` carried `Last-Modified` and the cache
+  headers but not the `ETag`. RFC 9110 requires a 304 to repeat the validators
+  the 200 would send, and caches revalidate by `ETag`. This came in with 0.8.2,
+  which moved the `ETag` after the 304 branch. Found by an audit of 0.9.8;
+  the conditional-request test now checks the validators on a 304.
+
+### Documentation
+- `ServeDir`: the deployment model is stated: the checks run before the file is
+  opened, so a file or symlink swapped in between is not caught; serve a
+  directory untrusted users cannot write to.
+- `security()` and `public()` say they only document the requirement in the
+  OpenAPI document and enforce nothing; authenticate with a middleware such as
+  `BearerAuth`.
+- The `ApiSchema` derive documents two limits of sharing one schema between
+  requests and responses: `skip_serializing_if` loosens what a request body
+  must contain, and `with` / `serialize_with` / `deserialize_with` are not
+  interpreted (the Rust field type is documented, not the wire type).
+
 ### Tests
 - Two HTTP/2 tests that document behaviour without changing it: a handler's own
   stream that hands hyper one 1 MiB chunk does not defeat `send_timeout` for a

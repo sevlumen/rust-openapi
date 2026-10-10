@@ -48,6 +48,18 @@ fn schema_name(attrs: &[syn::Attribute], default: &Ident) -> syn::Result<String>
     Ok(name)
 }
 
+/// Derives `ApiSchema` (and `OpenApiQuery`) for a struct or enum, reading the
+/// `serde` attributes and `#[api_schema(..)]`; see the crate README for the list.
+///
+/// One schema serves requests and responses, which sets two limits to know:
+///
+/// - `skip_serializing_if` makes a field not `required`, so the document
+///   allows a request body without it even when the type has no `default` and
+///   deserializing would reject that body (give such a field a `default`).
+/// - `with`, `serialize_with` and `deserialize_with` change what is on the
+///   wire but the derive cannot see the new type, so it documents the Rust
+///   field type: a `u64` written as a string is described as an integer.
+///   Implement `ApiSchema` by hand for such a type.
 #[proc_macro_derive(ApiSchema, attributes(serde, api_schema))]
 pub fn derive_api_schema(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
