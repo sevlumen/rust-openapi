@@ -5,6 +5,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.8] - 2026-10-10
+
+### Security
+- The `Headers` `{:?}` allowlist (0.9.7) is narrower. It still allowed headers
+  that can carry secrets or personal data: `Referer` (its URL can hold a reset
+  or login token), `Sec-WebSocket-Protocol` (browsers cannot send an
+  `Authorization` header on a WebSocket, so it is used to carry one), the
+  `Sec-CH-*` and `Sec-Fetch-*` families by wildcard (so `Sec-CH-Api-Key` was
+  printed), and the forwarded-address headers (`X-Forwarded-For`, `X-Real-IP`,
+  `Forwarded`: personal data). All of these now print `<redacted>`; the
+  allowlist is exact names only (`Host`, `User-Agent`, `Content-Type`,
+  `Accept*`, `Sec-CH-UA` / `-Mobile` / `-Platform`, `X-Request-Id`, ...). Names
+  are always shown and `.0` is unchanged; print the values you need yourself.
+  Found by review of 0.9.7.
+
+### Added
+- A test that a 128 KiB patterned response arrives byte for byte through 1 KiB
+  HTTP/2 windows.
+
 ## [0.9.7] - 2026-10-09
 
 ### Security

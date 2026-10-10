@@ -66,10 +66,20 @@ mod secrets {
                 ("x-access-code", "s3cr3t-code"),
                 ("x-request-id", "request-42"),
                 ("user-agent", "curl/8.0"),
+                // Harmless-looking names that can carry secrets or personal data.
+                ("referer", "https://example.com/reset?token=s3cr3t-referer"),
+                ("sec-websocket-protocol", "auth-s3cr3t-subprotocol"),
+                ("sec-ch-api-key", "s3cr3t-client-hint"),
+                ("x-forwarded-for", "203.0.113.77"),
+                ("x-real-ip", "203.0.113.78"),
             ],
         )
         .await;
         assert!(!shown.contains("s3cr3t"), "{shown}");
+        assert!(
+            !shown.contains("203.0.113"),
+            "client addresses leaked: {shown}"
+        );
         // The names stay, so the output is still useful for debugging.
         for name in [
             "authorization",

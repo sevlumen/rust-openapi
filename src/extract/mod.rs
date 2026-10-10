@@ -297,10 +297,11 @@ impl<S: Send + Sync + 'static> FromRequest<S> for ConnectInfo {
 ///
 /// `{:?}` shows every header name but only the values of a short list of
 /// harmless headers (`Host`, `User-Agent`, `Content-Type`, `Accept*`,
-/// `X-Request-Id`, `X-Forwarded-*`, ...); every other value, `Authorization`,
-/// `Cookie` and custom credential headers included, prints as `<redacted>`
-/// (default deny), so logging it does not leak them. The map itself (`.0`) is
-/// unchanged.
+/// `X-Request-Id`, ...); every other value prints as `<redacted>` (default
+/// deny): `Authorization`, `Cookie`, custom credential headers, and also
+/// `Referer`, `Sec-WebSocket-Protocol` and the forwarded-address headers, which
+/// can carry tokens or personal data. Logging it therefore does not leak them.
+/// The map itself (`.0`) is unchanged.
 #[derive(Clone)]
 pub struct Headers(pub http::HeaderMap);
 

@@ -25,6 +25,18 @@ async fn tiny() -> String {
     "y".repeat(256)
 }
 
+/// 128 KiB whose every byte depends on its position, so a lost, repeated or
+/// reordered chunk is noticed.
+fn patterned() -> String {
+    (0..128 * 1024)
+        .map(|index| char::from(b'a' + (index % 26) as u8))
+        .collect()
+}
+
+async fn patterned_route() -> String {
+    patterned()
+}
+
 async fn medium() -> String {
     "x".repeat(16 * 1024)
 }
@@ -87,6 +99,7 @@ async fn start(configure: impl FnOnce(AppRuntime) -> AppRuntime) -> Server {
     app.get("/slow", slow);
     app.get("/big", big);
     app.get("/medium", medium);
+    app.get("/patterned", patterned_route);
     app.get("/tiny", tiny);
     app.get("/events", events);
     app.get("/quiet", quiet_events);
@@ -660,5 +673,31 @@ async fn a_steady_reader_of_a_huge_body_is_not_cut_by_send_timeout() {
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
     assert!(received > 0);
+    let _ = server.shut_down().await;
+}
+
+/// Every byte of a multi-chunk response arrives, in order, even through 1 KiB
+/// windows (128 chunks' worth of window updates) and the stall bookkeeping.
+#[tokio::test]
+async fn a_response_through_tiny_windows_arrives_byte_for_byte() {
+    let mut server = start(|runtime| runtime.h2c(true)).await;
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .initial_stream_window_size(1024)
+        .initial_connection_window_size(1024)
+        .handshake(TokioIo::new(tcp))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = http::Request::builder()
+        .uri("http://localhost/patterned")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.len(), 128 * 1024);
+    assert!(body == patterned().as_bytes(), "the body arrived altered");
     let _ = server.shut_down().await;
 }

@@ -16,11 +16,17 @@ impl fmt::Debug for Redacted {
 }
 
 /// Whether a header's value may appear in `{:?}` output. Everything not known to
-/// be harmless is hidden (default deny), so a custom credential header
-/// (`X-Credential`, `X-Access-Code`...) cannot leak just because its name does
-/// not look secret.
+/// be harmless is hidden (default deny): a custom credential header
+/// (`X-Credential`...) cannot leak just because its name does not look secret,
+/// and nothing is allowed by pattern.
+///
+/// Left out on purpose, although they look harmless: `Referer` (its URL can carry
+/// a reset or login token), `Sec-WebSocket-Protocol` (browsers cannot set an
+/// `Authorization` header on a WebSocket, so it is used to carry one), the
+/// forwarded-address headers (`X-Forwarded-For`, `X-Real-IP`, `Forwarded`:
+/// personal data) and `Sec-CH-*` / `Sec-Fetch-*` as families.
 pub(crate) fn is_safe_header(name: &str) -> bool {
-    const SAFE: [&str; 40] = [
+    const SAFE: [&str; 36] = [
         "accept",
         "accept-charset",
         "accept-encoding",
@@ -36,7 +42,6 @@ pub(crate) fn is_safe_header(name: &str) -> bool {
         "date",
         "dnt",
         "expect",
-        "forwarded",
         "host",
         "if-match",
         "if-modified-since",
@@ -47,8 +52,9 @@ pub(crate) fn is_safe_header(name: &str) -> bool {
         "origin",
         "pragma",
         "range",
-        "referer",
-        "sec-websocket-protocol",
+        "sec-ch-ua",
+        "sec-ch-ua-mobile",
+        "sec-ch-ua-platform",
         "sec-websocket-version",
         "te",
         "traceparent",
@@ -57,16 +63,10 @@ pub(crate) fn is_safe_header(name: &str) -> bool {
         "upgrade",
         "upgrade-insecure-requests",
         "user-agent",
-        "via",
-        "x-forwarded-for",
-        "x-forwarded-host",
-        "x-forwarded-proto",
     ];
-    const SAFE_MORE: [&str; 3] = ["x-real-ip", "x-request-id", "x-correlation-id"];
-    SAFE.contains(&name)
-        || SAFE_MORE.contains(&name)
-        || name.starts_with("sec-fetch-")
-        || name.starts_with("sec-ch-")
+    // Correlation ids are random identifiers, not credentials.
+    const IDS: [&str; 2] = ["x-request-id", "x-correlation-id"];
+    SAFE.contains(&name) || IDS.contains(&name)
 }
 
 macro_rules! opaque {
