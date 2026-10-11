@@ -53,11 +53,20 @@ fn valid(schema: &Value, value: &Value) -> bool {
                     return false;
                 }
             }
-            if schema.get("additionalProperties") == Some(&json!(false))
-                && object.keys().any(|key| !properties.contains_key(key))
+        }
+        let declared = schema.get("properties").and_then(Value::as_object);
+        let is_extra = |key: &String| declared.is_none_or(|known| !known.contains_key(key));
+        match schema.get("additionalProperties") {
+            Some(Value::Bool(false)) if object.keys().any(is_extra) => return false,
+            // A map: every key that is not a declared property follows the schema.
+            Some(extra @ Value::Object(_))
+                if object
+                    .iter()
+                    .any(|(key, field)| is_extra(key) && !valid(extra, field)) =>
             {
                 return false;
             }
+            _ => {}
         }
     }
     if let Some(list) = value.as_array() {
@@ -127,6 +136,18 @@ struct Record {
     note: String,
     #[serde(rename = "type")]
     kind: String,
+}
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+struct WithMaps {
+    scores: std::collections::BTreeMap<String, u32>,
+    nested: std::collections::HashMap<String, Inner>,
+}
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+#[serde(deny_unknown_fields)]
+struct Closed {
+    a: u32,
 }
 
 #[derive(Serialize, Deserialize, ApiSchema)]
@@ -261,4 +282,36 @@ fn a_mixed_enum_accepts_a_value_both_a_tagged_and_the_untagged_variant_match() {
         Mixed::Anything(json!("loose")),
         Mixed::Circle { radius: 2 },
     ]);
+}
+
+#[test]
+fn maps_and_closed_objects_serialize_into_their_schema() {
+    check(&[WithMaps {
+        scores: [("a".to_owned(), 1), ("b".to_owned(), 2)].into(),
+        nested: [("x".to_owned(), Inner { id: 1, label: None })].into(),
+    }]);
+    check(&[Closed { a: 1 }]);
+}
+
+/// The validator must also say no, or the tests above prove nothing.
+#[test]
+fn the_validator_rejects_data_that_does_not_match() {
+    let record = Inner::schema();
+    assert!(!valid(&record, &json!({ "id": "not a number" })));
+    assert!(!valid(&record, &json!({ "label": "id is required" })));
+    assert!(!valid(&record, &json!([1])));
+    assert!(!valid(&Unit::schema(), &json!("Third")));
+    assert!(!valid(&Closed::schema(), &json!({ "a": 1, "b": 2 })));
+    let maps = WithMaps::schema();
+    assert!(!valid(
+        &maps,
+        &json!({ "scores": { "a": "x" }, "nested": {} })
+    ));
+    assert!(!valid(
+        &maps,
+        &json!({ "scores": {}, "nested": { "k": { "id": "bad" } } })
+    ));
+    assert!(!valid(&External::schema(), &json!({ "Number": "one" })));
+    assert!(!valid(&Internal::schema(), &json!({ "kind": "Nope" })));
+    assert!(!valid(&Adjacent::schema(), &json!({ "t": "Number" })));
 }

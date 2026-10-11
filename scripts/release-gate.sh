@@ -4,6 +4,10 @@
 # Needs a clean tree so the result describes the commit, not local edits.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Evidence: everything below is also written to release-gate-<sha>.log (git-ignored);
+# attach it to the GitHub Release (`gh release upload vX.Y.Z release-gate-<sha>.log`).
+sha="$(git rev-parse HEAD)"
+exec > >(tee "release-gate-$sha.log") 2>&1
 [ -z "$(git status --porcelain)" ] || { echo "release-gate: the working tree is not clean" >&2; exit 1; }
 FEATURES="uuid test-util swagger multipart tls http2 compression compression-brotli static-files websocket"
 cargo fmt --all -- --check
@@ -28,10 +32,12 @@ else
 fi
 # Not `! cargo ... | grep`: under `set -e` a `!` pipeline never stops the script,
 # and it would also hide a failing `cargo package`.
-package_files="$(cargo package --list -p oas-rs)"
-if grep -Ei 'wip|\.py$|\.log$' <<<"$package_files"; then
-  echo "release-gate: unexpected files in the package" >&2
-  exit 1
-fi
+for crate in oas-rs oas-rs-macros; do
+  package_files="$(cargo package --list -p "$crate")"
+  if grep -Ei 'wip|\.py$|\.log$' <<<"$package_files"; then
+    echo "release-gate: unexpected files in the $crate package" >&2
+    exit 1
+  fi
+done
 [ "$(grep -m1 '^version' Cargo.toml)" = "$(grep -m1 '^version' oas-rs-macros/Cargo.toml)" ]
-echo "release-gate: PASSED on $(git rev-parse HEAD)"
+echo "release-gate: PASSED on $sha"

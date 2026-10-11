@@ -309,6 +309,12 @@ impl WebSocketUpgrade {
     /// the session forever (hyper's header timeout does not apply after the
     /// upgrade). Send pings from the client, or have the handler ping, to keep
     /// a quiet session alive.
+    ///
+    /// On timeout the session is closed: a close frame (code 1001) is sent,
+    /// waiting at most one second, so a peer that has stopped reading cannot
+    /// delay [`recv`](WebSocket::recv) longer than that, and [`WebSocket::send`]
+    /// then fails. The connection itself is released when the handler drops the
+    /// [`WebSocket`] (the handler owns it after the upgrade).
     pub fn idle_timeout(mut self, timeout: Duration) -> Self {
         self.idle_timeout = Some(timeout);
         self

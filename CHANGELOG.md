@@ -8,7 +8,17 @@ All notable changes to this project are documented here. The format follows
 ### Tests
 
 - `tests/serde_schema_agreement.rs`: values Serde serializes (structs, every enum tagging form, a mixed
-  tagged/untagged enum) are checked against the schema the derive generates, with a small built-in validator.
+  tagged/untagged enum) are checked against the schema the derive generates, with a small built-in validator (maps and `deny_unknown_fields` included, plus negative cases
+  that prove it rejects wrong data).
+
+### Tooling
+
+- `scripts/release-gate.sh` checks the package list of both crates and writes `release-gate-<sha>.log`
+  (git-ignored) to attach to the GitHub Release as evidence.
+
+### Documentation
+
+- `WebSocketUpgrade::idle_timeout` documents the bounded close handshake.
 
 ## [0.9.11] - 2026-10-11
 

@@ -3,3 +3,4 @@
 .env
 /wip
 /wip_*
+release-gate-*.log
