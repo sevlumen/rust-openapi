@@ -8,8 +8,15 @@ All notable changes to this project are documented here. The format follows
 ### Tests
 
 - `tests/serde_schema_agreement.rs`: values Serde serializes (structs, every enum tagging form, a mixed
-  tagged/untagged enum) are checked against the schema the derive generates, with a small built-in validator (maps and `deny_unknown_fields` included, plus negative cases
+  tagged/untagged enum) are checked against the schema the derive generates by a real JSON Schema (draft 2020-12) validator
+  (`jsonschema`, dev-dependency only; maps and `deny_unknown_fields` included, plus negative cases
   that prove it rejects wrong data).
+
+### Release evidence
+
+- Release gate on `66057b3` (code identical to 0.9.11): fmt, clippy, MSRV 1.88, tests, doctests, rustdoc, Miri,
+  60 s soak (839,585 correct answers, 0 failures), `cargo deny`, Linux `send_timeout` (3 passed, 0 ignored).
+- Linux 30 min soak: 618,877 correct answers, 0 failures, RSS 7.4-8.07 MB. Not a benchmark: that needs a dedicated host.
 
 ### Tooling
 

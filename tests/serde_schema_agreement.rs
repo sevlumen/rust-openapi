@@ -1,6 +1,5 @@
-//! What Serde writes must be valid against the schema the derive generates.
-//! A tiny validator for the keywords the derive emits keeps this free of a
-//! JSON Schema dependency; keywords it does not know are ignored.
+//! What Serde writes must be valid against the schema the derive generates,
+//! checked by a real JSON Schema (draft 2020-12) validator.
 #![allow(dead_code)]
 
 use oas_rs::ApiSchema;
@@ -8,102 +7,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 fn valid(schema: &Value, value: &Value) -> bool {
-    let Some(schema) = schema.as_object() else {
-        return true; // `true` / unknown form accepts everything
-    };
-    if let Some(types) = schema.get("type") {
-        let names: Vec<&str> = match types {
-            Value::String(name) => vec![name.as_str()],
-            Value::Array(list) => list.iter().filter_map(Value::as_str).collect(),
-            _ => vec![],
-        };
-        let matches = |name: &str| match name {
-            "string" => value.is_string(),
-            "integer" => value.is_i64() || value.is_u64(),
-            "number" => value.is_number(),
-            "boolean" => value.is_boolean(),
-            "array" => value.is_array(),
-            "object" => value.is_object(),
-            "null" => value.is_null(),
-            _ => true,
-        };
-        if !names.is_empty() && !names.iter().any(|name| matches(name)) {
-            return false;
-        }
-    }
-    if let Some(Value::Array(options)) = schema.get("enum")
-        && !options.contains(value)
-    {
-        return false;
-    }
-    if let Some(object) = value.as_object() {
-        if let Some(Value::Array(required)) = schema.get("required")
-            && required
-                .iter()
-                .filter_map(Value::as_str)
-                .any(|name| !object.contains_key(name))
-        {
-            return false;
-        }
-        if let Some(Value::Object(properties)) = schema.get("properties") {
-            for (name, inner) in properties {
-                if let Some(field) = object.get(name)
-                    && !valid(inner, field)
-                {
-                    return false;
-                }
-            }
-        }
-        let declared = schema.get("properties").and_then(Value::as_object);
-        let is_extra = |key: &String| declared.is_none_or(|known| !known.contains_key(key));
-        match schema.get("additionalProperties") {
-            Some(Value::Bool(false)) if object.keys().any(is_extra) => return false,
-            // A map: every key that is not a declared property follows the schema.
-            Some(extra @ Value::Object(_))
-                if object
-                    .iter()
-                    .any(|(key, field)| is_extra(key) && !valid(extra, field)) =>
-            {
-                return false;
-            }
-            _ => {}
-        }
-    }
-    if let Some(list) = value.as_array() {
-        if let Some(items) = schema.get("items")
-            && !list.iter().all(|item| valid(items, item))
-        {
-            return false;
-        }
-        if let Some(Value::Array(prefix)) = schema.get("prefixItems") {
-            if list.len() != prefix.len() {
-                return false;
-            }
-            if !prefix
-                .iter()
-                .zip(list)
-                .all(|(inner, item)| valid(inner, item))
-            {
-                return false;
-            }
-        }
-    }
-    if let Some(Value::Array(all)) = schema.get("allOf")
-        && !all.iter().all(|inner| valid(inner, value))
-    {
-        return false;
-    }
-    if let Some(Value::Array(any)) = schema.get("anyOf")
-        && !any.iter().any(|inner| valid(inner, value))
-    {
-        return false;
-    }
-    if let Some(Value::Array(one)) = schema.get("oneOf")
-        && one.iter().filter(|inner| valid(inner, value)).count() != 1
-    {
-        return false;
-    }
-    true
+    jsonschema::draft202012::options()
+        .build(schema)
+        .expect("the generated schema is itself a valid JSON Schema")
+        .is_valid(value)
 }
 
 fn check<T: Serialize + ApiSchema>(values: &[T]) {
