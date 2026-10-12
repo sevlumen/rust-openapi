@@ -11,6 +11,9 @@ All notable changes to this project are documented here. The format follows
   tagged/untagged enum) are checked against the schema the derive generates by a real JSON Schema (draft 2020-12) validator
   (`jsonschema`, dev-dependency only; maps and `deny_unknown_fields` included, plus negative cases
   that prove it rejects wrong data).
+- `tests/websocket.rs`: on Linux, an idle timeout with a peer that stopped reading (socket buffers full) still reports
+  the timeout within the bounded close and keeps `send` closed while the handler holds the socket; verified to fail
+  without the 1 s bound.
 
 ### Release evidence
 

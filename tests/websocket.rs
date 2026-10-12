@@ -492,3 +492,66 @@ async fn an_idle_timeout_closes_the_session_even_if_the_handler_keeps_the_socket
     );
     let _ = stop.send(());
 }
+
+/// A peer that stops reading fills the socket buffers. The close frame then
+/// cannot be written, but `recv` must still report the timeout within its
+/// bounded close and `send` must stay closed while the handler keeps the
+/// socket. Windows loopback never blocks a write, so this is Linux only.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_idle_timeout_is_bounded_when_the_peer_stopped_reading() {
+    let (done_tx, done_rx) = oneshot::channel::<(Duration, bool, bool)>();
+    let done_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(done_tx)));
+    let mut app = App::new();
+    app.raw(Method::GET, "/ws", move |request: Request<Incoming>| {
+        let done_tx = done_tx.clone();
+        async move {
+            WebSocketUpgrade::new(request)
+                .idle_timeout(Duration::from_millis(300))
+                .on_upgrade(move |mut socket| async move {
+                    let chunk = "x".repeat(64 * 1024);
+                    // Fill the buffers until a write no longer completes.
+                    loop {
+                        let sent = tokio::time::timeout(
+                            Duration::from_millis(300),
+                            socket.send(Message::Text(chunk.clone().into())),
+                        )
+                        .await;
+                        if sent.is_err() {
+                            break;
+                        }
+                    }
+                    let started = std::time::Instant::now();
+                    let outcome = socket.recv().await;
+                    let elapsed = started.elapsed();
+                    let timed_out = matches!(&outcome, Some(Err(error)) if error.is_timeout());
+                    let send_closed = socket
+                        .send(Message::Text("late".into()))
+                        .await
+                        .is_err_and(|error| error.is_closed());
+                    if let Some(tx) = done_tx.lock().unwrap().take() {
+                        let _ = tx.send((elapsed, timed_out, send_closed));
+                    }
+                    // The handler keeps the blocked socket for a while.
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                })
+        }
+    });
+    let (addr, stop, _server) = serve(app).await;
+    // The client completes the handshake and then never reads.
+    let (_client, _) = connect(addr, &[]).await.unwrap();
+    let (elapsed, timed_out, send_closed) = tokio::time::timeout(Duration::from_secs(60), done_rx)
+        .await
+        .expect("the handler never finished")
+        .unwrap();
+    assert!(timed_out, "recv should report the idle timeout");
+    assert!(
+        send_closed,
+        "send after the timeout must report a closed session"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "the timeout took {elapsed:?} with a blocked peer (idle 300 ms + 1 s bounded close)"
+    );
+    let _ = stop.send(());
+}
