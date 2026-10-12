@@ -20,6 +20,8 @@ All notable changes to this project are documented here. The format follows
 - Release gate on `66057b3` (code identical to 0.9.11): fmt, clippy, MSRV 1.88, tests, doctests, rustdoc, Miri,
   60 s soak (839,585 correct answers, 0 failures), `cargo deny`, Linux `send_timeout` (3 passed, 0 ignored).
 - Linux 30 min soak: 618,877 correct answers, 0 failures, RSS 7.4-8.07 MB. Not a benchmark: that needs a dedicated host.
+- Linux 2 h soak (Docker `rust:1.88`, `OAS_SOAK_SECS=7200`, mixed HTTP/1.1, h2 and WebSocket load): 2,474,274 correct answers,
+  0 failures, every slot returned; container memory flat at about 601 MiB. Docker on a desktop is not a dedicated host.
 
 ### Tooling
 
