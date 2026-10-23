@@ -242,6 +242,11 @@ fn a_raw_streaming_route_can_document_its_form_too() {
 
 /// Sends `junk` after a request head that declares `declared` bytes, never
 /// finishing the body, and returns what the server answers meanwhile.
+/// The guard fires on the chunk that follows more than 256 KiB of nothing, so
+/// the junk must span several chunks even when a loaded machine coalesces
+/// reads into big ones (hyper reads at most ~400 KiB at a time).
+const JUNK: usize = 1_500_000;
+
 async fn flood(junk: Vec<u8>, declared: usize) -> String {
     let (tx, _first) = mpsc::channel(1);
     let (addr, stop) = serve(streaming_app(10 * 1024 * 1024, tx)).await;
@@ -271,14 +276,14 @@ async fn flood(junk: Vec<u8>, declared: usize) -> String {
 #[tokio::test]
 async fn a_body_that_never_reaches_a_boundary_is_cut_off_early() {
     // No `--boundary` anywhere: multer would keep buffering until the limit.
-    let response = flood(vec![b'a'; 600_000], 2_000_000).await;
+    let response = flood(vec![b'a'; JUNK], 2_000_000).await;
     assert!(response.starts_with("HTTP/1.1 400"), "{response}");
 }
 
 #[tokio::test]
 async fn part_headers_that_never_end_are_cut_off_early() {
     let mut junk = format!("--{BOUNDARY}\r\nX-Junk: ").into_bytes();
-    junk.extend(vec![b'a'; 600_000]);
+    junk.extend(vec![b'a'; JUNK]);
     let response = flood(junk, 2_000_000).await;
     assert!(response.starts_with("HTTP/1.1 400"), "{response}");
 }
