@@ -896,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "oas-rs"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "brotli",
  "bytes",
@@ -926,7 +926,7 @@ dependencies = [
 
 [[package]]
 name = "oas-rs-macros"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "proc-macro2",
  "quote",

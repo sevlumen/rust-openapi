@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.12] - 2026-10-23
+
 ### Changed
 
 - OpenAPI: integer schemas state their exact range. `u8`/`u16`/`u32` use `format: uint32` and `u64`/`usize`
