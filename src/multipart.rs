@@ -412,10 +412,11 @@ impl<S: Send + Sync + 'static> App<S> {
     /// document, as a `multipart/form-data` request body (replacing what the
     /// route had). It documents only: it does not validate uploads. Use it
     /// for [`Multipart`] routes and for raw streaming routes, which otherwise
-    /// have no `requestBody`. Call it right after registering the route. The
-    /// error responses the framework documents for a body route (`400`, `413`,
-    /// `415`) are assumed to apply, as they do for the buffered extractor and
-    /// [`Multipart::from_stream`].
+    /// have no `requestBody`. Call it right after registering the route. On a
+    /// [`Multipart`] route the framework documents its own `400`, `408`, `413`
+    /// and `415`; a raw route reads its own body, so list the errors its
+    /// handler returns (those of [`Multipart::from_stream`]: `400`, `413`,
+    /// `415`) with [`App::problem_responses`].
     ///
     /// # Panics
     ///

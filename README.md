@@ -284,12 +284,16 @@ and calls `SchemaRegistry::define`. Rename a component with
 Every route also documents the errors the framework itself returns, all with
 the shared `Problem` schema (`type`, `title`, `status`, `detail`, media type
 `application/json`, which is what the server sends): `400` for routes with typed
-path/query/header parameters or a JSON body, `413` and `415` for routes with a
-body, and `401` for routes whose declared security (`.security(..)` or the
-document default) is non-empty. It follows the declarations, not middleware:
-a layer that enforces auth without `.security(..)` is not reflected, and raw
-routes and custom extractors declare nothing. Turn it off with
-`app.openapi().document_errors(false)`. Do not name your own type `Problem`
+path/query/header parameters or a body the framework parses, `408`, `413` and
+`415` for a body it buffers, and `401` for routes whose declared security
+(`.security(..)` or the document default) is non-empty. It follows the
+declarations, not middleware: a layer that enforces auth without
+`.security(..)` is not reflected, and raw routes and custom extractors declare
+nothing (a raw route documented with `multipart_fields` reads its own body, so
+it gets none of the body errors). List the errors a handler returns itself with
+`.problem_responses([StatusCode::CONFLICT, ..])` after registering the route;
+those stay listed with `document_errors(false)`. Turn the framework's list off
+with `app.openapi().document_errors(false)`. Do not name your own type `Problem`
 while it is on and some route documents errors. The component name of a
 derived type is its Rust name (a container `#[serde(rename)]` does not change
 it); use `#[api_schema(name = "...")]` to change it.

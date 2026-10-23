@@ -172,20 +172,17 @@ impl<S: Send + Sync + 'static> App<S> {
             .openapi_config
             .as_ref()
             .is_some_and(|config| !config.default_security.is_empty());
-        if documents_errors
-            && self.schemas.definitions().contains_key("Problem")
+        if self.schemas.definitions().contains_key("Problem")
             && self
                 .metadata
                 .iter()
                 .zip(&self.plans)
                 .any(|(metadata, plan)| {
                     !metadata.builtin
-                        && !framework_errors(
-                            metadata,
-                            plan.body_mode == BodyMode::Buffered,
-                            default_secured,
-                        )
-                        .is_empty()
+                        && (!metadata.operation.problem_responses.is_empty()
+                            || documents_errors
+                                && !framework_errors(metadata, plan.body_mode, default_secured)
+                                    .is_empty())
                 })
         {
             return Err(BuildError::SchemaNameConflict {
@@ -544,6 +541,46 @@ impl<S: Send + Sync + 'static> App<S> {
         self
     }
 
+    /// Documents error responses that the last registered route's handler
+    /// returns (as problem-details JSON, the `Problem` schema), next to the
+    /// ones the framework produces itself. A raw handler that parses its own
+    /// body, for example with `Multipart::from_stream`, lists what that can
+    /// return:
+    ///
+    /// ```ignore
+    /// app.raw(Method::POST, "/upload", upload)
+    ///     .multipart_fields([MultipartField::file("file")])
+    ///     .problem_responses([StatusCode::BAD_REQUEST, StatusCode::PAYLOAD_TOO_LARGE]);
+    /// ```
+    ///
+    /// They are listed even with `document_errors(false)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a status is not an error status (`4xx` or `5xx`).
+    pub fn problem_responses(
+        &mut self,
+        statuses: impl IntoIterator<Item = StatusCode>,
+    ) -> &mut Self {
+        let statuses: Vec<StatusCode> = statuses.into_iter().collect();
+        for status in &statuses {
+            assert!(
+                status.is_client_error() || status.is_server_error(),
+                "problem_responses takes an error status (4xx or 5xx), not {status}"
+            );
+        }
+        if let Some(index) = self.last_route {
+            let declared = &mut self.metadata[index].operation.problem_responses;
+            for status in statuses {
+                if !declared.contains(&status) {
+                    declared.push(status);
+                }
+            }
+            self.invalidate_openapi_cache();
+        }
+        self
+    }
+
     pub fn operation_id(&mut self, operation_id: impl Into<String>) -> &mut Self {
         let operation_id = operation_id.into();
         assert!(
@@ -655,20 +692,24 @@ impl<S: Send + Sync + 'static> App<S> {
             }
             let mut responses = Map::new();
             responses.insert(status, Value::Object(response));
-            if document_errors {
-                let buffered = plan.body_mode == BodyMode::Buffered;
-                for (code, description) in framework_errors(metadata, buffered, default_secured) {
-                    uses_problem = true;
-                    responses.insert(
-                        code.to_owned(),
-                        json!({
-                            "description": description,
-                            "content": { "application/json": {
-                                "schema": { "$ref": PROBLEM_REF }
-                            } }
-                        }),
-                    );
-                }
+            let mut errors: Vec<StatusCode> = if document_errors {
+                framework_errors(metadata, plan.body_mode, default_secured)
+            } else {
+                Vec::new()
+            };
+            // What the handler declared is listed even with `document_errors(false)`.
+            errors.extend(metadata.operation.problem_responses.iter().copied());
+            for code in errors {
+                uses_problem = true;
+                responses.insert(
+                    code.as_str().to_owned(),
+                    json!({
+                        "description": code.canonical_reason().unwrap_or("Error"),
+                        "content": { "application/json": {
+                            "schema": { "$ref": PROBLEM_REF }
+                        } }
+                    }),
+                );
             }
             operation.insert("responses".to_owned(), Value::Object(responses));
             paths
@@ -842,6 +883,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 summary: None,
                 operation_id: None,
                 security: None,
+                problem_responses: Vec::new(),
                 response_status: StatusCode::OK,
                 response_schema: None,
                 request: OpenApiRequest::default(),
@@ -935,6 +977,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 summary: None,
                 operation_id: None,
                 security: None,
+                problem_responses: Vec::new(),
                 response_status: <H::Response as ResponseMetadata>::status_code(),
                 response_schema: <H::Response as ResponseMetadata>::response_schema_with(
                     &mut self.schemas,
@@ -992,6 +1035,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 summary: None,
                 operation_id: None,
                 security: None,
+                problem_responses: Vec::new(),
                 response_status: <H::Response as ResponseMetadata>::status_code(),
                 response_schema: <H::Response as ResponseMetadata>::response_schema_with(
                     &mut self.schemas,
@@ -1098,6 +1142,7 @@ impl<S: Send + Sync + 'static> App<S> {
                 summary: None,
                 operation_id: None,
                 security: None,
+                problem_responses: Vec::new(),
                 response_status: StatusCode::OK,
                 response_schema: None,
                 request: OpenApiRequest::default(),
@@ -1193,13 +1238,10 @@ pub(crate) struct Operation {
     /// `None` inherits the document default; `Some(vec![])` is explicitly
     /// public; otherwise each entry is an AND group and entries are alternatives.
     pub(crate) security: Option<Vec<Vec<String>>>,
+    /// Error statuses the handler returns, declared with `problem_responses`.
+    pub(crate) problem_responses: Vec<StatusCode>,
 }
 
-/// The error responses the framework itself can produce for a route, from
-/// what the route declares: `400` for typed parameters or a JSON body, `413`
-/// and `415` for a body (plus `408` when the framework buffers it), `401` for declared security (not for a layer that
-/// enforces it without `.security(..)`). Raw routes and custom extractors
-/// declare nothing, so they get none.
 /// Every registration path (typed, raw, static) requires an absolute path:
 /// `"health"` would register fine and never match a request.
 fn assert_route_path(path: &str) {
@@ -1209,37 +1251,41 @@ fn assert_route_path(path: &str) {
     );
 }
 
+/// The error responses the framework itself produces for a route, from what
+/// the route declares: `400` for typed parameters or a body it parses, `408`,
+/// `413` and `415` for a body it buffers, and `401` for declared security (not
+/// for a layer that enforces it without `.security(..)`). A raw route reads its
+/// own body, so a body documented on it (`multipart_fields`) adds nothing: the
+/// handler lists the errors it returns with `problem_responses`.
 fn framework_errors(
     metadata: &RouteMetadata,
-    buffered_body: bool,
+    body_mode: BodyMode,
     default_secured: bool,
-) -> Vec<(&'static str, &'static str)> {
+) -> Vec<StatusCode> {
     let request = &metadata.operation.request;
+    let parsed_by_framework = body_mode != BodyMode::Incoming;
     let mut errors = Vec::new();
-    if !request.parameters.is_empty()
-        || !request.path_schemas.is_empty()
-        || request.request_body.is_some()
+    if parsed_by_framework
+        && (!request.parameters.is_empty()
+            || !request.path_schemas.is_empty()
+            || request.request_body.is_some())
     {
-        errors.push(("400", "Bad Request"));
+        errors.push(StatusCode::BAD_REQUEST);
     }
-    if request.request_body.is_some() {
-        // Only a body the framework buffers is bounded by `body_read_timeout`;
-        // a raw handler (even one documented with `multipart_fields`) reads
-        // its own.
-        if buffered_body {
-            errors.push(("408", "Request Timeout"));
+    if parsed_by_framework && request.request_body.is_some() {
+        if body_mode == BodyMode::Buffered {
+            errors.push(StatusCode::REQUEST_TIMEOUT);
         }
-        errors.push(("413", "Payload Too Large"));
-        errors.push(("415", "Unsupported Media Type"));
+        errors.push(StatusCode::PAYLOAD_TOO_LARGE);
+        errors.push(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
     let secured = match &metadata.operation.security {
         Some(requirements) => !requirements.is_empty(),
         None => default_secured,
     };
     if secured {
-        errors.push(("401", "Unauthorized"));
+        errors.push(StatusCode::UNAUTHORIZED);
     }
-    errors.sort();
     errors
 }
 

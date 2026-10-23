@@ -198,6 +198,15 @@ impl<S: Send + Sync + 'static> Group<'_, S> {
         self
     }
 
+    /// See [`App::problem_responses`].
+    pub fn problem_responses(
+        &mut self,
+        statuses: impl IntoIterator<Item = http::StatusCode>,
+    ) -> &mut Self {
+        self.app.problem_responses(statuses);
+        self
+    }
+
     /// See [`App::summary`].
     pub fn summary(&mut self, summary: impl Into<String>) -> &mut Self {
         self.app.summary(summary);

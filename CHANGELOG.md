@@ -5,7 +5,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.9.13] - 2026-10-23
+## [0.10.0] - 2026-10-23
+
+### Added
+
+- `App::problem_responses([StatusCode, ..])` (and `Group::problem_responses`): documents the error responses a
+  handler returns itself, as `Problem` JSON, next to the framework's own; they stay listed with
+  `document_errors(false)`. Use it on raw routes that parse their own body (`Multipart::from_stream`).
+
+### Changed
+
+- OpenAPI lists only errors the framework produces. A raw route documented with `multipart_fields` no longer gets
+  `400`/`413`/`415`: its handler reads its own body, so it declares them with `problem_responses` (as the
+  `framework_errors` contract always said: raw routes declare nothing).
 
 ### Fixed
 
