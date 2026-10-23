@@ -5,6 +5,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- OpenAPI: integer schemas state their exact range. `u8`/`u16`/`u32` use `format: uint32` and `u64`/`usize`
+  `uint64` (`int32`/`int64` are signed in OpenAPI, so the old output mis-described unsigned types), and every
+  fixed-width integer carries `minimum`/`maximum`. SDK generators and validators see the real domain.
+- `Option<T>::schema()` is nullable like `schema_with` (serde writes `None` as `null`); query parameters were
+  already unwrapped by the derive and the extractors.
+- Routes with a buffered request body document `408 Request Timeout` (the `body_read_timeout` response).
+- `WebSocket`: after an idle timeout the transport is dropped (after the bounded close frame), so the connection is
+  released at once even if the handler keeps the value; `send`/`close` then fail as closed.
+
+### Fixed
+
+- `raw` and static routes (`raw_get`, `static_text`, `static_json`, `Group` forwards) reject a path that does not
+  start with `/`, like typed routes; `"health"` used to register and never match.
+
 ### Tests
 
 - `tests/serde_schema_agreement.rs`: values Serde serializes (structs, every enum tagging form, a mixed
@@ -13,7 +29,7 @@ All notable changes to this project are documented here. The format follows
   that prove it rejects wrong data).
 - `tests/websocket.rs`: on Linux, an idle timeout with a peer that stopped reading (socket buffers full) still reports
   the timeout within the bounded close and keeps `send` closed while the handler holds the socket; verified to fail
-  without the 1 s bound.
+  without the 1 s bound, and the client sees the connection end while the handler still holds the socket.
 
 ### Release evidence
 

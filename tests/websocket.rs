@@ -532,14 +532,15 @@ async fn an_idle_timeout_is_bounded_when_the_peer_stopped_reading() {
                     if let Some(tx) = done_tx.lock().unwrap().take() {
                         let _ = tx.send((elapsed, timed_out, send_closed));
                     }
-                    // The handler keeps the blocked socket for a while.
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    // The handler keeps the blocked socket for a long time:
+                    // the transport must be released without its help.
+                    tokio::time::sleep(Duration::from_secs(20)).await;
                 })
         }
     });
     let (addr, stop, _server) = serve(app).await;
     // The client completes the handshake and then never reads.
-    let (_client, _) = connect(addr, &[]).await.unwrap();
+    let (mut client, _) = connect(addr, &[]).await.unwrap();
     let (elapsed, timed_out, send_closed) = tokio::time::timeout(Duration::from_secs(60), done_rx)
         .await
         .expect("the handler never finished")
@@ -552,6 +553,17 @@ async fn an_idle_timeout_is_bounded_when_the_peer_stopped_reading() {
     assert!(
         elapsed < Duration::from_secs(3),
         "the timeout took {elapsed:?} with a blocked peer (idle 300 ms + 1 s bounded close)"
+    );
+    // The server dropped the transport at the timeout: draining what was
+    // already buffered must reach the end of the stream (EOF or reset) long
+    // before the handler lets go of its value 20 s later.
+    let released = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(Ok(_)) = client.next().await {}
+    })
+    .await;
+    assert!(
+        released.is_ok(),
+        "the connection stayed open while the handler held the timed-out socket"
     );
     let _ = stop.send(());
 }

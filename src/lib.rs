@@ -158,8 +158,9 @@ mod tests {
             json!({ "type": "number", "format": "double" })
         );
         assert_eq!(f32::schema()["format"], "float");
-        assert_eq!(u8::schema()["format"], "int32");
-        assert_eq!(usize::schema()["format"], "int64");
+        assert_eq!(u8::schema()["format"], "uint32");
+        assert_eq!(u8::schema()["maximum"], 255);
+        assert_eq!(usize::schema()["format"], "uint64");
         assert_eq!(Box::<String>::schema(), json!({ "type": "string" }));
         assert_eq!(
             Vec::<f64>::schema(),

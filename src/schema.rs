@@ -141,30 +141,6 @@ impl ApiSchema for String {
     }
 }
 
-impl ApiSchema for u32 {
-    fn schema() -> Value {
-        json!({ "type": "integer", "format": "int32" })
-    }
-}
-
-impl ApiSchema for u64 {
-    fn schema() -> Value {
-        json!({ "type": "integer", "format": "int64" })
-    }
-}
-
-impl ApiSchema for i32 {
-    fn schema() -> Value {
-        json!({ "type": "integer", "format": "int32" })
-    }
-}
-
-impl ApiSchema for i64 {
-    fn schema() -> Value {
-        json!({ "type": "integer", "format": "int64" })
-    }
-}
-
 impl ApiSchema for bool {
     fn schema() -> Value {
         json!({ "type": "boolean" })
@@ -179,9 +155,11 @@ impl ApiSchema for uuid::Uuid {
 }
 
 impl<T: ApiSchema> ApiSchema for Option<T> {
-    /// The inner schema: an optional query parameter is just absent.
+    /// Nullable, like [`schema_with`](ApiSchema::schema_with): serde writes
+    /// `None` as `null`. (An optional query parameter is just absent: the
+    /// derive and the extractors unwrap the `Option` themselves.)
     fn schema() -> Value {
-        T::schema()
+        json!({ "anyOf": [T::schema(), { "type": "null" }] })
     }
 
     /// Nullable: serde writes `None` as `null` (and reads `null` back).
@@ -297,19 +275,41 @@ impl<T: ApiSchema + ?Sized> ApiSchema for &T {
     }
 }
 
+/// Integers carry their exact range: `int32`/`int64` are signed in OpenAPI,
+/// so unsigned types use `uint32`/`uint64` (the de-facto formats) and every
+/// type states `minimum`/`maximum` so a validator or SDK generator sees the
+/// real domain.
 macro_rules! integer_schema {
     ($($ty:ty => $format:literal),* $(,)?) => {$(
         impl ApiSchema for $ty {
             fn schema() -> Value {
-                json!({ "type": "integer", "format": $format })
+                json!({
+                    "type": "integer",
+                    "format": $format,
+                    "minimum": <$ty>::MIN,
+                    "maximum": <$ty>::MAX,
+                })
             }
         }
     )*};
 }
 
 integer_schema! {
-    i8 => "int32", i16 => "int32", u8 => "int32", u16 => "int32",
-    isize => "int64", usize => "int64",
+    i8 => "int32", i16 => "int32", i32 => "int32", i64 => "int64",
+    u8 => "uint32", u16 => "uint32", u32 => "uint32", u64 => "uint64",
+}
+
+// The pointer-sized types depend on the platform: state only the sign.
+impl ApiSchema for isize {
+    fn schema() -> Value {
+        json!({ "type": "integer", "format": "int64" })
+    }
+}
+
+impl ApiSchema for usize {
+    fn schema() -> Value {
+        json!({ "type": "integer", "format": "uint64", "minimum": 0 })
+    }
 }
 
 impl ApiSchema for f32 {

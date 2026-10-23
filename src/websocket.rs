@@ -114,10 +114,10 @@ impl From<Message> for WireMessage {
 /// An open WebSocket session, handed to the handler given to
 /// [`WebSocketUpgrade::on_upgrade`].
 pub struct WebSocket {
-    inner: WebSocketStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>,
+    /// `None` once the idle timeout fired: the session is over and the
+    /// transport has been dropped (released), whatever the handler does next.
+    inner: Option<WebSocketStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>>,
     idle: Option<Duration>,
-    /// Set once the idle timeout fired: the session is over.
-    timed_out: bool,
 }
 
 impl WebSocket {
@@ -126,30 +126,30 @@ impl WebSocket {
     /// session, and so does the idle timeout: after it reports
     /// [`WebSocketError::is_timeout`] every further `recv` returns `None`.
     pub async fn recv(&mut self) -> Option<Result<Message, WebSocketError>> {
-        if self.timed_out {
-            return None;
-        }
+        let stream = self.inner.as_mut()?;
         let next = match self.idle {
-            Some(idle) => match tokio::time::timeout(idle, self.inner.next()).await {
+            Some(idle) => match tokio::time::timeout(idle, stream.next()).await {
                 Ok(next) => next,
                 Err(_) => {
-                    self.timed_out = true;
-                    // Tell the peer the session is over (best effort, bounded):
-                    // the handler may keep this value alive for a long time.
+                    // Tell the peer the session is over (best effort, bounded:
+                    // a peer that stopped reading cannot hold this up), then
+                    // drop the transport so the connection is released now,
+                    // not whenever the handler drops this value.
                     let _ = tokio::time::timeout(
                         Duration::from_secs(1),
-                        self.inner.close(Some(WireCloseFrame {
+                        stream.close(Some(WireCloseFrame {
                             code: 1001.into(),
                             reason: "idle timeout".into(),
                         })),
                     )
                     .await;
+                    self.inner = None;
                     return Some(Err(WebSocketError(tungstenite::Error::Io(
                         std::io::Error::new(std::io::ErrorKind::TimedOut, "websocket idle timeout"),
                     ))));
                 }
             },
-            None => self.inner.next().await,
+            None => stream.next().await,
         };
         next.map(|result| result.map(Message::from).map_err(WebSocketError))
     }
@@ -157,10 +157,9 @@ impl WebSocket {
     /// Sends a message. After the idle timeout the session is closed and this
     /// fails with an error for which [`WebSocketError::is_closed`] is true.
     pub async fn send(&mut self, message: Message) -> Result<(), WebSocketError> {
-        if self.timed_out {
-            return Err(WebSocketError(tungstenite::Error::AlreadyClosed));
-        }
         self.inner
+            .as_mut()
+            .ok_or(WebSocketError(tungstenite::Error::AlreadyClosed))?
             .send(message.into())
             .await
             .map_err(WebSocketError)
@@ -170,6 +169,8 @@ impl WebSocket {
     /// returns `None` to let it finish.
     pub async fn close(&mut self, frame: Option<CloseFrame>) -> Result<(), WebSocketError> {
         self.inner
+            .as_mut()
+            .ok_or(WebSocketError(tungstenite::Error::AlreadyClosed))?
             .close(frame.map(|frame| WireCloseFrame {
                 code: frame.code.into(),
                 reason: frame.reason.into(),
@@ -312,9 +313,11 @@ impl WebSocketUpgrade {
     ///
     /// On timeout the session is closed: a close frame (code 1001) is sent,
     /// waiting at most one second, so a peer that has stopped reading cannot
-    /// delay [`recv`](WebSocket::recv) longer than that, and [`WebSocket::send`]
-    /// then fails. The connection itself is released when the handler drops the
-    /// [`WebSocket`] (the handler owns it after the upgrade).
+    /// delay [`recv`](WebSocket::recv) longer than that. Then the transport is
+    /// dropped, so the connection is released at once even if the handler keeps
+    /// the [`WebSocket`] value; [`WebSocket::send`] and
+    /// [`WebSocket::close`] then fail with an error for which
+    /// [`WebSocketError::is_closed`] is true.
     pub fn idle_timeout(mut self, timeout: Duration) -> Self {
         self.idle_timeout = Some(timeout);
         self
@@ -427,9 +430,8 @@ impl WebSocketUpgrade {
             let io = hyper_util::rt::TokioIo::new(upgraded);
             let inner = WebSocketStream::from_raw_socket(io, Role::Server, Some(config)).await;
             handler(WebSocket {
-                inner,
+                inner: Some(inner),
                 idle: idle_timeout,
-                timed_out: false,
             })
             .await;
         });

@@ -119,7 +119,7 @@ fn number() -> Value {
 }
 
 fn int() -> Value {
-    json!({ "type": "integer", "format": "int32" })
+    json!({ "type": "integer", "format": "uint32", "minimum": 0, "maximum": 4294967295u64 })
 }
 
 #[test]
@@ -378,7 +378,7 @@ fn an_internally_tagged_map_variant_is_one_satisfiable_object() {
             "type": "object",
             "properties": { "type": { "type": "string", "enum": ["map"] } },
             "required": ["type"],
-            "additionalProperties": { "type": "integer", "format": "int32" }
+            "additionalProperties": int()
         })
     );
     assert!(schema["oneOf"][1]["allOf"].is_array());
@@ -392,10 +392,7 @@ struct Wrapper {
 
 #[test]
 fn a_transparent_struct_has_its_field_schema() {
-    assert_eq!(
-        Wrapper::schema(),
-        json!({ "type": "integer", "format": "int32" })
-    );
+    assert_eq!(Wrapper::schema(), int());
 }
 
 #[derive(Serialize, Deserialize, ApiSchema)]

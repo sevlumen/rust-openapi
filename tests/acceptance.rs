@@ -699,7 +699,7 @@ fn openapi_uses_extractor_types_and_response_statuses() {
     );
     assert_eq!(
         document["paths"]["/users/{id}"]["get"]["parameters"][0]["schema"]["format"],
-        "int64"
+        "uint64"
     );
     assert_eq!(
         document["paths"]["/uuid/{id}"]["get"]["parameters"][0]["schema"]["format"],

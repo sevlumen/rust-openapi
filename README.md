@@ -139,6 +139,30 @@ let runtime = app
   HTTP/2 connection errors); a client that disconnects mid-request appears
   there too. It is not called for handler errors.
 
+#### A starting profile for production
+
+The defaults favour correctness over a hard cap: connections are unlimited and
+one h2 connection may hold 200 streams. For a public listener start from
+something like this and size it against your memory budget (worst case buffered
+request memory is about connections x streams x body limit):
+
+```rust
+let runtime = app
+    .build()?
+    .header_read_timeout(Some(Duration::from_secs(75)))   // above the proxy's idle timeout
+    .body_read_timeout(Some(Duration::from_secs(30)))     // raise for slow large uploads
+    .send_timeout(Some(Duration::from_secs(30)))
+    .max_connections(Some(2_000))                         // size to your memory budget
+    .http2_max_concurrent_streams(Some(32))               // feature `http2`
+    .shutdown_timeout(Duration::from_secs(15))
+    .on_connection_error(|error| eprintln!("connection ended: {error}"));
+```
+
+Lower per-route body limits for endpoints that do not take uploads, put a
+reverse proxy or load balancer in front for TLS termination, request-rate
+limits and slow-client protection at the edge, and add your own shutdown
+signal to long-lived WebSocket handlers (they are not awaited by shutdown).
+
 `CatchPanic` turns a panic in a handler into a `500` problem-details response
 and keeps the connection serving (`app.layer(CatchPanic::new())`, or
 `CatchPanic::with_hook(|message| ...)` to log the message, which is never sent
@@ -556,7 +580,8 @@ cookie-authenticated endpoints (a request with no `Origin` header, which is not
 a browser, is not blocked by that check). `protocols([...])` negotiates a
 subprotocol (the server's first preference the client also offered);
 messages above `max_message_size` (1 MiB by default) end the session; pings are
-answered automatically; `idle_timeout(..)` ends a silent session. Limits:
+answered automatically; `idle_timeout(..)` ends a silent session and drops its
+transport (the connection is released even if your handler keeps the value). Limits:
 HTTP/1.1 only (no RFC 8441 over HTTP/2), no `permessage-deflate`, and after the
 upgrade the connection belongs to your handler task: graceful shutdown does not
 wait for it (watch your own shutdown signal if sessions must be closed

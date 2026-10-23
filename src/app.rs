@@ -793,6 +793,7 @@ impl<S: Send + Sync + 'static> App<S> {
     }
 
     fn add_static_route(&mut self, path: &str, response: StaticResponse) {
+        assert_route_path(path);
         let template = normalize_path(path);
         let segments = parse_template(&template);
         assert!(
@@ -843,10 +844,7 @@ impl<S: Send + Sync + 'static> App<S> {
     where
         H: Handler<S, A>,
     {
-        assert!(
-            path.starts_with('/'),
-            "route path {path:?} must start with '/'"
-        );
+        assert_route_path(path);
         let template = normalize_path(path);
         assert!(
             self.metadata
@@ -941,6 +939,7 @@ impl<S: Send + Sync + 'static> App<S> {
     where
         H: RawHandler<S>,
     {
+        assert_route_path(path);
         let template = normalize_path(path);
         assert!(
             self.metadata
@@ -1190,6 +1189,15 @@ pub(crate) struct Operation {
 /// and `415` for a body, `401` for declared security (not for a layer that
 /// enforces it without `.security(..)`). Raw routes and custom extractors
 /// declare nothing, so they get none.
+/// Every registration path (typed, raw, static) requires an absolute path:
+/// `"health"` would register fine and never match a request.
+fn assert_route_path(path: &str) {
+    assert!(
+        path.starts_with('/'),
+        "route path {path:?} must start with '/'"
+    );
+}
+
 fn framework_errors(
     metadata: &RouteMetadata,
     default_secured: bool,
@@ -1203,6 +1211,7 @@ fn framework_errors(
         errors.push(("400", "Bad Request"));
     }
     if request.request_body.is_some() {
+        errors.push(("408", "Request Timeout"));
         errors.push(("413", "Payload Too Large"));
         errors.push(("415", "Unsupported Media Type"));
     }

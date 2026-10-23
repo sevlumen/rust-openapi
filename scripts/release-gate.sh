@@ -23,6 +23,10 @@ OAS_SOAK_SECS="${OAS_SOAK_SECS:-60}" cargo test --release --features "test-util 
 # The dependency audit is part of the gate: a missing tool fails it.
 cargo deny --version >/dev/null 2>&1 || { echo "release-gate: cargo-deny is required (cargo install cargo-deny --locked)" >&2; exit 1; }
 cargo deny check
+# Public API compatibility against the latest release on crates.io (the README
+# promises this check). `oas-rs` only: a proc-macro crate has no checkable API surface. The baseline is fetched from the registry.
+cargo semver-checks --version >/dev/null 2>&1 || { echo "release-gate: cargo-semver-checks is required (cargo install cargo-semver-checks --locked)" >&2; exit 1; }
+cargo semver-checks check-release -p oas-rs
 # The send_timeout socket-fill tests are ignored on Windows (its loopback never
 # blocks a write), so they must run on Linux: natively, or in Docker elsewhere.
 if [ "$(uname -s)" = "Linux" ]; then
