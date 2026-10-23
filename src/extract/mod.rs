@@ -117,7 +117,7 @@ where
                 "required": true,
                 "content": {
                     "application/json": {
-                        "schema": T::schema_with(registry)
+                        "schema": T::request_schema_with(registry)
                     }
                 }
             })),

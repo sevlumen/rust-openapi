@@ -15,6 +15,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo +1.88 check --workspace --all-targets --all-features
 cargo test --workspace --all-targets
+# Feature matrix: the library alone, and each feature alone, must build clean
+# (code behind one feature leaking into another shows up as dead code or a
+# missing import only in these subsets).
+cargo clippy --lib --no-default-features -- -D warnings
+for feature in uuid test-util swagger multipart tls compression compression-brotli static-files websocket http2; do
+  cargo clippy --lib --features "$feature" -- -D warnings
+done
 cargo test --workspace --all-targets --features "$FEATURES"
 cargo test --doc --workspace --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features

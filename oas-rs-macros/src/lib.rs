@@ -51,11 +51,11 @@ fn schema_name(attrs: &[syn::Attribute], default: &Ident) -> syn::Result<String>
 /// Derives `ApiSchema` (and `OpenApiQuery`) for a struct or enum, reading the
 /// `serde` attributes and `#[api_schema(..)]`; see the crate README for the list.
 ///
-/// One schema serves requests and responses, which sets two limits to know:
+/// A type gets one schema, or two when what serde reads is stricter than what
+/// it writes: a `skip_serializing_if` field without a `default` may be missing
+/// from a response but not from a request, so request bodies use a separate
+/// `{Name}Input` component (see `ApiSchema::request_schema_with`). Limits:
 ///
-/// - `skip_serializing_if` makes a field not `required`, so the document
-///   allows a request body without it even when the type has no `default` and
-///   deserializing would reject that body (give such a field a `default`).
 /// - `with`, `serialize_with` and `deserialize_with` change what is on the
 ///   wire but the derive cannot see the new type, so it documents the Rust
 ///   field type: a `u64` written as a string is described as an integer.
@@ -102,6 +102,20 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
 fn schema_impl(name: &Ident, component: &str, body: TokenStream2) -> TokenStream2 {
     let json = json();
     quote! {
+        impl #name {
+            /// The schema body; `__oas_request` selects the request-side form
+            /// (see `ApiSchema::request_schema_with`).
+            #[doc(hidden)]
+            #[allow(dead_code, clippy::all)]
+            fn __oas_schema_body(
+                __oas_registry: &mut ::oas_rs::SchemaRegistry,
+                __oas_request: bool,
+            ) -> #json::Value {
+                let _ = (&__oas_registry, __oas_request);
+                #body
+            }
+        }
+
         impl ::oas_rs::ApiSchema for #name {
             fn schema() -> #json::Value {
                 <Self as ::oas_rs::ApiSchema>::schema_with(&mut ::oas_rs::SchemaRegistry::inline())
@@ -109,10 +123,29 @@ fn schema_impl(name: &Ident, component: &str, body: TokenStream2) -> TokenStream
 
             fn schema_with(__oas_registry: &mut ::oas_rs::SchemaRegistry) -> #json::Value {
                 __oas_registry.define::<Self>(#component, |__oas_registry| {
-                    let _ = &__oas_registry;
-                    #body
+                    Self::__oas_schema_body(__oas_registry, false)
                 })
             }
+
+            fn request_schema_with(__oas_registry: &mut ::oas_rs::SchemaRegistry) -> #json::Value {
+                __oas_registry.define_input::<Self>(
+                    #component,
+                    |__oas_registry| Self::__oas_schema_body(__oas_registry, false),
+                    |__oas_registry| Self::__oas_schema_body(__oas_registry, true),
+                )
+            }
+        }
+    }
+}
+
+/// A schema expression for the type `ty`, choosing the request-side form when
+/// the enclosing body is being built for a request (`__oas_request`).
+fn schema_call(ty: &impl quote::ToTokens) -> TokenStream2 {
+    quote! {
+        if __oas_request {
+            <#ty as ::oas_rs::ApiSchema>::request_schema_with(__oas_registry)
+        } else {
+            <#ty as ::oas_rs::ApiSchema>::schema_with(__oas_registry)
         }
     }
 }
@@ -151,7 +184,13 @@ fn object_schema<'a>(
                     // Inline (not a `$ref`): a flattened struct is merged into
                     // this object, and its own `additionalProperties: false`
                     // is dropped by `flatten_schema`.
-                    <#schema_type as ::oas_rs::ApiSchema>::schema(),
+                    if __oas_request {
+                        <#schema_type as ::oas_rs::ApiSchema>::request_schema_with(
+                            &mut ::oas_rs::SchemaRegistry::inline(),
+                        )
+                    } else {
+                        <#schema_type as ::oas_rs::ApiSchema>::schema()
+                    },
                     #is_optional,
                 );
             });
@@ -170,15 +209,25 @@ fn object_schema<'a>(
         } else {
             quote! {}
         };
-        let is_required = !(is_optional
-            || serde.default
-            || container_default
-            || serde.skip_serializing_if
-            || serde.skip_deserializing);
-        let require = is_required.then(|| quote! { __oas_required.push(#wire.to_owned()); });
+        let is_required =
+            !(is_optional || serde.default || container_default || serde.skip_deserializing);
+        // A response may omit a `skip_serializing_if` field; a request may not
+        // (serde fails to deserialize it without a `default`).
+        let require = is_required.then(|| {
+            if serde.skip_serializing_if {
+                quote! {
+                    if __oas_request {
+                        __oas_required.push(#wire.to_owned());
+                    }
+                }
+            } else {
+                quote! { __oas_required.push(#wire.to_owned()); }
+            }
+        });
+        let property_schema = schema_call(field_type);
         statements.push(quote! {
             {
-                let mut __oas_property = <#field_type as ::oas_rs::ApiSchema>::schema_with(__oas_registry);
+                let mut __oas_property = #property_schema;
                 #decorate
                 if let #json::Value::Object(__oas_object) = &mut __oas_property {
                     #direction
@@ -454,14 +503,11 @@ fn derive_enum(
             Fields::Unit => None,
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                 let ty = &fields.unnamed[0].ty;
-                Some(quote! { <#ty as ::oas_rs::ApiSchema>::schema_with(__oas_registry) })
+                Some(schema_call(ty))
             }
             Fields::Unnamed(fields) => {
                 let count = fields.unnamed.len();
-                let items = fields.unnamed.iter().map(|field| {
-                    let ty = &field.ty;
-                    quote! { <#ty as ::oas_rs::ApiSchema>::schema_with(__oas_registry) }
-                });
+                let items = fields.unnamed.iter().map(|field| schema_call(&field.ty));
                 Some(quote! {
                     #json::json!({
                         "type": "array",
@@ -513,6 +559,7 @@ fn derive_enum(
                 )?,
                 Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                     let (ty, _) = option_inner(&fields.unnamed[0].ty);
+                    let flattened_schema = schema_call(ty);
                     quote! {
                         {
                             let mut __oas_schema = #json::Map::new();
@@ -526,7 +573,7 @@ fn derive_enum(
                             ::oas_rs::__private::flatten_schema(
                                 &mut __oas_schema,
                                 &mut __oas_all_of,
-                                <#ty as ::oas_rs::ApiSchema>::schema_with(__oas_registry),
+                                #flattened_schema,
                                 false,
                             );
                             if !__oas_all_of.is_empty() {
@@ -619,6 +666,10 @@ fn derive_transparent<'a>(
 
             fn schema_with(__oas_registry: &mut ::oas_rs::SchemaRegistry) -> #json::Value {
                 <#ty as ::oas_rs::ApiSchema>::schema_with(__oas_registry)
+            }
+
+            fn request_schema_with(__oas_registry: &mut ::oas_rs::SchemaRegistry) -> #json::Value {
+                <#ty as ::oas_rs::ApiSchema>::request_schema_with(__oas_registry)
             }
         }
 

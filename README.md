@@ -235,8 +235,9 @@ default), internally tagged (`tag = "..."`) and adjacently tagged (`tag` and
 
 Serde attributes reflected in the schema: `rename`, `rename_all`, `skip`
 (field omitted), `skip_serializing` (`writeOnly`), `skip_deserializing`
-(`readOnly`, not required), `default` and `skip_serializing_if` (not
-required), `flatten` (merged with `allOf`), and the enum `tag`/`content`/
+(`readOnly`, not required), `default` (not required) and
+`skip_serializing_if` (not required in a response, required in a request
+unless the field has a `default`: see below), `flatten` (merged with `allOf`), and the enum `tag`/`content`/
 `untagged` forms. Doc comments become `description`s. Field-level
 `#[api_schema(...)]` adds `description`, `example`, `minimum`, `maximum`,
 `min_length`, `max_length`, `pattern`, `min_items`, `max_items`, `format` and
@@ -263,8 +264,15 @@ is a compile error (one schema serves both directions).
 Not interpreted: `alias`, `with`, `serialize_with`/`deserialize_with`,
 `bound`, and generic types (the derive reports an error: implement
 `ApiSchema` by hand). A `flatten`ed externally tagged enum with unit variants
-is not representable. `skip_serializing_if` and `skip_deserializing` make a
-field not `required`, which also loosens what request bodies must contain.
+is not representable. `skip_deserializing` makes a field not `required`.
+
+A type whose request and response differ (a `skip_serializing_if` field without
+a `default`: a response may omit it, deserializing a request without it fails)
+has two schemas: `Name` for what it writes and `NameInput` for what it reads,
+used where the type is a `Json` request body, and by every type that contains
+it. A type without such a field keeps a single schema. In a cycle of types that
+refer to each other (not to themselves), a reference back into the cycle points
+at the response schema of the type that is still being built.
 
 Named schemas (structs and enums that derive `ApiSchema`) are written once under
 `components.schemas` and referenced with `$ref`, so a type used in several

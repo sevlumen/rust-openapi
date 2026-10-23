@@ -20,6 +20,16 @@ pub trait ApiSchema {
         let _ = registry;
         Self::schema()
     }
+
+    /// The schema of this type as a *request* body. It differs from
+    /// [`schema_with`](Self::schema_with) only where what serde reads is
+    /// stricter than what it writes (a `skip_serializing_if` field without a
+    /// `default` may be missing from a response but not from a request). The
+    /// default returns `schema_with`; a wrapper type must forward to the inner
+    /// type's `request_schema_with`, like `schema_with`.
+    fn request_schema_with(registry: &mut SchemaRegistry) -> Value {
+        Self::schema_with(registry)
+    }
 }
 
 /// Collects the named schemas of an OpenAPI document (`components.schemas`).
@@ -33,6 +43,17 @@ pub struct SchemaRegistry {
     conflicts: Vec<String>,
     /// Types being inlined right now (recursion guard in inline mode).
     stack: Vec<&'static str>,
+    /// The request-side schema of each type that has one (see `define_input`).
+    inputs: HashMap<&'static str, InputState>,
+}
+
+enum InputState {
+    /// Being built; `differs` is the current assumption for a reference met
+    /// while building (a type that contains itself).
+    Building {
+        differs: bool,
+    },
+    Done(Value),
 }
 
 impl SchemaRegistry {
@@ -43,6 +64,7 @@ impl SchemaRegistry {
             owners: HashMap::new(),
             conflicts: Vec::new(),
             stack: Vec::new(),
+            inputs: HashMap::new(),
         }
     }
 
@@ -91,6 +113,65 @@ impl SchemaRegistry {
             }
         }
         json!({ "$ref": format!("#/components/schemas/{name}") })
+    }
+
+    /// Like [`define`](Self::define) for a type whose request-side schema may
+    /// differ from the one it writes: `output` builds the schema under `name`;
+    /// `input` builds the request-side one (its nested types call
+    /// `request_schema_with`). When both are equal the result is the `$ref` to
+    /// `name`; otherwise the request side is registered as `{name}Input` and
+    /// that `$ref` is returned. In a cycle of types, a reference back to a type
+    /// still being built assumes the two are equal first and the type is built
+    /// again if they turn out not to be.
+    pub fn define_input<T: ?Sized>(
+        &mut self,
+        name: &str,
+        output: impl Fn(&mut SchemaRegistry) -> Value,
+        input: impl Fn(&mut SchemaRegistry) -> Value,
+    ) -> Value {
+        let owner = std::any::type_name::<T>();
+        if self.inline {
+            return self.define::<T>(name, input);
+        }
+        let reference =
+            |component: &str| json!({ "$ref": format!("#/components/schemas/{component}") });
+        match self.inputs.get(owner) {
+            Some(InputState::Done(schema)) => return schema.clone(),
+            Some(InputState::Building { differs }) => {
+                return if *differs {
+                    reference(&format!("{name}Input"))
+                } else {
+                    reference(name)
+                };
+            }
+            None => {}
+        }
+        self.inputs
+            .insert(owner, InputState::Building { differs: false });
+        let output_ref = self.define::<T>(name, &output);
+        let built = input(self);
+        let result = if self.definitions.get(name) == Some(&built) {
+            output_ref
+        } else {
+            self.inputs
+                .insert(owner, InputState::Building { differs: true });
+            let built = input(self);
+            let input_name = format!("{name}Input");
+            match self.owners.get(&input_name) {
+                Some(existing) if *existing != owner => {
+                    if !self.conflicts.contains(&input_name) {
+                        self.conflicts.push(input_name.clone());
+                    }
+                }
+                _ => {
+                    self.owners.insert(input_name.clone(), owner);
+                    self.definitions.insert(input_name.clone(), built);
+                }
+            }
+            reference(&input_name)
+        };
+        self.inputs.insert(owner, InputState::Done(result.clone()));
+        result
     }
 
     pub(crate) fn definitions(&self) -> &std::collections::BTreeMap<String, Value> {
@@ -168,6 +249,10 @@ impl<T: ApiSchema> ApiSchema for Option<T> {
         // enum with a unit variant, `Value`, another `Option`) a `null` would
         // match both alternatives and `oneOf` would reject it.
         json!({ "anyOf": [T::schema_with(registry), { "type": "null" }] })
+    }
+
+    fn request_schema_with(registry: &mut SchemaRegistry) -> Value {
+        json!({ "anyOf": [T::request_schema_with(registry), { "type": "null" }] })
     }
 }
 
@@ -263,6 +348,10 @@ impl<T: ApiSchema> ApiSchema for Vec<T> {
     fn schema_with(registry: &mut SchemaRegistry) -> Value {
         json!({ "type": "array", "items": T::schema_with(registry) })
     }
+
+    fn request_schema_with(registry: &mut SchemaRegistry) -> Value {
+        json!({ "type": "array", "items": T::request_schema_with(registry) })
+    }
 }
 
 impl<T: ApiSchema + ?Sized> ApiSchema for &T {
@@ -272,6 +361,10 @@ impl<T: ApiSchema + ?Sized> ApiSchema for &T {
 
     fn schema_with(registry: &mut SchemaRegistry) -> Value {
         T::schema_with(registry)
+    }
+
+    fn request_schema_with(registry: &mut SchemaRegistry) -> Value {
+        T::request_schema_with(registry)
     }
 }
 
@@ -332,6 +425,10 @@ impl<T: ApiSchema + ?Sized> ApiSchema for Box<T> {
     fn schema_with(registry: &mut SchemaRegistry) -> Value {
         T::schema_with(registry)
     }
+
+    fn request_schema_with(registry: &mut SchemaRegistry) -> Value {
+        T::request_schema_with(registry)
+    }
 }
 
 impl<V: ApiSchema> ApiSchema for std::collections::HashMap<String, V> {
@@ -342,6 +439,10 @@ impl<V: ApiSchema> ApiSchema for std::collections::HashMap<String, V> {
     fn schema_with(registry: &mut SchemaRegistry) -> Value {
         json!({ "type": "object", "additionalProperties": V::schema_with(registry) })
     }
+
+    fn request_schema_with(registry: &mut SchemaRegistry) -> Value {
+        json!({ "type": "object", "additionalProperties": V::request_schema_with(registry) })
+    }
 }
 
 impl<V: ApiSchema> ApiSchema for std::collections::BTreeMap<String, V> {
@@ -351,6 +452,10 @@ impl<V: ApiSchema> ApiSchema for std::collections::BTreeMap<String, V> {
 
     fn schema_with(registry: &mut SchemaRegistry) -> Value {
         json!({ "type": "object", "additionalProperties": V::schema_with(registry) })
+    }
+
+    fn request_schema_with(registry: &mut SchemaRegistry) -> Value {
+        json!({ "type": "object", "additionalProperties": V::request_schema_with(registry) })
     }
 }
 

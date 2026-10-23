@@ -311,8 +311,9 @@ async fn mixed_load_for_a_while_is_always_correct_and_returns_every_slot() {
     let ok = tally.ok.load(Ordering::Relaxed);
     let failed = tally.failed.load(Ordering::Relaxed);
     eprintln!(
-        "soak: {ok} correct answers, {failed} failures in {} s",
-        seconds()
+        "soak: {ok} correct answers, {failed} failures in {} s{}",
+        seconds(),
+        peak_rss().map_or_else(String::new, |kib| format!(", peak RSS {kib} KiB"))
     );
     assert_eq!(failed, 0, "{failed} of {} operations failed", ok + failed);
     assert!(ok > 100, "the soak did almost nothing: {ok}");
@@ -347,4 +348,11 @@ async fn mixed_load_for_a_while_is_always_correct_and_returns_every_slot() {
         "shutdown took {:?}",
         finished.duration_since(started)
     );
+}
+
+/// The process's peak resident set size in KiB (Linux only: `VmHWM`).
+fn peak_rss() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("VmHWM:"))?;
+    line.split_whitespace().nth(1)?.parse().ok()
 }

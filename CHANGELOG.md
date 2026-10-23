@@ -15,6 +15,12 @@ All notable changes to this project are documented here. The format follows
 - Routes with a buffered request body document `408 Request Timeout` (the `body_read_timeout` response).
 - `WebSocket`: after an idle timeout the transport is dropped (after the bounded close frame), so the connection is
   released at once even if the handler keeps the value; `send`/`close` then fail as closed.
+- OpenAPI: a type whose request differs from its response gets two schemas. A `skip_serializing_if` field without a
+  `default` may be missing from a response but deserializing a request without it fails, so `Json` request bodies
+  reference `{Name}Input` (required includes the field) while responses keep `{Name}`. Types without such a field,
+  and everything that does not contain one, keep a single schema. New `ApiSchema::request_schema_with` (default:
+  `schema_with`) and `SchemaRegistry::define_input`; wrappers (`Option`, `Vec`, `Box`, `&T`, maps) forward it.
+  `ApiSchema::schema()` is unchanged.
 
 ### Fixed
 
@@ -38,9 +44,12 @@ All notable changes to this project are documented here. The format follows
 - Linux 30 min soak: 618,877 correct answers, 0 failures, RSS 7.4-8.07 MB. Not a benchmark: that needs a dedicated host.
 - Linux 2 h soak (Docker `rust:1.88`, `OAS_SOAK_SECS=7200`, mixed HTTP/1.1, h2 and WebSocket load): 2,474,274 correct answers,
   0 failures, every slot returned; container memory flat at about 601 MiB. Docker on a desktop is not a dedicated host.
+- Linux 5 min soak with the peak-RSS report: 102,372 correct answers, 0 failures, peak RSS 8,900 KiB.
 
 ### Tooling
 
+- `scripts/release-gate.sh` also runs `cargo semver-checks` against the latest release and clippy `-D warnings` on
+  the library with no features and with each feature alone; the soak reports its peak RSS on Linux (`VmHWM`).
 - `scripts/release-gate.sh` checks the package list of both crates and writes `release-gate-<sha>.log`
   (git-ignored) to attach to the GitHub Release as evidence.
 
