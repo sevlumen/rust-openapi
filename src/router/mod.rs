@@ -138,7 +138,7 @@ pub(crate) enum CaptureMode {
 }
 
 #[repr(u8)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BodyMode {
     None,
     Buffered,

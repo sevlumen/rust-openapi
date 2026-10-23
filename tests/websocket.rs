@@ -567,3 +567,60 @@ async fn an_idle_timeout_is_bounded_when_the_peer_stopped_reading() {
     );
     let _ = stop.send(());
 }
+
+/// After an idle timeout the transport is gone, so the session must stop
+/// counting toward `max_connections` even though the handler keeps the value.
+#[tokio::test]
+async fn an_idle_timeout_returns_the_connection_slot() {
+    let mut app = App::new();
+    app.raw(
+        Method::GET,
+        "/ws",
+        |request: Request<Incoming>| async move {
+            WebSocketUpgrade::new(request)
+                .idle_timeout(Duration::from_millis(150))
+                .on_upgrade(|mut socket| async move {
+                    let _ = socket.recv().await; // the timeout
+                    tokio::time::sleep(Duration::from_secs(20)).await;
+                    drop(socket);
+                })
+        },
+    );
+    app.raw(Method::GET, "/ping", |_request: Request<Incoming>| async {
+        "pong"
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let runtime = app
+        .build()
+        .unwrap()
+        .max_connections(Some(1))
+        .shutdown_timeout(Duration::from_millis(500));
+    let (stop, stopped) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let _ = runtime
+            .serve_listener(listener, async {
+                let _ = stopped.await;
+            })
+            .await;
+    });
+    let (_client, _) = connect(addr, &[]).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await; // idle timeout fired
+    // With the only slot taken by a dead session the next request would wait
+    // for the handler's 20 s; it must be served now.
+    let served = tokio::time::timeout(Duration::from_secs(3), async {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /ping HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut out = String::new();
+        stream.read_to_string(&mut out).await.unwrap();
+        out
+    })
+    .await;
+    let response = served.expect("the slot was not returned after the idle timeout");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    let _ = stop.send(());
+}

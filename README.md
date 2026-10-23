@@ -270,9 +270,8 @@ A type whose request and response differ (a `skip_serializing_if` field without
 a `default`: a response may omit it, deserializing a request without it fails)
 has two schemas: `Name` for what it writes and `NameInput` for what it reads,
 used where the type is a `Json` request body, and by every type that contains
-it. A type without such a field keeps a single schema. In a cycle of types that
-refer to each other (not to themselves), a reference back into the cycle points
-at the response schema of the type that is still being built.
+it, also through a cycle of types that refer to each other. A type without such
+a field keeps a single schema.
 
 Named schemas (structs and enums that derive `ApiSchema`) are written once under
 `components.schemas` and referenced with `$ref`, so a type used in several
@@ -594,7 +593,8 @@ HTTP/1.1 only (no RFC 8441 over HTTP/2), no `permessage-deflate`, and after the
 upgrade the connection belongs to your handler task: graceful shutdown does not
 wait for it (watch your own shutdown signal if sessions must be closed
 politely), `header_read_timeout` no longer applies, and a panic in the handler
-is not seen by `CatchPanic`. An open session keeps its `max_connections` slot.
+is not seen by `CatchPanic`. An open session keeps its `max_connections` slot; it is returned when the
+session ends, or at an `idle_timeout`.
 The route appears in the OpenAPI document as a `101` response; its `400`,
 `403` and `426` rejections are not listed.
 

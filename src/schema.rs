@@ -45,14 +45,17 @@ pub struct SchemaRegistry {
     stack: Vec<&'static str>,
     /// The request-side schema of each type that has one (see `define_input`).
     inputs: HashMap<&'static str, InputState>,
+    /// Types whose request form is known to differ from their output.
+    input_differs: std::collections::HashSet<&'static str>,
+    /// Types referred to while being built, on the assumption they do not differ.
+    assumed_same: std::collections::HashSet<&'static str>,
+    /// Types finished (and the `{Name}Input` they registered), in order.
+    completed: Vec<(&'static str, Option<String>)>,
 }
 
 enum InputState {
-    /// Being built; `differs` is the current assumption for a reference met
-    /// while building (a type that contains itself).
-    Building {
-        differs: bool,
-    },
+    /// Being built (a reference met meanwhile is a cycle).
+    Building,
     Done(Value),
 }
 
@@ -65,6 +68,9 @@ impl SchemaRegistry {
             conflicts: Vec::new(),
             stack: Vec::new(),
             inputs: HashMap::new(),
+            input_differs: Default::default(),
+            assumed_same: Default::default(),
+            completed: Vec::new(),
         }
     }
 
@@ -120,9 +126,12 @@ impl SchemaRegistry {
     /// `input` builds the request-side one (its nested types call
     /// `request_schema_with`). When both are equal the result is the `$ref` to
     /// `name`; otherwise the request side is registered as `{name}Input` and
-    /// that `$ref` is returned. In a cycle of types, a reference back to a type
-    /// still being built assumes the two are equal first and the type is built
-    /// again if they turn out not to be.
+    /// that `$ref` is returned.
+    ///
+    /// In a cycle of types, a reference back to a type still being built
+    /// first assumes that its two forms are equal. If the type then turns out
+    /// to differ, everything built since it started (which may have used the
+    /// wrong assumption) is discarded and built again, knowing it differs.
     pub fn define_input<T: ?Sized>(
         &mut self,
         name: &str,
@@ -137,26 +146,38 @@ impl SchemaRegistry {
             |component: &str| json!({ "$ref": format!("#/components/schemas/{component}") });
         match self.inputs.get(owner) {
             Some(InputState::Done(schema)) => return schema.clone(),
-            Some(InputState::Building { differs }) => {
-                return if *differs {
+            Some(InputState::Building) => {
+                return if self.input_differs.contains(owner) {
                     reference(&format!("{name}Input"))
                 } else {
+                    self.assumed_same.insert(owner);
                     reference(name)
                 };
             }
             None => {}
         }
-        self.inputs
-            .insert(owner, InputState::Building { differs: false });
+        let started_at = self.completed.len();
+        self.inputs.insert(owner, InputState::Building);
         let output_ref = self.define::<T>(name, &output);
-        let built = input(self);
-        let result = if self.definitions.get(name) == Some(&built) {
-            output_ref
+        let mut built = input(self);
+        let input_name = format!("{name}Input");
+        let (result, defined) = if self.definitions.get(name) == Some(&built) {
+            (output_ref, None)
         } else {
-            self.inputs
-                .insert(owner, InputState::Building { differs: true });
-            let built = input(self);
-            let input_name = format!("{name}Input");
+            self.input_differs.insert(owner);
+            if self.assumed_same.remove(owner) {
+                // Something built meanwhile referred to this type as if it
+                // were unchanged: forget what was completed since, and redo
+                // this one knowing that it differs.
+                for (done, component) in self.completed.split_off(started_at) {
+                    self.inputs.remove(done);
+                    if let Some(component) = component {
+                        self.definitions.remove(&component);
+                        self.owners.remove(&component);
+                    }
+                }
+                built = input(self);
+            }
             match self.owners.get(&input_name) {
                 Some(existing) if *existing != owner => {
                     if !self.conflicts.contains(&input_name) {
@@ -168,9 +189,10 @@ impl SchemaRegistry {
                     self.definitions.insert(input_name.clone(), built);
                 }
             }
-            reference(&input_name)
+            (reference(&input_name), Some(input_name))
         };
         self.inputs.insert(owner, InputState::Done(result.clone()));
+        self.completed.push((owner, defined));
         result
     }
 

@@ -5,6 +5,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [Unreleased]
+
+## [0.9.13] - 2026-10-23
+
+### Fixed
+
+- OpenAPI: `{Name}Input` is exact through a cycle of types that refer to each other. A reference back into the
+  cycle used to point at the response schema of the type being built, so a request schema could accept a body
+  serde rejects (`A -> B -> A` with a `skip_serializing_if` field on `B`). Types found to differ are built again.
+- OpenAPI: `408 Request Timeout` is documented only for bodies the framework buffers. A raw route documented with
+  `multipart_fields` reads its own body and gets no `body_read_timeout`, so it no longer lists a `408`.
+- `WebSocket`: an idle timeout returns the connection's `max_connections` slot together with the transport,
+  instead of holding it until the handler drops the value.
+
 ## [0.9.12] - 2026-10-23
 
 ### Changed

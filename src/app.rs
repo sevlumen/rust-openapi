@@ -174,9 +174,19 @@ impl<S: Send + Sync + 'static> App<S> {
             .is_some_and(|config| !config.default_security.is_empty());
         if documents_errors
             && self.schemas.definitions().contains_key("Problem")
-            && self.metadata.iter().any(|metadata| {
-                !metadata.builtin && !framework_errors(metadata, default_secured).is_empty()
-            })
+            && self
+                .metadata
+                .iter()
+                .zip(&self.plans)
+                .any(|(metadata, plan)| {
+                    !metadata.builtin
+                        && !framework_errors(
+                            metadata,
+                            plan.body_mode == BodyMode::Buffered,
+                            default_secured,
+                        )
+                        .is_empty()
+                })
         {
             return Err(BuildError::SchemaNameConflict {
                 name: "Problem".to_owned(),
@@ -563,7 +573,7 @@ impl<S: Send + Sync + 'static> App<S> {
             .as_ref()
             .is_some_and(|config| !config.default_security.is_empty());
         let mut uses_problem = false;
-        for metadata in self.metadata.iter() {
+        for (metadata, plan) in self.metadata.iter().zip(&self.plans) {
             if metadata.builtin {
                 continue;
             }
@@ -646,7 +656,8 @@ impl<S: Send + Sync + 'static> App<S> {
             let mut responses = Map::new();
             responses.insert(status, Value::Object(response));
             if document_errors {
-                for (code, description) in framework_errors(metadata, default_secured) {
+                let buffered = plan.body_mode == BodyMode::Buffered;
+                for (code, description) in framework_errors(metadata, buffered, default_secured) {
                     uses_problem = true;
                     responses.insert(
                         code.to_owned(),
@@ -1186,7 +1197,7 @@ pub(crate) struct Operation {
 
 /// The error responses the framework itself can produce for a route, from
 /// what the route declares: `400` for typed parameters or a JSON body, `413`
-/// and `415` for a body, `401` for declared security (not for a layer that
+/// and `415` for a body (plus `408` when the framework buffers it), `401` for declared security (not for a layer that
 /// enforces it without `.security(..)`). Raw routes and custom extractors
 /// declare nothing, so they get none.
 /// Every registration path (typed, raw, static) requires an absolute path:
@@ -1200,6 +1211,7 @@ fn assert_route_path(path: &str) {
 
 fn framework_errors(
     metadata: &RouteMetadata,
+    buffered_body: bool,
     default_secured: bool,
 ) -> Vec<(&'static str, &'static str)> {
     let request = &metadata.operation.request;
@@ -1211,7 +1223,12 @@ fn framework_errors(
         errors.push(("400", "Bad Request"));
     }
     if request.request_body.is_some() {
-        errors.push(("408", "Request Timeout"));
+        // Only a body the framework buffers is bounded by `body_read_timeout`;
+        // a raw handler (even one documented with `multipart_fields`) reads
+        // its own.
+        if buffered_body {
+            errors.push(("408", "Request Timeout"));
+        }
         errors.push(("413", "Payload Too Large"));
         errors.push(("415", "Unsupported Media Type"));
     }

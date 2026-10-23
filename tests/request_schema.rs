@@ -223,3 +223,128 @@ fn a_response_keeps_describing_what_is_written() {
     .unwrap();
     assert!(valid(&response, &document, &written));
 }
+
+// Two types that refer to each other: a reference back into the cycle must
+// point at the request form of the type that differs, at any depth.
+#[derive(Serialize, Deserialize, ApiSchema)]
+struct CycleA {
+    child: Option<Box<CycleB>>,
+}
+
+#[derive(Serialize, Deserialize, ApiSchema)]
+struct CycleB {
+    parent: Option<Box<CycleA>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+}
+
+async fn echo_cycle(Json(a): Json<CycleA>) -> Json<CycleA> {
+    Json(a)
+}
+
+#[test]
+fn mutually_recursive_types_use_the_request_form_at_every_depth() {
+    let mut app = App::new();
+    app.post("/cycle", echo_cycle);
+    let document = app.openapi_document();
+    let request = request_schema(&document, "/cycle");
+    // `tags` is missing from the innermost B (a request would not deserialize).
+    let deep = json!({
+        "child": { "tags": [], "parent": { "child": {} } }
+    });
+    assert!(serde_json::from_value::<CycleA>(deep.clone()).is_err());
+    assert!(
+        !valid(&request, &document, &deep),
+        "the request schema accepts a body serde rejects: {}",
+        document["components"]["schemas"]
+    );
+    let complete = json!({
+        "child": { "tags": [], "parent": { "child": { "tags": [] } } }
+    });
+    assert!(serde_json::from_value::<CycleA>(complete.clone()).is_ok());
+    assert!(valid(&request, &document, &complete));
+}
+
+// A cycle of three where only the last type has the gap, entered from each of
+// the three types (each in its own document, and all together).
+#[derive(Serialize, Deserialize, ApiSchema)]
+struct RingX {
+    next: Option<Box<RingY>>,
+}
+#[derive(Serialize, Deserialize, ApiSchema)]
+struct RingY {
+    next: Option<Box<RingZ>>,
+}
+#[derive(Serialize, Deserialize, ApiSchema)]
+struct RingZ {
+    next: Option<Box<RingX>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+}
+
+async fn ring_x(Json(v): Json<RingX>) -> Json<RingX> {
+    Json(v)
+}
+async fn ring_y(Json(v): Json<RingY>) -> Json<RingY> {
+    Json(v)
+}
+async fn ring_z(Json(v): Json<RingZ>) -> Json<RingZ> {
+    Json(v)
+}
+
+fn ring_document(order: [&str; 3]) -> Value {
+    let mut app = App::new();
+    for entry in order {
+        match entry {
+            "x" => app.post("/x", ring_x),
+            "y" => app.post("/y", ring_y),
+            _ => app.post("/z", ring_z),
+        };
+    }
+    app.openapi_document()
+}
+
+#[test]
+fn a_cycle_of_three_is_exact_from_every_entry_point_and_order() {
+    // Z needs `tags`; a missing one three levels down must be rejected.
+    let bad_x = json!({ "next": { "next": { "tags": [], "next": { "next": { "next": {} } } } } });
+    let good_x = json!({
+        "next": { "next": { "tags": [], "next": { "next": { "next": { "tags": [] } } } } }
+    });
+    assert!(serde_json::from_value::<RingX>(bad_x.clone()).is_err());
+    assert!(serde_json::from_value::<RingX>(good_x.clone()).is_ok());
+    for order in [
+        ["x", "y", "z"],
+        ["z", "y", "x"],
+        ["y", "z", "x"],
+        ["y", "x", "z"],
+    ] {
+        let document = ring_document(order);
+        let request = request_schema(&document, "/x");
+        assert!(!valid(&request, &document, &bad_x), "{order:?}");
+        assert!(valid(&request, &document, &good_x), "{order:?}");
+        // Entered from Z itself, `tags` is required at the top too.
+        let z = request_schema(&document, "/z");
+        assert!(!valid(&z, &document, &json!({})), "{order:?}");
+        assert!(valid(&z, &document, &json!({ "tags": [] })), "{order:?}");
+    }
+}
+
+#[test]
+fn every_registered_input_component_is_referenced() {
+    let document = ring_document(["x", "y", "z"]);
+    let text = serde_json::to_string(&document["paths"]).unwrap();
+    let components = document["components"]["schemas"].as_object().unwrap();
+    for name in components.keys().filter(|name| name.ends_with("Input")) {
+        let reference = format!("#/components/schemas/{name}\"");
+        let used_in_paths = text.contains(&reference);
+        let used_in_components = components
+            .iter()
+            .filter(|(other, _)| *other != name)
+            .any(|(_, schema)| schema.to_string().contains(&reference));
+        assert!(
+            used_in_paths || used_in_components,
+            "{name} is unreferenced"
+        );
+    }
+}

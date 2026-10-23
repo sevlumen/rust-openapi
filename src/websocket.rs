@@ -118,6 +118,10 @@ pub struct WebSocket {
     /// transport has been dropped (released), whatever the handler does next.
     inner: Option<WebSocketStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>>,
     idle: Option<Duration>,
+    /// The connection's `max_connections` slot: held while the session is
+    /// open, returned with the transport (idle timeout) or when this value is
+    /// dropped.
+    permit: Option<crate::runtime::ConnectionPermit>,
 }
 
 impl WebSocket {
@@ -144,6 +148,7 @@ impl WebSocket {
                     )
                     .await;
                     self.inner = None;
+                    self.permit = None;
                     return Some(Err(WebSocketError(tungstenite::Error::Io(
                         std::io::Error::new(std::io::ErrorKind::TimedOut, "websocket idle timeout"),
                     ))));
@@ -228,7 +233,8 @@ impl ResponseMetadata for WebSocketResponse {
 /// - After the upgrade the connection belongs to the handler task: graceful
 ///   shutdown does not wait for it, so watch your own shutdown signal if open
 ///   sessions must be closed politely. The session keeps its
-///   `max_connections` slot until the handler ends. `header_read_timeout` no
+///   `max_connections` slot until the handler ends or an
+///   [`idle_timeout`](Self::idle_timeout) closes it. `header_read_timeout` no
 ///   longer applies, so use [`idle_timeout`](Self::idle_timeout) (each session
 ///   also holds a 128 KiB read buffer).
 /// - A panic in the handler stays on its own task (`CatchPanic` does not see
@@ -315,7 +321,8 @@ impl WebSocketUpgrade {
     /// waiting at most one second, so a peer that has stopped reading cannot
     /// delay [`recv`](WebSocket::recv) longer than that. Then the transport is
     /// dropped, so the connection is released at once even if the handler keeps
-    /// the [`WebSocket`] value; [`WebSocket::send`] and
+    /// the [`WebSocket`] value and the session stops counting toward
+    /// `max_connections`; [`WebSocket::send`] and
     /// [`WebSocket::close`] then fail with an error for which
     /// [`WebSocketError::is_closed`] is true.
     pub fn idle_timeout(mut self, timeout: Duration) -> Self {
@@ -423,7 +430,6 @@ impl WebSocketUpgrade {
             .max_message_size(Some(max_message_size))
             .max_frame_size(Some(max_message_size));
         tokio::spawn(async move {
-            let _permit = permit;
             let Ok(upgraded) = on_upgrade.await else {
                 return;
             };
@@ -432,6 +438,7 @@ impl WebSocketUpgrade {
             handler(WebSocket {
                 inner: Some(inner),
                 idle: idle_timeout,
+                permit,
             })
             .await;
         });
